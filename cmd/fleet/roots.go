@@ -1,0 +1,188 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	fleetv1 "fleet/gen/fleetv1"
+	"fleet/internal/client"
+)
+
+// hostPath makes a user-supplied path suitable for the daemon: relative paths
+// are resolved against the cwd for the local daemon and rejected for remote
+// ones, where the cwd means nothing.
+func hostPath(p string) (string, error) {
+	if filepath.IsAbs(p) {
+		return filepath.Clean(p), nil
+	}
+	if !client.IsLocal(host) {
+		return "", fmt.Errorf("%q is relative; use an absolute path on %s (or root:path)", p, host)
+	}
+	return filepath.Abs(p)
+}
+
+func newRootsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "roots",
+		Short: "List the folders agents may run in",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return withClient(cmd, func(ctx context.Context, c *client.Client) error {
+				roots, err := c.ListRoots(ctx)
+				if err != nil {
+					return err
+				}
+				out := cmd.OutOrStdout()
+				if len(roots) == 0 {
+					fmt.Fprintln(out, "no roots yet (add one with: fleet roots add <path>)")
+					return nil
+				}
+				t := newTable(out, "NAME", "PATH", "ADAPTERS")
+				for _, r := range roots {
+					t.row(r.Name, r.Path, adapterList(r.Adapters))
+				}
+				t.flush()
+				return nil
+			})
+		},
+	}
+
+	var name string
+	var adapters []string
+	add := &cobra.Command{
+		Use:   "add <path>",
+		Short: "Allow agents to run inside a folder",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := hostPath(args[0])
+			if err != nil {
+				return err
+			}
+			return withClient(cmd, func(ctx context.Context, c *client.Client) error {
+				r, err := c.AddRoot(ctx, &fleetv1.AddRootRequest{Path: p, Name: name, Adapters: adapters})
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "added root %s -> %s (adapters: %s)\n", r.Name, r.Path, adapterList(r.Adapters))
+				return nil
+			})
+		},
+	}
+	add.Flags().StringVar(&name, "name", "", "root name (default: folder name)")
+	add.Flags().StringSliceVar(&adapters, "adapters", nil, "adapters allowed here, e.g. claude,codex (default: all)")
+
+	rm := &cobra.Command{
+		Use:     "rm <name>",
+		Aliases: []string{"remove"},
+		Short:   "Remove a root (running agents are not affected)",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return withClient(cmd, func(ctx context.Context, c *client.Client) error {
+				if err := c.RemoveRoot(ctx, args[0]); err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "removed root %s\n", args[0])
+				return nil
+			})
+		},
+	}
+	cmd.AddCommand(add, rm)
+	return cmd
+}
+
+func adapterList(a []string) string {
+	if len(a) == 0 {
+		return "all"
+	}
+	return strings.Join(a, ",")
+}
+
+func newBrowseCmd() *cobra.Command {
+	var hidden bool
+	cmd := &cobra.Command{
+		Use:   "browse [root[/path]]",
+		Short: "List folders inside a root",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return withClient(cmd, func(ctx context.Context, c *client.Client) error {
+				out := cmd.OutOrStdout()
+				if len(args) == 0 {
+					roots, err := c.ListRoots(ctx)
+					if err != nil {
+						return err
+					}
+					for _, r := range roots {
+						fmt.Fprintf(out, "%s/\t%s\n", r.Name, r.Path)
+					}
+					return nil
+				}
+				root, rel, _ := strings.Cut(strings.TrimPrefix(args[0], "/"), "/")
+				r, err := c.Browse(ctx, &fleetv1.BrowseRequest{Root: root, Path: rel, IncludeHidden: hidden})
+				if err != nil {
+					return err
+				}
+				for _, e := range r.Entries {
+					var notes []string
+					if e.IsGitRepo {
+						notes = append(notes, "git")
+					}
+					if e.AgentCount > 0 {
+						notes = append(notes, fmt.Sprintf("%d agent(s)", e.AgentCount))
+					}
+					line := e.Name + "/"
+					if len(notes) > 0 {
+						line += "  (" + strings.Join(notes, ", ") + ")"
+					}
+					fmt.Fprintln(out, line)
+				}
+				return nil
+			})
+		},
+	}
+	cmd.Flags().BoolVarP(&hidden, "all", "a", false, "include hidden folders")
+	return cmd
+}
+
+func newAdaptersCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "adapters",
+		Short: "List agent adapters and whether their CLI is installed",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return withClient(cmd, func(ctx context.Context, c *client.Client) error {
+				list, err := c.ListAdapters(ctx)
+				if err != nil {
+					return err
+				}
+				t := newTable(cmd.OutOrStdout(), "ID", "NAME", "AVAILABLE", "VERSION", "PATH", "FEATURES")
+				for _, a := range list {
+					avail := yesNo(a.Available)
+					if !a.Available && a.UnavailableReason != "" {
+						avail = "no: " + a.UnavailableReason
+					}
+					t.row(a.Id, a.DisplayName, avail, orDash(a.Version), orDash(a.BinaryPath), features(a.Capabilities))
+				}
+				t.flush()
+				return nil
+			})
+		},
+	}
+}
+
+func features(c *fleetv1.AdapterCapabilities) string {
+	var f []string
+	if c.GetActivityState() {
+		f = append(f, "status")
+	}
+	if c.GetInitialPrompt() {
+		f = append(f, "prompt")
+	}
+	if c.GetResume() {
+		f = append(f, "resume")
+	}
+	return orDash(strings.Join(f, ","))
+}

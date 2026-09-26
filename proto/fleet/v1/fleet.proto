@@ -1,0 +1,555 @@
+// Fleet wire protocol, version 1.
+//
+// This file is the contract between the fleet daemon and every client
+// (the fleet CLI, the macOS app, future native apps). See docs/PROTOCOL.md
+// for transport, framing, handshake and pairing details.
+//
+// Summary:
+//   - Every message is a length-prefixed protobuf: a 4-byte big-endian
+//     unsigned length followed by that many bytes. Max frame size 4 MiB.
+//   - Client -> daemon messages are ClientMessage; daemon -> client are
+//     ServerMessage.
+//   - The daemon speaks first with ServerHello. The client must then
+//     authenticate (AuthRequest) or pair (PairRequest) before anything else,
+//     unless ServerHello.auth_required is false (local Unix socket).
+//   - Requests carry a client-chosen non-zero `id`; the matching response
+//     echoes it. Pushed messages (events, terminal output) use id 0.
+//     Fire-and-forget client messages (id 0) never get a reply, not even
+//     an Error.
+syntax = "proto3";
+
+package fleet.v1;
+
+option go_package = "fleet/gen/fleetv1;fleetv1";
+
+// Bump when making incompatible changes. Clients must refuse to talk to a
+// daemon with a different major protocol version.
+enum ProtocolVersion {
+  PROTOCOL_VERSION_UNSPECIFIED = 0;
+  PROTOCOL_VERSION_1 = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Envelopes
+// ---------------------------------------------------------------------------
+
+message ClientMessage {
+  // Request id chosen by the client, echoed on the response. Must be non-zero
+  // for requests that expect a response. 0 for fire-and-forget messages
+  // (TerminalInput, TerminalResize); their failures are not reported.
+  uint64 id = 1;
+
+  oneof msg {
+    // Handshake
+    PairRequest pair = 10;
+    AuthRequest auth = 11;
+    Ping ping = 12;
+
+    // Discovery of what the daemon offers
+    GetInfoRequest get_info = 20;
+    ListAdaptersRequest list_adapters = 21;
+    ListRootsRequest list_roots = 22;
+    AddRootRequest add_root = 23;
+    RemoveRootRequest remove_root = 24;
+    BrowseRequest browse = 25;
+
+    // Agents
+    ListAgentsRequest list_agents = 30;
+    RunAgentRequest run_agent = 31;
+    KillAgentRequest kill_agent = 32;
+    SendTextRequest send_text = 33;
+    SubscribeRequest subscribe = 34;
+
+    // Terminal streaming
+    AttachRequest attach = 40;
+    TerminalInput terminal_input = 41;
+    TerminalResize terminal_resize = 42;
+    DetachRequest detach = 43;
+
+    // Devices / pairing management
+    CreatePairingCodeRequest create_pairing_code = 50;
+    ListDevicesRequest list_devices = 51;
+    RevokeDeviceRequest revoke_device = 52;
+
+    // Internal: sent by `fleet hook` from inside an agent's process tree.
+    // Only accepted on the local Unix socket.
+    HookEvent hook = 60;
+  }
+}
+
+message ServerMessage {
+  // Echoes ClientMessage.id for responses. 0 for pushed messages.
+  uint64 id = 1;
+
+  oneof msg {
+    ServerHello hello = 10;
+    PairResponse pair = 11;
+    AuthResponse auth = 12;
+    Pong pong = 13;
+    // Any request can fail with an Error instead of its normal response.
+    Error error = 14;
+
+    GetInfoResponse get_info = 20;
+    ListAdaptersResponse list_adapters = 21;
+    ListRootsResponse list_roots = 22;
+    AddRootResponse add_root = 23;
+    RemoveRootResponse remove_root = 24;
+    BrowseResponse browse = 25;
+
+    ListAgentsResponse list_agents = 30;
+    RunAgentResponse run_agent = 31;
+    KillAgentResponse kill_agent = 32;
+    SendTextResponse send_text = 33;
+    SubscribeResponse subscribe = 34;
+    // Pushed after SubscribeRequest (id 0).
+    Event event = 35;
+
+    AttachResponse attach = 40;
+    // Pushed while attached (id 0).
+    TerminalOutput terminal_output = 41;
+    // Pushed when an attached terminal ends for any reason (id 0).
+    TerminalClosed terminal_closed = 42;
+    DetachResponse detach = 43;
+
+    CreatePairingCodeResponse create_pairing_code = 50;
+    ListDevicesResponse list_devices = 51;
+    RevokeDeviceResponse revoke_device = 52;
+
+    HookResponse hook = 60;
+  }
+}
+
+message Error {
+  ErrorCode code = 1;
+  string message = 2;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_INTERNAL = 1;
+  ERROR_CODE_INVALID_ARGUMENT = 2;
+  // Unknown agent, root, adapter or device, or a missing directory.
+  ERROR_CODE_NOT_FOUND = 3;
+  ERROR_CODE_ALREADY_EXISTS = 4;
+  // Not authenticated, device revoked, or the message is not allowed on
+  // this transport (PairRequest/AuthRequest on the local socket).
+  ERROR_CODE_UNAUTHENTICATED = 5;
+  ERROR_CODE_PERMISSION_DENIED = 6;
+  // Path is outside every configured root.
+  ERROR_CODE_OUTSIDE_ROOTS = 7;
+  // The adapter's CLI is not installed / not found.
+  ERROR_CODE_ADAPTER_UNAVAILABLE = 8;
+  // Another agent is pinned to that directory.
+  ERROR_CODE_DIRECTORY_BUSY = 9;
+  // Pairing code wrong, expired or exhausted.
+  ERROR_CODE_PAIRING_FAILED = 10;
+  ERROR_CODE_UNSUPPORTED_PROTOCOL = 11;
+}
+
+// ---------------------------------------------------------------------------
+// Handshake
+// ---------------------------------------------------------------------------
+
+// First message on every connection, sent by the daemon unprompted.
+message ServerHello {
+  ProtocolVersion protocol_version = 1;
+  // Stable daemon identity: lowercase hex SHA-256 of the daemon's TLS
+  // certificate (DER). Same value as the mDNS TXT record `id` (service
+  // `_fleet._tcp`; see docs/PROTOCOL.md).
+  string server_id = 2;
+  string server_name = 3;
+  string daemon_version = 4;
+  // 32 random bytes; sign these in AuthRequest.
+  bytes nonce = 5;
+  // false only on the local Unix socket (filesystem permissions are the auth).
+  bool auth_required = 6;
+}
+
+// First-time pairing of a new device, using a code from `fleet pair`.
+//
+// proof = HMAC-SHA256(key = UTF-8(normalized code),
+//                     msg = "fleet-pair-v1" || server_cert_sha256 || device_public_key)
+// where server_cert_sha256 is the 32-byte SHA-256 of the certificate the
+// client actually observed in the TLS handshake. The normalized code is the
+// user's input upper-cased, with dashes, spaces and tabs removed and the
+// look-alikes O -> 0, I -> 1, L -> 1 mapped; it must then be exactly 8
+// characters of "0123456789ABCDEFGHJKMNPQRSTVWXYZ".
+//
+// Before sending the proof, clients must have the user confirm the observed
+// server_cert_sha256 (hex) against the fingerprint `fleet pair` shows (at
+// least its first 16 hex digits). A proof sent to an impostor lets it
+// brute-force the short code offline and pair with the real daemon.
+message PairRequest {
+  string device_name = 1;
+  // Ed25519 public key, 32 bytes. The device keeps the private key.
+  bytes device_public_key = 2;
+  bytes proof = 3;
+  // Free-form, e.g. "macOS 16.1", "fleet-cli linux/amd64".
+  string device_platform = 4;
+}
+
+// On success the device is paired and the connection is authenticated.
+//
+// server_proof = HMAC-SHA256(key = UTF-8(normalized code),
+//                msg = "fleet-pair-server-v1" || server_cert_sha256 || device_public_key)
+// Clients must verify it before trusting (pinning) the server certificate.
+message PairResponse {
+  string device_id = 1;
+  bytes server_proof = 2;
+  string server_id = 3;
+  string server_name = 4;
+}
+
+// Authentication of an already-paired device.
+//
+// signature = Ed25519-Sign(device_private_key,
+//             "fleet-auth-v1" || ServerHello.nonce || server_cert_sha256)
+message AuthRequest {
+  string device_id = 1;
+  bytes signature = 2;
+}
+
+message AuthResponse {
+  string device_name = 1;
+}
+
+message Ping {}
+message Pong {}
+
+// ---------------------------------------------------------------------------
+// Daemon info, adapters, roots, browsing
+// ---------------------------------------------------------------------------
+
+message GetInfoRequest {}
+
+message GetInfoResponse {
+  string server_id = 1;
+  string server_name = 2;
+  string daemon_version = 3;
+  string hostname = 4;
+  string os = 5;   // GOOS
+  string arch = 6; // GOARCH
+  int64 started_at_ms = 7;
+}
+
+message ListAdaptersRequest {}
+
+message ListAdaptersResponse {
+  repeated AdapterInfo adapters = 1;
+}
+
+message AdapterInfo {
+  // Stable id used in RunAgentRequest.adapter: "claude", "codex", "shell", ...
+  string id = 1;
+  string display_name = 2;
+  // Whether the adapter's CLI was found on this machine.
+  bool available = 3;
+  string binary_path = 4;
+  string version = 5;
+  // Human-readable reason when unavailable.
+  string unavailable_reason = 6;
+  AdapterCapabilities capabilities = 7;
+}
+
+message AdapterCapabilities {
+  // The adapter reports fine-grained state (working / idle / needs input)
+  // via hooks or transcripts. Without it, only running/exited is known.
+  bool activity_state = 1;
+  // An initial prompt can be passed at launch.
+  bool initial_prompt = 2;
+  // A previous session can be resumed.
+  bool resume = 3;
+}
+
+message Root {
+  // Short unique name, e.g. "code".
+  string name = 1;
+  // Absolute, symlink-resolved path on the daemon host.
+  string path = 2;
+  // Adapter ids allowed in this root. Empty = all.
+  repeated string adapters = 3;
+}
+
+message ListRootsRequest {}
+message ListRootsResponse {
+  repeated Root roots = 1;
+}
+
+message AddRootRequest {
+  // Absolute path on the daemon host (or relative to the CLI's cwd when sent
+  // by the local CLI - the CLI resolves it before sending).
+  string path = 1;
+  // Optional; defaults to the directory's base name, de-duplicated.
+  string name = 2;
+  repeated string adapters = 3;
+}
+message AddRootResponse {
+  Root root = 1;
+}
+
+message RemoveRootRequest {
+  string name = 1;
+}
+message RemoveRootResponse {}
+
+// Lists sub-directories of a directory inside a root. Files are omitted.
+message BrowseRequest {
+  string root = 1;
+  // Relative to the root, "" or "." for the root itself. Must not escape it.
+  string path = 2;
+  bool include_hidden = 3;
+}
+
+message BrowseResponse {
+  string root = 1;
+  // Normalized relative path that was listed.
+  string path = 2;
+  repeated DirEntry entries = 3;
+}
+
+message DirEntry {
+  string name = 1;
+  // Directory is a git repository (work tree root).
+  bool is_git_repo = 2;
+  // Number of live agents whose cwd is this directory or below.
+  int32 agent_count = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Agents
+// ---------------------------------------------------------------------------
+
+enum AgentState {
+  AGENT_STATE_UNSPECIFIED = 0;
+  // Session created, process not confirmed yet.
+  AGENT_STATE_STARTING = 1;
+  // Running; adapter does not report finer activity (or has not yet).
+  AGENT_STATE_RUNNING = 2;
+  // Agent is actively working on a turn.
+  AGENT_STATE_WORKING = 3;
+  // Agent finished its turn and waits for a new prompt.
+  AGENT_STATE_IDLE = 4;
+  // Agent is blocked on the human: permission prompt or question.
+  AGENT_STATE_NEEDS_INPUT = 5;
+  // Process ended; tmux session has been cleaned up. See exit_code.
+  AGENT_STATE_EXITED = 6;
+  // Could not be started, or vanished unexpectedly.
+  AGENT_STATE_FAILED = 7;
+}
+
+enum Isolation {
+  // Daemon default: WORKTREE if the directory is inside a git repository,
+  // otherwise PINNED.
+  ISOLATION_UNSPECIFIED = 0;
+  // Agent runs directly in the directory. At most one live pinned agent per
+  // directory.
+  ISOLATION_PINNED = 1;
+  // Daemon creates a git worktree on a new branch and runs the agent there.
+  ISOLATION_WORKTREE = 2;
+}
+
+message Agent {
+  // Daemon-assigned, short and stable, e.g. "a1b2c3".
+  string id = 1;
+  // Human-friendly unique name among live agents, e.g. "api-fix".
+  string name = 2;
+  string adapter = 3;
+  // Directory the user asked for (inside a root).
+  string path = 4;
+  string root = 5;
+  // Actual working directory of the process (worktree path or path).
+  string cwd = 6;
+  Isolation isolation = 7;
+  // Set for WORKTREE isolation.
+  string branch = 8;
+  AgentState state = 9;
+  // Short human-readable detail, e.g. the question the agent asks, or why it failed.
+  string state_detail = 10;
+  bool has_exit_code = 11;
+  int32 exit_code = 12;
+  int64 created_at_ms = 13;
+  int64 updated_at_ms = 14;
+  // Adapter's own session id where known (e.g. Claude --session-id).
+  string session_id = 15;
+  // Name of the tmux session on the daemon host (on the fleet tmux socket).
+  string tmux_session = 16;
+  // Number of clients currently attached to its terminal.
+  int32 attached_clients = 17;
+}
+
+message ListAgentsRequest {
+  // Include EXITED / FAILED agents kept in history.
+  bool include_finished = 1;
+}
+message ListAgentsResponse {
+  repeated Agent agents = 1;
+}
+
+message RunAgentRequest {
+  string adapter = 1;
+  // Either a root name plus a path relative to it...
+  string root = 2;
+  string path = 3;
+  // ...or an absolute path (must resolve inside some root). Used when root is empty.
+  string absolute_path = 4;
+  // Optional; generated when empty.
+  string name = 5;
+  Isolation isolation = 6;
+  // Optional branch name for WORKTREE isolation. Default "fleet/<name>".
+  string branch = 7;
+  // Optional initial prompt (if the adapter supports it).
+  string prompt = 8;
+  // Extra CLI arguments appended verbatim to the adapter command.
+  repeated string extra_args = 9;
+  // Initial terminal size; defaults 200x50.
+  uint32 cols = 10;
+  uint32 rows = 11;
+}
+message RunAgentResponse {
+  Agent agent = 1;
+}
+
+message KillAgentRequest {
+  // Agent id or name.
+  string agent = 1;
+  // Also remove the git worktree (WORKTREE isolation only). Refused when the
+  // worktree has uncommitted changes unless force is set.
+  bool remove_worktree = 2;
+  bool force = 3;
+  // Remove the agent from history as well (also works for finished agents).
+  bool forget = 4;
+}
+message KillAgentResponse {
+  Agent agent = 1;
+  // True if the worktree was kept (e.g. uncommitted changes).
+  bool worktree_kept = 2;
+  string worktree_kept_reason = 3;
+}
+
+// Types text into the agent's terminal, e.g. a prompt from a phone.
+message SendTextRequest {
+  string agent = 1;
+  string text = 2;
+  // Press Enter after the text.
+  bool submit = 3;
+}
+message SendTextResponse {}
+
+// Starts pushing Event messages on this connection. The daemon first sends
+// one AgentUpserted per current agent (snapshot), then SnapshotDone, then
+// live changes. A repeated SubscribeRequest on the same connection keeps
+// the one event stream and queues a fresh snapshot and SnapshotDone on it.
+message SubscribeRequest {}
+message SubscribeResponse {}
+
+message Event {
+  oneof kind {
+    Agent agent_upserted = 1;
+    // Agent id.
+    string agent_removed = 2;
+    SnapshotDone snapshot_done = 3;
+    RootsChanged roots_changed = 4;
+  }
+}
+message SnapshotDone {}
+message RootsChanged {
+  repeated Root roots = 1;
+}
+
+// ---------------------------------------------------------------------------
+// Terminal streaming
+//
+// Attaching gives a live view of the agent's terminal (real tmux client on
+// the daemon side). Output is raw terminal bytes (VT/xterm escape sequences)
+// to feed into a terminal emulator. Tip: open a dedicated connection per
+// attached terminal so a busy terminal never delays control messages.
+// ---------------------------------------------------------------------------
+
+message AttachRequest {
+  string agent = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+  // Attach without sending input (keystrokes are rejected).
+  bool read_only = 4;
+}
+message AttachResponse {
+  // Canonical agent id; used in TerminalOutput / TerminalInput.
+  string agent_id = 1;
+}
+
+message TerminalOutput {
+  string agent_id = 1;
+  bytes data = 2;
+}
+
+message TerminalInput {
+  string agent_id = 1;
+  bytes data = 2;
+}
+
+message TerminalResize {
+  string agent_id = 1;
+  uint32 cols = 2;
+  uint32 rows = 3;
+}
+
+message TerminalClosed {
+  string agent_id = 1;
+  string reason = 2;
+}
+
+message DetachRequest {
+  string agent_id = 1;
+}
+message DetachResponse {}
+
+// ---------------------------------------------------------------------------
+// Devices
+// ---------------------------------------------------------------------------
+
+message CreatePairingCodeRequest {
+  // Default and maximum 300. Issuing a code invalidates earlier ones.
+  uint32 ttl_seconds = 1;
+}
+message CreatePairingCodeResponse {
+  // Display form "ABCD-EFGH" (Crockford base32, 40 bits).
+  string code = 1;
+  int64 expires_at_ms = 2;
+  // So the user can check the fingerprint the new device sees.
+  string server_id = 3;
+}
+
+message Device {
+  string id = 1;
+  string name = 2;
+  string platform = 3;
+  int64 paired_at_ms = 4;
+  int64 last_seen_at_ms = 5;
+  bool connected = 6;
+}
+
+message ListDevicesRequest {}
+message ListDevicesResponse {
+  repeated Device devices = 1;
+}
+
+message RevokeDeviceRequest {
+  // Device id or name.
+  string device = 1;
+}
+message RevokeDeviceResponse {}
+
+// ---------------------------------------------------------------------------
+// Hooks (local only)
+// ---------------------------------------------------------------------------
+
+// Sent by `fleet hook <event>` which adapters install into their agent CLI
+// (e.g. Claude Code hooks, Codex notify). The payload is whatever the agent
+// CLI passed to the hook (usually JSON on stdin or as an argument).
+message HookEvent {
+  string agent_id = 1;
+  string adapter = 2;
+  string event = 3;
+  bytes payload = 4;
+}
+message HookResponse {}
