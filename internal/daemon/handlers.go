@@ -203,7 +203,7 @@ func (d *daemon) addRoot(req *fleetv1.AddRootRequest) (*fleetv1.Root, error) {
 		}
 	}
 	d.cfgMu.Lock()
-	r, err := d.cfg.AddRoot(req.GetPath(), req.GetName(), req.GetAdapters())
+	r, err := d.cfg.AddRoot(config.Root{Path: req.GetPath(), Name: req.GetName(), Adapters: req.GetAdapters(), Trust: req.GetTrust()})
 	if err == nil {
 		if err = d.cfg.Save(); err != nil {
 			_ = d.cfg.RemoveRoot(r.Name)

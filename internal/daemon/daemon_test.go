@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -538,4 +539,85 @@ func TestSlowSubscriberDropped(t *testing.T) {
 		t.Fatal("channel not closed")
 	}
 	m.unsubscribe(s) // no double close
+}
+
+func TestScreenPromptAndTrustDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	e := newEnv(t)
+	c := e.dialUnix()
+	out := t.TempDir()
+
+	// A trusted root holding a repository with a linked worktree.
+	trusted, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(trusted, "repo")
+	for _, d := range []string{filepath.Join(repo, "sub"), filepath.Join(trusted, "loose")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-c", "init.defaultBranch=main"}, args...)...)
+		cmd.Dir = repo
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	git("commit", "-q", "--allow-empty", "-m", "init")
+	git("worktree", "add", "-q", "-b", "side", filepath.Join(trusted, "side"))
+	root := c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_AddRoot{AddRoot: &fleetv1.AddRootRequest{
+		Path: trusted, Name: "trusted", Trust: true,
+	}}}).GetAddRoot().GetRoot()
+	if !root.GetTrust() {
+		t.Fatalf("added root: %v", root)
+	}
+
+	// The adapter gets the main checkout as TrustDir, from the repo, a
+	// subdirectory, a user's worktree and a plain folder; nothing in an
+	// untrusted root.
+	e.mkdir("plain")
+	for i, tc := range []struct{ root, path, want string }{
+		{"trusted", "repo/sub", repo},
+		{"trusted", "side", repo},
+		{"trusted", "loose", filepath.Join(trusted, "loose")},
+		{"code", "plain", ""},
+	} {
+		file := filepath.Join(out, fmt.Sprint(i))
+		a := c.run(&fleetv1.RunAgentRequest{Root: tc.root, Path: tc.path, Isolation: isoPinned,
+			ExtraArgs: []string{fmt.Sprintf(`printf %%s "$TEST_TRUST_DIR" > %q; sleep 60`, file)}})
+		waitFor(t, "trust dir file", func() bool { _, err := os.Stat(file); return err == nil })
+		if got, _ := os.ReadFile(file); string(got) != tc.want {
+			t.Errorf("%s:%s: TrustDir = %q, want %q", tc.root, tc.path, got, tc.want)
+		}
+		c.ok(killReq(&fleetv1.KillAgentRequest{Agent: a.GetId(), Forget: true}))
+	}
+
+	// A dialog on the screen makes a starting agent NEEDS_INPUT until it goes.
+	a := c.run(&fleetv1.RunAgentRequest{Root: "code", Path: "plain", Isolation: isoPinned,
+		ExtraArgs: []string{"printf '" + testDialog + "'; read x; clear; read x; printf '" + testDialog + "'; sleep 60"}})
+	c.waitAgent(a.GetId(), "asking", func(a *fleetv1.Agent) bool {
+		return a.GetState() == stateNeedsInput && a.GetStateDetail() == "test dialog"
+	})
+	c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_SendText{SendText: &fleetv1.SendTextRequest{Agent: a.GetId(), Text: "y", Submit: true}}})
+	c.waitAgent(a.GetId(), "running", func(a *fleetv1.Agent) bool {
+		return a.GetState() == stateRunning && a.GetStateDetail() == ""
+	})
+
+	// Once a hook has reported state, the screen is not watched any more.
+	c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_Hook{Hook: &fleetv1.HookEvent{
+		AgentId: a.GetId(), Adapter: "test", Event: "working", Payload: []byte("busy"),
+	}}})
+	c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_SendText{SendText: &fleetv1.SendTextRequest{Agent: a.GetId(), Text: "y", Submit: true}}})
+	time.Sleep(3 * reconcileInterval)
+	if got := c.agent(a.GetId()); got.GetState() != stateWorking {
+		t.Fatalf("after a hook the screen changed the state: %v", got)
+	}
 }

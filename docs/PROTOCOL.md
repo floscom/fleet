@@ -657,10 +657,14 @@ path and version, `unavailable_reason` when not found, and
 Detection results are cached by the daemon. No errors.
 
 **`ListRootsRequest` → `ListRootsResponse`**: configured roots, each with
-`name`, symlink-resolved absolute `path`, and `adapters` (empty = all
-allowed). No errors.
+`name`, symlink-resolved absolute `path`, `adapters` (empty = all
+allowed) and `trust`. With `trust`, the daemon answers the agent CLI's
+"Do you trust this folder?" prompt for agents started in the root (see
+[Agent state machine](#14-agent-state-machine)); a client should say so
+when offering the option, since a trusted project may run its own hooks
+and MCP servers. No errors.
 
-**`AddRootRequest{path, name, adapters}` → `AddRootResponse{root}`**
+**`AddRootRequest{path, name, adapters, trust}` → `AddRootResponse{root}`**
 
 - `path` must be absolute on the daemon host; it is stored
   symlink-resolved. `name` defaults to the folder's base name, made unique
@@ -1006,11 +1010,17 @@ final class AgentTerminalController: NSViewController, TerminalViewDelegate {
     `PermissionRequest` → NEEDS_INPUT; `Stop` → IDLE; legacy `notify`
     turn-complete → IDLE, approval → NEEDS_INPUT.
   - **shell**: no hooks; stays `RUNNING`.
-- **Trust dialogs.** Claude Code and Codex ask whether to trust a folder
-  the first time they run there. No hook fires until the user answers in
-  the terminal, so the agent shows `RUNNING` in the meantime. A client
-  should present `RUNNING` of an `activity_state` adapter as "running, may
-  be waiting in the terminal" and offer to attach.
+- **Startup dialogs.** Claude Code and Codex ask whether to trust a folder
+  the first time they run there, and Codex may ask to review hooks. No hook
+  fires until the user answers in the terminal. The daemon recognizes these
+  dialogs on screen during the first two minutes after start and reports
+  `NEEDS_INPUT` with a `state_detail` such as `"Claude asks whether to
+  trust this folder; answer in its terminal"`. When the dialog goes away
+  the agent returns to `RUNNING` until its hooks report more. The client
+  should offer to attach. In roots with `trust` the folder trust dialog
+  does not appear. A CLI whose dialog text changed shows `RUNNING` while it
+  waits, so a client should still present `RUNNING` of an
+  `activity_state` adapter as "running, may be waiting in the terminal".
 - The daemon checks tmux every second. When the agent process ends, the
   daemon records its exit and kills the session:
   - `EXITED`, `has_exit_code = true`, `exit_code` = the status, detail

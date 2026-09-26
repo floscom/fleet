@@ -22,8 +22,12 @@ import (
 	"fleet/internal/wire"
 )
 
-// testAdapter runs `sh -c <extra args joined>` (default: sleep 60).
+// testAdapter runs `sh -c <extra args joined>` (default: sleep 60), with
+// $TEST_TRUST_DIR set to LaunchRequest.TrustDir. Its DetectPrompt matches
+// testDialog on the screen.
 type testAdapter struct{}
+
+const testDialog = "fleet-test-dialog"
 
 func (testAdapter) ID() string          { return "test" }
 func (testAdapter) DisplayName() string { return "Test" }
@@ -39,7 +43,18 @@ func (testAdapter) Launch(_ context.Context, req adapter.LaunchRequest) (*adapte
 	if script == "" {
 		script = "sleep 60"
 	}
-	return &adapter.LaunchSpec{Argv: []string{"/bin/sh", "-c", script}, SessionID: "sess-" + req.AgentID}, nil
+	return &adapter.LaunchSpec{
+		Argv:      []string{"/bin/sh", "-c", script},
+		Env:       map[string]string{"TEST_TRUST_DIR": req.TrustDir},
+		SessionID: "sess-" + req.AgentID,
+	}, nil
+}
+
+func (testAdapter) DetectPrompt(screen string) (string, bool) {
+	if strings.Contains(screen, testDialog) {
+		return "test dialog", true
+	}
+	return "", false
 }
 
 func (testAdapter) HandleHook(ev adapter.HookEvent) (adapter.StateUpdate, bool) {

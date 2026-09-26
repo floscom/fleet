@@ -41,9 +41,9 @@ func newRootsCmd() *cobra.Command {
 					fmt.Fprintln(out, "no roots yet (add one with: fleet roots add <path>)")
 					return nil
 				}
-				t := newTable(out, "NAME", "PATH", "ADAPTERS")
+				t := newTable(out, "NAME", "PATH", "ADAPTERS", "TRUST")
 				for _, r := range roots {
-					t.row(r.Name, r.Path, adapterList(r.Adapters))
+					t.row(r.Name, r.Path, adapterList(r.Adapters), yesNo(r.Trust))
 				}
 				t.flush()
 				return nil
@@ -53,27 +53,36 @@ func newRootsCmd() *cobra.Command {
 
 	var name string
 	var adapters []string
+	var trust bool
 	add := &cobra.Command{
 		Use:   "add <path>",
 		Short: "Allow agents to run inside a folder",
-		Args:  cobra.ExactArgs(1),
+		Long: `Allow agents to run inside a folder.
+
+With --trust, agents started here skip the agent CLI's own "Do you trust
+this folder?" prompt: before launching, fleet marks the agent's git
+repository (or, outside git, its folder) as trusted for Claude Code and
+Codex, as if you had answered yes. A trusted folder may run its own hooks,
+MCP servers and settings, so only use it for code you trust.`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := hostPath(args[0])
 			if err != nil {
 				return err
 			}
 			return withClient(cmd, func(ctx context.Context, c *client.Client) error {
-				r, err := c.AddRoot(ctx, &fleetv1.AddRootRequest{Path: p, Name: name, Adapters: adapters})
+				r, err := c.AddRoot(ctx, &fleetv1.AddRootRequest{Path: p, Name: name, Adapters: adapters, Trust: trust})
 				if err != nil {
 					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "added root %s -> %s (adapters: %s)\n", r.Name, r.Path, adapterList(r.Adapters))
+				fmt.Fprintf(cmd.OutOrStdout(), "added root %s -> %s (adapters: %s, trust: %s)\n", r.Name, r.Path, adapterList(r.Adapters), yesNo(r.Trust))
 				return nil
 			})
 		},
 	}
 	add.Flags().StringVar(&name, "name", "", "root name (default: folder name)")
 	add.Flags().StringSliceVar(&adapters, "adapters", nil, "adapters allowed here, e.g. claude,codex (default: all)")
+	add.Flags().BoolVar(&trust, "trust", false, "pre-answer the agent CLIs' folder trust prompt for agents started here")
 
 	rm := &cobra.Command{
 		Use:     "rm <name>",

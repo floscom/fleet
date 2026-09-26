@@ -54,6 +54,9 @@ type Root struct {
 	Name     string   `toml:"name"`
 	Path     string   `toml:"path"`
 	Adapters []string `toml:"adapters,omitempty"`
+	// Trust pre-accepts the agent CLIs' folder trust prompt for agents
+	// started here (see fleetv1.Root.trust).
+	Trust bool `toml:"trust,omitempty"`
 }
 
 // AdapterConfig overrides adapter behaviour.
@@ -64,7 +67,7 @@ type AdapterConfig struct {
 
 // Proto converts a root to the wire type.
 func (r Root) Proto() *fleetv1.Root {
-	return &fleetv1.Root{Name: r.Name, Path: r.Path, Adapters: r.Adapters}
+	return &fleetv1.Root{Name: r.Name, Path: r.Path, Adapters: r.Adapters, Trust: r.Trust}
 }
 
 // ErrOutsideRoots is returned when a path is not inside any root.

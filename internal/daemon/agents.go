@@ -47,6 +47,9 @@ type agentRec struct {
 	// Worktree is the git worktree the daemon created (WORKTREE isolation).
 	Worktree        string `json:"worktree,omitempty"`
 	WorktreeRemoved bool   `json:"worktree_removed,omitempty"`
+	// ScreenPrompt is set while NEEDS_INPUT comes from a dialog seen on the
+	// screen (adapter.PromptDetector) rather than from a hook.
+	ScreenPrompt bool `json:"screen_prompt,omitempty"`
 
 	attached int32
 	// busy is set while RunAgent or KillAgent is working on the agent

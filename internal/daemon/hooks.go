@@ -42,7 +42,7 @@ func (m *manager) hook(ev *fleetv1.HookEvent) error {
 		changed = true
 	}
 	if upd.State > stateStarting && isLive(upd.State) && (upd.State != a.State || upd.Detail != a.StateDetail) {
-		a.State, a.StateDetail = upd.State, upd.Detail
+		a.State, a.StateDetail, a.ScreenPrompt = upd.State, upd.Detail, false
 		changed = true
 	}
 	if changed {

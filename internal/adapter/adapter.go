@@ -10,6 +10,8 @@
 //     `fleet hook --agent <id> --adapter <adapter> <event>` and translate those
 //     events in HandleHook.
 //   - initial prompt, resume: advertise them in Capabilities.
+//   - startup dialogs no hook reports (folder trust): implement
+//     PromptDetector, and honour LaunchRequest.TrustDir to skip them.
 package adapter
 
 import (
@@ -37,6 +39,14 @@ type Adapter interface {
 	// HandleHook translates an event delivered by `fleet hook` into a state
 	// change. Return ok=false to ignore the event.
 	HandleHook(ev HookEvent) (update StateUpdate, ok bool)
+}
+
+// PromptDetector is implemented by adapters whose CLI can wait on a dialog
+// that no hook reports, such as a folder trust prompt at startup. The daemon
+// shows the visible screen of a starting agent to DetectPrompt and reports
+// NEEDS_INPUT with the returned detail while it matches.
+type PromptDetector interface {
+	DetectPrompt(screen string) (detail string, ok bool)
 }
 
 // Capabilities mirrors fleetv1.AdapterCapabilities.
@@ -82,6 +92,11 @@ type LaunchRequest struct {
 	// StateDir is a private per-agent directory the adapter may write to
 	// (e.g. generated settings files). Removed when the agent is forgotten.
 	StateDir string
+	// TrustDir, if set, is a directory the user has chosen to trust: the
+	// agent's git repository root (the main one for worktrees) or, outside
+	// git, its directory. The adapter should keep the CLI from asking
+	// whether to trust it.
+	TrustDir string
 }
 
 // LaunchSpec is the command the daemon runs in tmux.

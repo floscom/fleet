@@ -77,7 +77,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	c := &Config{Name: "box", Listen: "", MDNS: &off, TmuxSocket: "x", DefaultIsolation: "pinned",
 		Adapters: map[string]AdapterConfig{"claude": {Binary: "/opt/claude", Args: []string{"--x"}}}}
-	if _, err := c.AddRoot(dir, "code", []string{"claude"}); err != nil {
+	if _, err := c.AddRoot(Root{Path: dir, Name: "code", Adapters: []string{"claude"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Save(); err != nil {
@@ -127,24 +127,24 @@ func TestAddRemoveRoot(t *testing.T) {
 	os.WriteFile(file, nil, 0o600)
 
 	c := &Config{}
-	r1, err := c.AddRoot(link, "", nil)
+	r1, err := c.AddRoot(Root{Path: link})
 	if err != nil || r1.Name != "code" || r1.Path != a {
 		t.Fatalf("AddRoot = %+v, %v", r1, err)
 	}
-	r2, err := c.AddRoot(b, "", nil)
+	r2, err := c.AddRoot(Root{Path: b})
 	if err != nil || r2.Name != "code-2" {
 		t.Fatalf("AddRoot second = %+v, %v", r2, err)
 	}
-	if _, err := c.AddRoot(a, "other", nil); err == nil {
+	if _, err := c.AddRoot(Root{Path: a, Name: "other"}); err == nil {
 		t.Fatal("duplicate path accepted")
 	}
-	if _, err := c.AddRoot(base, "code", nil); err == nil {
+	if _, err := c.AddRoot(Root{Path: base, Name: "code"}); err == nil {
 		t.Fatal("duplicate name accepted")
 	}
-	if _, err := c.AddRoot(file, "", nil); err == nil {
+	if _, err := c.AddRoot(Root{Path: file}); err == nil {
 		t.Fatal("file accepted as root")
 	}
-	if _, err := c.AddRoot(filepath.Join(base, "missing"), "", nil); err == nil {
+	if _, err := c.AddRoot(Root{Path: filepath.Join(base, "missing")}); err == nil {
 		t.Fatal("missing dir accepted")
 	}
 	if err := c.RemoveRoot("code"); err != nil {

@@ -58,6 +58,21 @@ func TestRepoRoot(t *testing.T) {
 	}
 }
 
+func TestMainRoot(t *testing.T) {
+	repo := newRepo(t)
+	ctx := context.Background()
+	wt := filepath.Join(filepath.Dir(repo), "wt")
+	run(t, repo, "worktree", "add", "-q", "-b", "side", wt)
+	for _, dir := range []string{repo, filepath.Join(repo, "pkg", "sub"), wt, filepath.Join(wt, "pkg")} {
+		if got, ok := MainRoot(ctx, dir); !ok || got != repo {
+			t.Errorf("MainRoot(%s) = %q, %v; want %q", dir, got, ok, repo)
+		}
+	}
+	if _, ok := MainRoot(ctx, t.TempDir()); ok {
+		t.Error("MainRoot outside a repository: ok = true")
+	}
+}
+
 func TestAddDirtyRemove(t *testing.T) {
 	ctx := context.Background()
 	repo := newRepo(t)

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	fleetv1 "fleet/gen/fleetv1"
+	"fleet/internal/adapter"
 	"fleet/internal/tmux"
 )
 
@@ -22,6 +23,9 @@ const (
 	// failureLines is how much pane output is kept for a quick failure.
 	failureLines    = 20
 	maxFailureBytes = 2000
+	// promptWatch is how long after starting a RUNNING agent's screen is
+	// checked for dialogs no hook reports (adapter.PromptDetector).
+	promptWatch = 2 * time.Minute
 )
 
 // loop reconciles the registry with tmux until ctx is cancelled.
@@ -164,6 +168,64 @@ func (m *manager) reconcile(ctx context.Context) {
 	if finished {
 		m.mu.Lock()
 		m.trimHistoryLocked()
+		m.mu.Unlock()
+	}
+	m.watchPrompts(ctx, bySession, snap)
+}
+
+// watchPrompts looks at the screens of agents that may sit in a startup
+// dialog no hook reports, such as a folder trust prompt: RUNNING agents (no
+// hook has arrived yet) for promptWatch after they start, and agents already
+// showing such a dialog, until it goes away. While the adapter recognizes a
+// dialog the agent is NEEDS_INPUT; afterwards it is RUNNING until hooks
+// report more.
+func (m *manager) watchPrompts(ctx context.Context, bySession map[string]tmux.PaneStatus, snap uint64) {
+	type watch struct {
+		a   *agentRec
+		det adapter.PromptDetector
+	}
+	var ws []watch
+	now := time.Now()
+	m.mu.Lock()
+	for _, a := range m.agents {
+		if !a.live() || a.busy || a.readyGen > snap {
+			continue
+		}
+		starting := a.State == stateRunning && now.Sub(time.UnixMilli(a.StartedAtMs)) < promptWatch
+		if !starting && !a.ScreenPrompt {
+			continue
+		}
+		if p, ok := bySession[a.TmuxSession]; !ok || p.Dead {
+			continue
+		}
+		ad, _ := m.d.opts.Adapters.Get(a.Adapter)
+		if det, ok := ad.(adapter.PromptDetector); ok {
+			ws = append(ws, watch{a, det})
+		}
+	}
+	m.mu.Unlock()
+
+	for _, w := range ws {
+		cctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		screen, err := m.d.tmux.Screen(cctx, w.a.TmuxSession)
+		cancel()
+		if err != nil {
+			continue
+		}
+		detail, found := w.det.DetectPrompt(screen)
+		m.mu.Lock()
+		a := w.a
+		switch {
+		case !a.live() || a.busy:
+		case found && (a.State == stateRunning || a.ScreenPrompt):
+			if a.State != stateNeedsInput || a.StateDetail != detail || !a.ScreenPrompt {
+				a.State, a.StateDetail, a.ScreenPrompt = stateNeedsInput, detail, true
+				m.changedLocked(a)
+			}
+		case !found && a.ScreenPrompt:
+			a.State, a.StateDetail, a.ScreenPrompt = stateRunning, "", false
+			m.changedLocked(a)
+		}
 		m.mu.Unlock()
 	}
 }

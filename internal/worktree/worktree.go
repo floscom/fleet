@@ -23,6 +23,22 @@ func RepoRoot(ctx context.Context, dir string) (root string, ok bool) {
 	return filepath.Clean(out), true
 }
 
+// MainRoot returns the top-level directory of the main work tree of the
+// repository containing dir: for a linked worktree, the checkout it was
+// added from. Where that cannot be told (a submodule, a separate git dir) it
+// is the same as RepoRoot.
+func MainRoot(ctx context.Context, dir string) (root string, ok bool) {
+	top, ok := RepoRoot(ctx, dir)
+	if !ok {
+		return "", false
+	}
+	common, err := git(ctx, dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil || filepath.Base(common) != ".git" {
+		return top, true
+	}
+	return filepath.Dir(filepath.Clean(common)), true
+}
+
 // IsRepoRoot reports whether dir is itself the top of a git work tree (or has a .git entry).
 func IsRepoRoot(dir string) bool {
 	if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {

@@ -17,15 +17,21 @@
 // dialog instead and activity state is missing until the user trusts them.
 //
 // Codex also asks "Do you trust the contents of this directory?" (default
-// "Yes, continue") in directories it has not seen; the user answers it in the
-// agent's terminal. The startup update prompt is disabled because it would
-// block the TUI and offers to run an installer.
+// "Yes, continue") in projects it has not seen. Trust is per git repository
+// root (the main checkout covers its worktrees) or, outside git, per
+// directory; parents do not count. In roots the user marked as trusted,
+// Launch passes -c projects={"<dir>"={trust_level="trusted"}}, which Codex
+// merges with the user's own projects (a dotted -c projects."<dir>".... key
+// is not honoured). Elsewhere DetectPrompt reports the dialog. The startup
+// update prompt is disabled because it would block the TUI and offers to run
+// an installer.
 package codex
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"fleet/internal/adapter"
 	"fleet/internal/adapter/detect"
@@ -61,7 +67,7 @@ func (c *codex) Detect(ctx context.Context) adapter.Detection { return c.bin.Det
 
 // Launch returns
 //
-//	codex -c check_for_update_on_startup=false -c hooks.<Event>=... -c hooks.state=... [extra...] [-- prompt]
+//	codex -c check_for_update_on_startup=false -c hooks.<Event>=... -c hooks.state=... [-c projects=...] [extra...] [-- prompt]
 //
 // Codex creates its session id lazily, so SessionID is left empty; it is
 // learned from the SessionStart hook.
@@ -77,6 +83,9 @@ func (c *codex) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapter
 	for _, o := range HookOverrides(req.FleetBinary, req.AgentID) {
 		argv = append(argv, "-c", o)
 	}
+	if req.TrustDir != "" {
+		argv = append(argv, "-c", TrustOverride(req.TrustDir))
+	}
 	argv = append(argv, c.extraArgs...)
 	argv = append(argv, req.ExtraArgs...)
 	if req.Prompt != "" {
@@ -84,4 +93,21 @@ func (c *codex) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapter
 		argv = append(argv, "--", req.Prompt)
 	}
 	return &adapter.LaunchSpec{Argv: argv}, nil
+}
+
+// TrustOverride is the -c value that marks dir as a trusted project.
+func TrustOverride(dir string) string {
+	return fmt.Sprintf(`projects={%s={trust_level="trusted"}}`, tomlString(dir))
+}
+
+// DetectPrompt recognizes the startup dialogs that block Codex before any
+// hook runs.
+func (c *codex) DetectPrompt(screen string) (string, bool) {
+	switch {
+	case strings.Contains(screen, "Do you trust the contents of this directory?"):
+		return "Codex asks whether to trust this directory; answer in its terminal", true
+	case strings.Contains(screen, "Hooks need review"):
+		return "Codex asks to review hooks; answer in its terminal", true
+	}
+	return "", false
 }

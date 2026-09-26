@@ -31,7 +31,11 @@ Shared helpers:
    - Put config `extraArgs` first, then `req.ExtraArgs`, then `--` and the
      prompt. The `--` keeps a prompt that starts with `-` from being read
      as a flag.
-   - Write generated files only into `req.StateDir`.
+   - Write generated files only into `req.StateDir`. The one exception is
+     `req.TrustDir`, set in roots the user marked as trusted: record that
+     folder as trusted wherever the CLI keeps trust, preferably per launch
+     (Codex: a `-c` override), else in its own config under its own lock
+     (Claude: `~/.claude.json`).
    - Use `UnsetEnv` for variables that change the agent's behaviour behind
      the user's back, such as `ANTHROPIC_API_KEY`, which switches Claude
      Code to metered billing.
@@ -48,7 +52,11 @@ Shared helpers:
 6. `HandleHook`: map events to `WORKING` / `IDLE` / `NEEDS_INPUT`. Put
    something short in `Detail`. Copy the agent's session id into
    `SessionID`. Return `ok=false` for anything you don't recognize.
-7. Register it in `cmd/fleet`. Test argv construction, generated files
+7. Startup dialogs (optional): if the CLI can block on a prompt before any
+   hook runs, implement `adapter.PromptDetector`. `DetectPrompt` gets the
+   visible screen of a starting agent and returns a short detail while the
+   prompt is up. Match text that only the dialog shows.
+8. Register it in `cmd/fleet`. Test argv construction, generated files
    (parse them back), and `HandleHook` with payloads captured from the
    real CLI.
 
@@ -64,9 +72,19 @@ Shared helpers:
 - `Notification` has `notification_type`. `idle_prompt` means "Claude is
   waiting for your input" and arrives about 60s after a turn.
   `permission_prompt` means Claude is asking for permission.
-- On first launch in a directory where neither the directory nor any
-  parent is trusted, Claude shows a trust dialog whose default is
-  "No, exit". No hook fires until someone answers it in the terminal.
+- On first launch in an untrusted directory, Claude shows a trust dialog
+  whose default is "No, exit". No hook fires until someone answers it in
+  the terminal. Trust lives in the global config file (`~/.claude.json`,
+  or `$CLAUDE_CONFIG_DIR/.claude.json`) as
+  `projects["<dir>"].hasTrustDialogAccepted`. Answering yes records the
+  git root, or the directory outside git. A trusted directory covers the
+  directories below it only down to the enclosing git root, so a trusted
+  `~/code` does not cover the repository `~/code/api`. A trusted main
+  checkout covers its linked worktrees.
+- Claude rewrites that file with a locked read-modify-write; the lock is
+  the directory `<file>.lock` (proper-lockfile, stale after 10 s).
+- The internal variable `CLAUDE_CODE_SANDBOXED` also skips the dialog, but
+  it trusts every folder and changes other behaviour; fleet does not use it.
 
 ### Codex
 
@@ -78,6 +96,11 @@ Shared helpers:
   "Hooks need review" dialog.
 - `SessionStart` fires lazily, together with the first turn.
 - In new directories Codex asks whether to trust the directory. The default
-  answer is yes.
+  answer is yes. Trust is keyed on the git root (a trusted main checkout
+  covers its worktrees) or the directory outside git; parent directories
+  do not count.
+- `-c 'projects={"<dir>"={trust_level="trusted"}}'` trusts a project for
+  one launch, merged with the user's own `[projects]`. The dotted form
+  `-c 'projects."<dir>".trust_level="trusted"'` has no effect.
 - `check_for_update_on_startup=false` suppresses the blocking update
   prompt.

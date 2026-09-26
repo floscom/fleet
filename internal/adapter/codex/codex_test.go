@@ -166,3 +166,69 @@ func TestHandleHook(t *testing.T) {
 		}
 	}
 }
+
+func TestLaunchTrustDir(t *testing.T) {
+	bin := fakeCodex(t)
+	dir := `/work/odd "dir" \ name`
+	for _, trust := range []string{"", dir} {
+		spec, err := New(bin, nil).Launch(context.Background(), adapter.LaunchRequest{AgentID: "a", FleetBinary: "/f", TrustDir: trust})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var projects []string
+		for i, arg := range spec.Argv {
+			if i > 0 && spec.Argv[i-1] == "-c" && strings.HasPrefix(arg, "projects=") {
+				projects = append(projects, arg)
+			}
+		}
+		if trust == "" {
+			if len(projects) != 0 {
+				t.Errorf("no TrustDir: %q", projects)
+			}
+			continue
+		}
+		if len(projects) != 1 {
+			t.Fatalf("TrustDir: %q", spec.Argv)
+		}
+		var cfg struct {
+			Projects map[string]struct {
+				TrustLevel string `toml:"trust_level"`
+			} `toml:"projects"`
+		}
+		if _, err := toml.Decode(projects[0], &cfg); err != nil {
+			t.Fatalf("%v: %s", err, projects[0])
+		}
+		if len(cfg.Projects) != 1 || cfg.Projects[dir].TrustLevel != "trusted" {
+			t.Errorf("%s decodes to %+v", projects[0], cfg.Projects)
+		}
+	}
+}
+
+func TestDetectPrompt(t *testing.T) {
+	d := New("", nil).(adapter.PromptDetector)
+	// Codex 0.154.0's startup dialogs as tmux captures them.
+	for _, screen := range []string{
+		`> You are in /tmp/trusttest/cx/repo/sub
+
+  Do you trust the contents of this directory? Working with untrusted contents comes with higher risk of prompt injection.
+
+› 1. Yes, continue
+  2. No, quit
+
+  Press enter to continue`,
+		`  Hooks need review
+  2 hooks are new or changed.
+  Hooks can run outside the sandbox after you trust them.
+
+› 1. Review hooks
+  2. Trust all and continue
+  3. Continue without trusting (hooks won't run)`,
+	} {
+		if detail, ok := d.DetectPrompt(screen); !ok || detail == "" {
+			t.Errorf("not detected:\n%s", screen)
+		}
+	}
+	if _, ok := d.DetectPrompt("› Ask Codex to do anything\n\n  100% context left"); ok {
+		t.Error("composer detected as a dialog")
+	}
+}

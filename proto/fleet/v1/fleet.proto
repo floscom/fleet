@@ -268,6 +268,11 @@ message Root {
   string path = 2;
   // Adapter ids allowed in this root. Empty = all.
   repeated string adapters = 3;
+  // Agents started here skip the agent CLI's own "Do you trust this folder?"
+  // prompt: the daemon marks the agent's git repository (or its directory,
+  // outside git) as trusted for the CLI before launching it. Opt-in, because
+  // a trusted folder may run its own hooks and MCP servers.
+  bool trust = 4;
 }
 
 message ListRootsRequest {}
@@ -282,6 +287,8 @@ message AddRootRequest {
   // Optional; defaults to the directory's base name, de-duplicated.
   string name = 2;
   repeated string adapters = 3;
+  // See Root.trust.
+  bool trust = 4;
 }
 message AddRootResponse {
   Root root = 1;

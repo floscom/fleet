@@ -240,6 +240,12 @@ func (t *Tmux) SendText(ctx context.Context, session, text string, submit bool) 
 	return nil
 }
 
+// Screen returns the visible contents of the session's active pane, one line
+// per screen row (wrapped lines joined).
+func (t *Tmux) Screen(ctx context.Context, session string) (string, error) {
+	return t.run(ctx, "capture-pane", "-p", "-J", "-t", exact(session)+":")
+}
+
 // AttachCommand returns an *exec.Cmd that attaches a new tmux client to the
 // session (`tmux -L sock attach-session -t =name`, plus -r for read-only).
 // The caller runs it inside a PTY.

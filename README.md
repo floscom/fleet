@@ -43,7 +43,7 @@ On the server:
 
 ```sh
 fleet start                     # daemon in the background, log in ~/.fleet/daemon.log
-fleet roots add ~/code          # allow agents in ~/code (root name "code")
+fleet roots add ~/code --trust  # allow agents in ~/code (root name "code"), skip trust prompts
 fleet adapters                  # which agent CLIs were found
 fleet run claude code:api --attach   # try it locally; detach with Ctrl-\
 fleet pair                      # one-time code + server fingerprint for a new device
@@ -72,7 +72,7 @@ address. Without it, commands talk to the local daemon.
 | `fleet stop [--force]` | Stop the daemon. Agents keep running in tmux. |
 | `fleet status` | Daemon version, uptime, server id, agent, root and device counts. |
 | `fleet version` | Print the version. |
-| `fleet roots` / `roots add <path> [--name N] [--adapters a,b]` / `roots rm <name>` | Manage the folders agents may run in. |
+| `fleet roots` / `roots add <path> [--name N] [--adapters a,b] [--trust]` / `roots rm <name>` | Manage the folders agents may run in. `--trust`: see [Folder trust](#folder-trust). |
 | `fleet browse [root[/path]] [-a]` | List folders inside a root, marking git repos and running agents. |
 | `fleet adapters` | Adapters, whether their CLI is installed, version and features. |
 | `fleet run <adapter> [path] [flags] [-- agent args]` | Start an agent. `path` is `root:rel/path`, an absolute path, or (local only) a relative path; default `.`. Flags: `--name`, `--pinned`, `--worktree`, `--branch`, `--prompt`, `--attach`. |
@@ -141,6 +141,7 @@ default_isolation = "worktree"
 name = "code"
 path = "/home/flo/code"          # stored symlink-resolved
 adapters = ["claude", "codex"]   # optional; empty or missing = all adapters
+trust = true                     # optional; pre-answer folder trust prompts (see below)
 
 # Per-adapter overrides (claude, codex, shell).
 [adapter.claude]
@@ -175,6 +176,35 @@ not kept). Restart the daemon after editing the file by hand. Command-line
   server and streams it; detaching kills only that client.
 - Two daemons with different `FLEET_HOME`s get different sockets by
   default, so they do not reap each other's sessions.
+
+## Folder trust
+
+Claude Code and Codex ask "Do you trust this folder?" the first time they
+start in a project. Nothing reports that prompt through hooks, so fleet
+watches the screen of each starting agent: while the prompt is up the agent
+is `needs input` with a note saying so, until someone answers it in the
+agent's terminal (`fleet attach`). Codex's "Hooks need review" prompt is
+reported the same way.
+
+A root added with `--trust` (`trust = true` in `config.toml`) skips the
+prompt. Before starting an agent there, fleet records the trust the way the
+CLI would if you had answered yes. The trusted folder is the agent's git
+repository (the main checkout, which also covers its worktrees) or, outside
+git, the agent's folder:
+
+- **Claude Code**: fleet sets `hasTrustDialogAccepted` for that folder in
+  `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`). It takes the
+  lock Claude uses for that file, so running sessions keep their changes.
+  The entry stays, as it would after answering yes yourself.
+- **Codex**: fleet passes `-c projects={"<folder>"={trust_level="trusted"}}`
+  for that launch only. `~/.codex/config.toml` is not changed.
+
+Trusting a parent folder is not enough for either CLI: both look only at
+the repository (or folder) itself. That is why fleet trusts each
+repository as it is used, not the root. A trusted project may run its own
+hooks, MCP servers and settings, so only use `--trust` for roots that hold
+code you trust. Existing roots can be changed in `config.toml` (then
+restart the daemon).
 
 ## Security model
 
@@ -241,15 +271,12 @@ It works end to end on Linux: an end-to-end test drives the real binary
 through run, send, attach, kill, worktrees, pairing, revocation and daemon
 restart with re-adoption. Known gaps:
 
-- **Folder trust dialogs.** Claude Code and Codex ask whether to trust a
-  folder the first time they run in it. No hook fires until someone answers
-  in the terminal, so the agent shows RUNNING instead of IDLE. Claude's
-  default answer is "No, exit". Options not built yet: pre-trusting
-  configured roots (for Claude, in `~/.claude.json`; for Codex, passing a
-  per-project trust override on opt-in), or making the app show this state
-  clearly.
-- **Codex "Hooks need review".** If you have untrusted hooks of your own in
-  `~/.codex/hooks.json`, Codex shows this dialog at startup. Not exercised.
+- **Codex "Hooks need review".** If you have untrusted hooks of your own,
+  Codex shows this dialog at startup, also in trusted roots. The agent shows
+  `needs input` until it is answered in the terminal.
+- **Prompt detection reads the screen.** The trust and hook-review dialogs
+  are recognized by their text (Claude Code 2.1.280, Codex 0.154.0). If a
+  CLI rewords them, the agent shows `running` while it waits, as before.
 - **Pairing uses a short code with a fingerprint check, not a PAKE.** See
   the security section. A PAKE needs protocol v2.
 - **Shared tmux socket.** Two `FLEET_HOME`s that set the *same*

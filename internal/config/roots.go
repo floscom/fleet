@@ -9,29 +9,29 @@ import (
 	"strings"
 )
 
-// AddRoot validates path (must exist, be a dir; stored symlink-resolved and
-// absolute), picks a unique name when name=="" (base name, then base-2, ...),
+// AddRoot validates r.Path (must exist, be a dir; stored symlink-resolved and
+// absolute), picks a unique name when r.Name=="" (base name, then base-2, ...),
 // rejects duplicates of the same resolved path, appends it and returns it.
 // It does not Save.
-func (c *Config) AddRoot(path, name string, adapters []string) (Root, error) {
-	real, err := realDir(path)
+func (c *Config) AddRoot(r Root) (Root, error) {
+	real, err := realDir(r.Path)
 	if err != nil {
 		return Root{}, err
 	}
-	for _, r := range c.Roots {
-		rr, err := filepath.EvalSymlinks(r.Path)
-		if r.Path == real || (err == nil && rr == real) {
-			return Root{}, fmt.Errorf("%s is already root %q", real, r.Name)
+	for _, o := range c.Roots {
+		rr, err := filepath.EvalSymlinks(o.Path)
+		if o.Path == real || (err == nil && rr == real) {
+			return Root{}, fmt.Errorf("%s is already root %q", real, o.Name)
 		}
 	}
-	if name == "" {
-		name = c.uniqueName(filepath.Base(real))
-	} else if strings.ContainsAny(name, `/\`) {
-		return Root{}, fmt.Errorf("invalid root name %q", name)
-	} else if _, dup := c.RootByName(name); dup {
-		return Root{}, fmt.Errorf("root %q already exists", name)
+	if r.Name == "" {
+		r.Name = c.uniqueName(filepath.Base(real))
+	} else if strings.ContainsAny(r.Name, `/\`) {
+		return Root{}, fmt.Errorf("invalid root name %q", r.Name)
+	} else if _, dup := c.RootByName(r.Name); dup {
+		return Root{}, fmt.Errorf("root %q already exists", r.Name)
 	}
-	r := Root{Name: name, Path: real, Adapters: adapters}
+	r.Path = real
 	c.Roots = append(c.Roots, r)
 	return r, nil
 }

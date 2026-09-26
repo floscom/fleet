@@ -35,10 +35,11 @@ const (
 	isoPinned      = fleetv1.Isolation_ISOLATION_PINNED
 	isoWorktree    = fleetv1.Isolation_ISOLATION_WORKTREE
 
-	stateStarting = fleetv1.AgentState_AGENT_STATE_STARTING
-	stateRunning  = fleetv1.AgentState_AGENT_STATE_RUNNING
-	stateExited   = fleetv1.AgentState_AGENT_STATE_EXITED
-	stateFailed   = fleetv1.AgentState_AGENT_STATE_FAILED
+	stateStarting   = fleetv1.AgentState_AGENT_STATE_STARTING
+	stateRunning    = fleetv1.AgentState_AGENT_STATE_RUNNING
+	stateNeedsInput = fleetv1.AgentState_AGENT_STATE_NEEDS_INPUT
+	stateExited     = fleetv1.AgentState_AGENT_STATE_EXITED
+	stateFailed     = fleetv1.AgentState_AGENT_STATE_FAILED
 )
 
 // dim returns v, or def when v is 0, capped at maxDim.
@@ -73,6 +74,15 @@ func (m *manager) run(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleet
 	}
 
 	repo, inRepo := worktree.RepoRoot(ctx, dir)
+	var trustDir string
+	if root.Trust {
+		// Both Claude Code and Codex key trust on the main checkout of a
+		// repository, which also covers its worktrees.
+		trustDir = dir
+		if main, ok := worktree.MainRoot(ctx, dir); ok {
+			trustDir = main
+		}
+	}
 	iso := req.GetIsolation()
 	switch iso {
 	case isoUnspecified:
@@ -131,7 +141,7 @@ func (m *manager) run(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleet
 
 	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), launchTimeout)
 	defer cancel()
-	res, err := m.launch(lctx, ad, rec, req, repo, cfg)
+	res, err := m.launch(lctx, ad, rec, req, repo, trustDir, cfg)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -157,7 +167,7 @@ type launchResult struct {
 
 // launch creates the worktree and the tmux session for a reserved agent,
 // undoing the worktree on failure.
-func (m *manager) launch(ctx context.Context, ad adapter.Adapter, a agentRec, req *fleetv1.RunAgentRequest, repo string, cfg config.Config) (res launchResult, err error) {
+func (m *manager) launch(ctx context.Context, ad adapter.Adapter, a agentRec, req *fleetv1.RunAgentRequest, repo, trustDir string, cfg config.Config) (res launchResult, err error) {
 	d := m.d
 	res.cwd = a.Cwd
 	stateDir := config.Path("agents", a.ID)
@@ -199,6 +209,7 @@ func (m *manager) launch(ctx context.Context, ad adapter.Adapter, a agentRec, re
 		ExtraArgs:   extra,
 		FleetBinary: d.opts.FleetBinary,
 		StateDir:    stateDir,
+		TrustDir:    trustDir,
 	})
 	if err != nil {
 		return res, errf(codeUnavailable, "%s: %v", ad.ID(), err)

@@ -7,9 +7,11 @@
 // the user's hooks keep running (verified with Claude Code 2.1.280).
 //
 // Claude Code shows a "Do you trust this folder?" dialog, defaulting to
-// "No, exit", the first time it starts in a directory that neither it nor an
-// ancestor was trusted in. No hook runs before it is answered; the user
-// answers it in the agent's terminal. There is no flag to skip it.
+// "No, exit", the first time it starts in an untrusted directory (see
+// trust.go). No hook runs before it is answered, and there is no flag to skip
+// it. In roots the user marked as trusted, Launch records the trust in
+// Claude's global config first; elsewhere DetectPrompt reports the dialog so
+// the user can answer it in the agent's terminal.
 package claude
 
 import (
@@ -81,6 +83,15 @@ func (c *claude) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapte
 	if err != nil {
 		return nil, fmt.Errorf("claude: %w", err)
 	}
+	if req.TrustDir != "" {
+		file, err := globalConfigFile()
+		if err == nil {
+			err = trustFolder(ctx, file, req.TrustDir)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("claude: trust %s: %w", req.TrustDir, err)
+		}
+	}
 	settings := filepath.Join(req.StateDir, SettingsFile)
 	if err := writeSettings(settings, req.FleetBinary, req.AgentID); err != nil {
 		return nil, fmt.Errorf("claude: %w", err)
@@ -105,6 +116,14 @@ func (c *claude) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapte
 		UnsetEnv:  append([]string(nil), unsetEnv...),
 		SessionID: sid,
 	}, nil
+}
+
+// DetectPrompt recognizes the folder trust dialog.
+func (c *claude) DetectPrompt(screen string) (string, bool) {
+	if strings.Contains(screen, "Yes, I trust this folder") {
+		return "Claude asks whether to trust this folder; answer in its terminal", true
+	}
+	return "", false
 }
 
 // resumes reports whether args ask claude to continue or resume a session.
