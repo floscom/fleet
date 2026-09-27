@@ -12,6 +12,8 @@
 //	agents.json        agent registry (0600)
 //	agents/<id>/       per-agent state dir (adapter files)
 //	worktrees/         git worktrees created for agents
+//	clones/            repositories cloned for agents (CLONE isolation)
+//	sandbox/           what Docker sandboxes mount ([sandbox] dir, see SandboxConfig)
 package config
 
 import (
@@ -23,6 +25,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	fleetv1 "fleet/gen/fleetv1"
 
@@ -47,6 +50,84 @@ type Config struct {
 	Roots            []Root `toml:"root"`
 	// Adapter-specific overrides, e.g. [adapter.claude] binary = "/opt/claude".
 	Adapters map[string]AdapterConfig `toml:"adapter"`
+	// Sandbox configures Docker sandboxes ([sandbox]).
+	Sandbox SandboxConfig `toml:"sandbox,omitempty"`
+}
+
+// DefaultSandboxImage is the image `fleet sandbox build` creates.
+const DefaultSandboxImage = "fleet-agent:latest"
+
+// DefaultSandboxEnv lists the daemon environment variables passed into
+// sandboxes when [sandbox] env is not set: credentials agents commonly need
+// that cannot be read from the host's files inside a container. Claude
+// Code's ANTHROPIC_API_KEY is deliberately missing (it switches to metered
+// billing); add it to env to opt in.
+var DefaultSandboxEnv = []string{"CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"}
+
+// SandboxConfig is the [sandbox] table.
+type SandboxConfig struct {
+	// Default is the sandbox of agents that do not ask for one: "none"
+	// (default) or "docker".
+	Default string `toml:"default,omitempty"`
+	// Image is the Docker image. Default DefaultSandboxImage.
+	Image string `toml:"image,omitempty"`
+	// Network is passed to docker run --network. Default: Docker's bridge.
+	Network string `toml:"network,omitempty"`
+	// Env names daemon environment variables to pass into containers (when
+	// set). nil means DefaultSandboxEnv.
+	Env []string `toml:"env,omitempty"`
+	// Args are extra docker run arguments, e.g. ["--memory=8g", "--cpus=4"].
+	Args []string `toml:"args,omitempty"`
+	// Docker is the docker CLI. Default "docker" from PATH.
+	Docker string `toml:"docker,omitempty"`
+	// Auth lists adapters whose host login sandboxed agents share, e.g.
+	// ["claude", "codex"]: the daemon keeps their credentials file in sync
+	// between the daemon user's home and the sandbox home.
+	Auth []string `toml:"auth,omitempty"`
+	// Dir holds everything containers mount from fleet: worktrees and
+	// clones of sandboxed agents (worktrees/, clones/), their state dirs
+	// (agents/<id>/), the sandbox HOME (home/) and a copy of the fleet
+	// binary (bin/). Docker must be able to see it: a snap-packaged Docker
+	// cannot see hidden folders such as ~/.fleet. A leading "~/" is
+	// expanded. Default <FLEET_HOME>/sandbox.
+	Dir string `toml:"dir,omitempty"`
+}
+
+// DirOrDefault returns Dir, with "~/" expanded, or <FLEET_HOME>/sandbox.
+func (s SandboxConfig) DirOrDefault() string {
+	switch {
+	case s.Dir == "":
+		return Path("sandbox")
+	case strings.HasPrefix(s.Dir, "~/"):
+		if u, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(u, s.Dir[2:])
+		}
+	}
+	return filepath.Clean(s.Dir)
+}
+
+// ImageOrDefault returns Image or DefaultSandboxImage.
+func (s SandboxConfig) ImageOrDefault() string {
+	if s.Image == "" {
+		return DefaultSandboxImage
+	}
+	return s.Image
+}
+
+// EnvOrDefault returns Env or DefaultSandboxEnv.
+func (s SandboxConfig) EnvOrDefault() []string {
+	if s.Env == nil {
+		return DefaultSandboxEnv
+	}
+	return s.Env
+}
+
+// DockerOrDefault returns Docker or "docker".
+func (s SandboxConfig) DockerOrDefault() string {
+	if s.Docker == "" {
+		return "docker"
+	}
+	return s.Docker
 }
 
 // Root is an allowed folder.
@@ -143,6 +224,17 @@ func Load() (*Config, error) {
 	}
 	if !md.IsDefined("listen") {
 		c.Listen = DefaultListen
+	}
+	if md.IsDefined("sandbox", "env") && c.Sandbox.Env == nil {
+		c.Sandbox.Env = []string{} // env = [] passes nothing
+	}
+	if c.Sandbox.Dir != "" && !filepath.IsAbs(c.Sandbox.Dir) && !strings.HasPrefix(c.Sandbox.Dir, "~/") {
+		return nil, fmt.Errorf("config.toml: [sandbox] dir must be absolute or start with ~/, not %q", c.Sandbox.Dir)
+	}
+	switch c.Sandbox.Default {
+	case "", "none", "docker":
+	default:
+		return nil, fmt.Errorf("config.toml: [sandbox] default must be \"none\" or \"docker\", not %q", c.Sandbox.Default)
 	}
 	c.applyDefaults()
 	return c, nil

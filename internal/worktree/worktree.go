@@ -1,4 +1,4 @@
-// Package worktree manages git worktrees for agent isolation.
+// Package worktree manages git worktrees and clones for agent isolation.
 package worktree
 
 import (
@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -113,9 +114,21 @@ func SubdirIn(repoRoot, dir, worktreePath string) (string, error) {
 	return filepath.Join(worktreePath, rel), nil
 }
 
-// Dirty reports whether the worktree has uncommitted changes or untracked files.
+// GitCommonDir returns the absolute git directory shared by all worktrees
+// of the repository containing dir (usually <main checkout>/.git).
+func GitCommonDir(ctx context.Context, dir string) (string, error) {
+	out, err := git(ctx, dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(out), nil
+}
+
+// Dirty reports whether the worktree has uncommitted changes or untracked
+// files. The fsmonitor is off: a sandboxed agent could have configured one
+// to run on the host.
 func Dirty(ctx context.Context, path string) (bool, error) {
-	out, err := git(ctx, path, "status", "--porcelain", "--untracked-files=normal")
+	out, err := git(ctx, path, "-c", "core.fsmonitor=false", "status", "--porcelain", "--untracked-files=normal")
 	if err != nil {
 		return false, err
 	}
@@ -151,6 +164,103 @@ func Remove(ctx context.Context, path string, force bool) error {
 		return err
 	}
 	_, err = git(ctx, main, "worktree", "prune")
+	return err
+}
+
+// Unpushed reports whether the repository at path has commits on local
+// branches that are on no remote-tracking branch.
+func Unpushed(ctx context.Context, path string) (bool, error) {
+	out, err := git(ctx, path, "rev-list", "--count", "--branches", "--not", "--remotes")
+	if err != nil {
+		return false, err
+	}
+	return out != "0", nil
+}
+
+// cloneProtocols are the transports Clone lets git use (GIT_ALLOW_PROTOCOL),
+// also for redirects: never local paths or helpers such as ext::. Tests
+// add "file".
+var cloneProtocols = "https:ssh"
+
+var (
+	shorthandRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+	hostPathRE  = regexp.MustCompile(`^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+/[^\s]+$`)
+	scpRE       = regexp.MustCompile(`^[A-Za-z0-9_.-]+@[A-Za-z0-9.-]+:[^\s/-][^\s]*$`)
+)
+
+// NormalizeCloneURL validates a repository URL for Clone. It accepts
+// https:// and ssh:// URLs and scp-like addresses (git@github.com:org/repo),
+// plus two shorthands: "owner/repo" for GitHub and "host.tld/owner/repo"
+// for https. Local paths and other transports are refused.
+func NormalizeCloneURL(u string) (string, error) {
+	u = strings.TrimSpace(u)
+	switch {
+	case u == "", strings.HasPrefix(u, "-"), strings.ContainsAny(u, " \t\n\r"):
+	case strings.HasPrefix(u, "https://"), strings.HasPrefix(u, "ssh://"):
+		if len(u) > len("https://") {
+			return u, nil
+		}
+	case scpRE.MatchString(u):
+		return u, nil
+	case shorthandRE.MatchString(u) && !strings.HasPrefix(u, "."):
+		return "https://github.com/" + strings.TrimSuffix(u, ".git") + ".git", nil
+	case hostPathRE.MatchString(u):
+		return "https://" + u, nil
+	}
+	return "", fmt.Errorf("worktree: unsupported repository URL %q (use https://, ssh://, git@host:path or owner/repo)", u)
+}
+
+// RepoName returns the last path element of a repository URL without
+// ".git", e.g. "api" for git@github.com:org/api.git.
+func RepoName(u string) string {
+	u = strings.TrimRight(u, "/")
+	if i := strings.LastIndexAny(u, "/:"); i >= 0 {
+		u = u[i+1:]
+	}
+	return strings.TrimSuffix(u, ".git")
+}
+
+// CloneOptions configures Clone.
+type CloneOptions struct {
+	// URL is passed to git clone; validate it with NormalizeCloneURL.
+	URL string
+	// Path is where the repository is cloned (must not exist).
+	Path string
+	// Branch is checked out: tracking the remote branch of that name if
+	// there is one, else created from the default branch.
+	Branch string
+}
+
+// Clone clones a repository, using the daemon user's git credentials.
+// Submodules are not cloned.
+func Clone(ctx context.Context, o CloneOptions) error {
+	if o.URL == "" || o.Path == "" || o.Branch == "" {
+		return errors.New("worktree: URL, Path and Branch are required")
+	}
+	path, err := filepath.Abs(o.Path)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return fmt.Errorf("worktree: %s already exists", o.Path)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if _, err := git(ctx, filepath.Dir(path), "check-ref-format", "--branch", o.Branch); err != nil {
+		return fmt.Errorf("worktree: invalid branch name %q", o.Branch)
+	}
+	env := []string{"GIT_ALLOW_PROTOCOL=" + cloneProtocols}
+	if _, err := gitEnv(ctx, filepath.Dir(path), env, "clone", "--no-recurse-submodules", "--", o.URL, path); err != nil {
+		os.RemoveAll(path)
+		return err
+	}
+	remote := "refs/remotes/origin/" + o.Branch
+	if _, err := git(ctx, path, "rev-parse", "--verify", "--quiet", remote); err == nil {
+		_, err = git(ctx, path, "checkout", "-b", o.Branch, "--track", "origin/"+o.Branch)
+		return err
+	}
+	_, err = git(ctx, path, "checkout", "-b", o.Branch)
 	return err
 }
 
@@ -223,8 +333,13 @@ func list(ctx context.Context, dir string) ([]worktreeInfo, error) {
 
 // git runs git in dir and returns trimmed stdout; errors include stderr.
 func git(ctx context.Context, dir string, args ...string) (string, error) {
+	return gitEnv(ctx, dir, nil, args...)
+}
+
+// gitEnv is git with extra environment variables.
+func gitEnv(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C"), env...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"sort"
@@ -50,6 +51,17 @@ type agentRec struct {
 	// ScreenPrompt is set while NEEDS_INPUT comes from a dialog seen on the
 	// screen (adapter.PromptDetector) rather than from a hook.
 	ScreenPrompt bool `json:"screen_prompt,omitempty"`
+	// Sandbox is SANDBOX_DOCKER for containerized agents; records written
+	// before sandboxes existed have 0, meaning SANDBOX_NONE.
+	Sandbox fleetv1.Sandbox `json:"sandbox,omitempty"`
+	// Container is the Docker container name of a sandboxed agent.
+	Container string `json:"container,omitempty"`
+	// StateDir is the state dir of a sandboxed agent, inside the sandbox
+	// dir; other agents use <home>/agents/<id> (see stateDir).
+	StateDir string `json:"state_dir,omitempty"`
+	// CloneURL is the repository cloned for CLONE isolation; the clone
+	// itself is in Worktree.
+	CloneURL string `json:"clone_url,omitempty"`
 
 	attached int32
 	// busy is set while RunAgent or KillAgent is working on the agent
@@ -85,7 +97,25 @@ func (a *agentRec) proto() *fleetv1.Agent {
 		SessionId:       a.SessionID,
 		TmuxSession:     a.TmuxSession,
 		AttachedClients: a.attached,
+		Sandbox:         a.sandbox(),
+		CloneUrl:        a.CloneURL,
 	}
+}
+
+// stateDir is the agent's private directory for adapter files.
+func (a *agentRec) stateDir() string {
+	if a.StateDir != "" {
+		return a.StateDir
+	}
+	return config.Path("agents", a.ID)
+}
+
+// sandbox is the agent's sandbox, never SANDBOX_UNSPECIFIED.
+func (a *agentRec) sandbox() fleetv1.Sandbox {
+	if a.Sandbox == sandboxDocker {
+		return sandboxDocker
+	}
+	return sandboxNone
 }
 
 // finish moves a live agent to a final state.
@@ -112,6 +142,11 @@ type manager struct {
 	subs   map[*subscriber]struct{}
 	// readyGen counts busy->ready transitions (see agentRec.readyGen).
 	readyGen uint64
+
+	// hookLns are the hook sockets of sandboxed agents, by agent id.
+	hookMu  sync.Mutex
+	hookLns map[string]net.Listener
+	hookWG  sync.WaitGroup
 }
 
 // readyLocked clears a's busy flag and stamps it with a new ready generation.
@@ -122,10 +157,11 @@ func (m *manager) readyLocked(a *agentRec) {
 
 func newManager(d *daemon) (*manager, error) {
 	m := &manager{
-		d:      d,
-		path:   config.Path("agents.json"),
-		agents: map[string]*agentRec{},
-		subs:   map[*subscriber]struct{}{},
+		d:       d,
+		path:    config.Path("agents.json"),
+		agents:  map[string]*agentRec{},
+		subs:    map[*subscriber]struct{}{},
+		hookLns: map[string]net.Listener{},
 	}
 	b, err := os.ReadFile(m.path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -184,7 +220,7 @@ func (m *manager) removeLocked(a *agentRec) {
 	delete(m.agents, a.ID)
 	m.saveLocked()
 	m.broadcastLocked(&fleetv1.Event{Kind: &fleetv1.Event_AgentRemoved{AgentRemoved: a.ID}})
-	if err := os.RemoveAll(config.Path("agents", a.ID)); err != nil {
+	if err := os.RemoveAll(a.stateDir()); err != nil {
 		m.d.log.Warn("removing agent state dir failed", "agent", a.ID, "err", err)
 	}
 }

@@ -75,11 +75,12 @@ address. Without it, commands talk to the local daemon.
 | `fleet roots` / `roots add <path> [--name N] [--adapters a,b] [--trust]` / `roots rm <name>` | Manage the folders agents may run in. `--trust`: see [Folder trust](#folder-trust). |
 | `fleet browse [root[/path]] [-a]` | List folders inside a root, marking git repos and running agents. |
 | `fleet adapters` | Adapters, whether their CLI is installed, version and features. |
-| `fleet run <adapter> [path] [flags] [-- agent args]` | Start an agent. `path` is `root:rel/path`, an absolute path, or (local only) a relative path; default `.`. Flags: `--name`, `--pinned`, `--worktree`, `--branch`, `--prompt`, `--attach`. |
+| `fleet run <adapter> [path] [flags] [-- agent args]` | Start an agent. `path` is `root:rel/path`, an absolute path, or (local only) a relative path; default `.`. Flags: `--name`, `--pinned`, `--worktree`, `--branch`, `--prompt`, `--attach`, `--clone <repo>` (instead of a path), `--docker` / `--sandbox docker\|none`. |
 | `fleet ls [-a] [--json]` | List agents (`-a` includes exited and failed ones). |
 | `fleet attach <agent> [-r]` | Attach to an agent's terminal. Detach with Ctrl-\\. |
 | `fleet send <agent> <text...> [--no-enter]` | Type text into an agent's terminal and press Enter. |
-| `fleet kill <agent>... [--rm-worktree] [--force] [--forget]` | Stop agents; optionally remove their worktree and history entry. |
+| `fleet kill <agent>... [--rm-worktree] [--force] [--forget]` | Stop agents; optionally remove their worktree or clone and history entry. |
+| `fleet sandbox build [--pull] [--tag T]` / `sandbox dockerfile` | Build the Docker image sandboxed agents run in (on the server) / print its Dockerfile. |
 | `fleet watch` | Print agent state changes as they happen. |
 | `fleet pair [--ttl 5m]` | Create a one-time pairing code (at most 5 minutes). |
 | `fleet connect [addr\|name] --code CODE [--fingerprint HEX] [--name N]` | Pair this machine with a remote daemon. |
@@ -101,6 +102,81 @@ directly in the folder instead; only one pinned agent may run per folder.
 Outside git, agents are always pinned. `fleet kill --rm-worktree` removes
 the worktree (the branch is kept) unless it has uncommitted changes.
 
+`--clone <repo>` starts from a fresh clone instead of a folder: the daemon
+clones `owner/repo` (GitHub), an `https://` or `ssh://` URL, or
+`git@host:org/repo` with its own git credentials into
+`~/.fleet/clones/<name>`, and checks out `--branch` (the remote branch if it
+exists, else a new branch, default `fleet/<name>`). `fleet kill
+--rm-worktree` deletes the clone unless it has uncommitted changes or
+commits that were never pushed.
+
+### Docker sandbox
+
+`--docker` (or `--sandbox docker`, or `default = "docker"` under
+`[sandbox]`) runs the agent in a container instead of on the server. It
+works with every mode above:
+
+```sh
+fleet sandbox build                                  # once, on the server: the fleet-agent image
+fleet run claude code:api --docker                   # worktree of a local repo
+fleet run claude code:notes --docker --pinned        # the folder itself, mounted read-write
+fleet run claude --clone owner/repo --docker --prompt "fix issue 42"
+```
+
+Nothing else changes: the tmux pane runs `docker run -it`, so attach,
+send, `needs input` and exit codes work as usual, and the container is
+removed when the agent exits or is killed (the daemon also removes
+leftover containers at startup).
+
+What the container sees, each at the same path as on the host:
+
+- the agent's checkout: its worktree or clone, or for `--pinned` the
+  folder (the whole repository when the folder is inside one), read-write;
+- for a worktree, the repository's `.git` directory, read-write so the
+  agent can commit. The rest of your checkout is not visible;
+- `.git/config`, `.git/hooks` and a worktree's `.git` file read-only,
+  because git on the host runs what they name;
+- a home directory, `/home/fleet`, kept across containers in
+  `[sandbox] dir`/home: log in once (`/login` in Claude Code) and it sticks,
+  or share the server's login (below);
+- a socket that only accepts this agent's hook events, and a copy of the
+  fleet binary for the hooks. The daemon's own socket is not visible.
+
+**Using the server's login.** With `auth = ["claude", "codex"]` under
+`[sandbox]`, sandboxed agents use the Claude Code and Codex logins of the
+user running the daemon (`~/.claude/.credentials.json`,
+`~/.codex/auth.json`, or under `CLAUDE_CONFIG_DIR` / `CODEX_HOME`). They are
+not bind-mounted: the CLIs replace these files atomically, which a file
+mount does not survive, and snap Docker cannot see them. The daemon copies
+them into the sandbox home instead, and keeps both copies in sync while
+sandboxed agents run: whichever side refreshed its token last wins, and the
+host file is written under Claude's own write lock. That way neither side
+logs the other out when OAuth tokens rotate. A missing host login is never
+recreated from a sandbox. On macOS, Claude Code keeps its login in the
+Keychain, so there is no file to share.
+
+The container runs as your uid:gid with all capabilities dropped. Your
+git name and email, and the daemon environment variables listed in
+`[sandbox] env` (default `CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`,
+`GITHUB_TOKEN`), are passed in; `claude setup-token` gives you a
+`CLAUDE_CODE_OAUTH_TOKEN` for the daemon's environment. Folder trust
+prompts are skipped in a sandbox, since what a folder's settings run stays
+in the container. The image ships Claude Code, Codex, git, gh, ripgrep,
+Node and Python; `fleet sandbox dockerfile` prints its Dockerfile to build
+your own `FROM fleet-agent` with more tools. Update the agent CLIs with
+`fleet sandbox build --pull`.
+
+**Docker installed as a snap** (Ubuntu's default) cannot see `/tmp` or
+hidden folders such as `~/.fleet`. fleet checks this and tells you; set
+`dir` under `[sandbox]` to a visible folder, such as `~/fleet-sandbox`.
+Worktrees and clones of sandboxed agents, their state, the sandbox home and
+the fleet binary copy all live there. Repositories you mount (`--pinned`,
+and a worktree's `.git`) must be visible to Docker too.
+
+The sandbox protects the server from what the agent runs. It does not make
+the agent's output trustworthy: review what it commits before building or
+running it on the host.
+
 ## Configuration
 
 Everything lives in `FLEET_HOME` (default `~/.fleet`, mode 0700):
@@ -115,6 +191,8 @@ Everything lives in `FLEET_HOME` (default `~/.fleet`, mode 0700):
 | `servers.json` | daemons this machine has paired with |
 | `agents.json`, `agents/<id>/` | agent registry and per-agent adapter files |
 | `worktrees/` | git worktrees created for agents |
+| `clones/` | repositories cloned for agents (`--clone`) |
+| `sandbox/` | default `[sandbox] dir`: worktrees, clones, state and home of sandboxed agents |
 
 `config.toml`, with every key:
 
@@ -147,6 +225,17 @@ trust = true                     # optional; pre-answer folder trust prompts (se
 [adapter.claude]
 binary = "/home/flo/.local/bin/claude"   # default: PATH, then well-known dirs such as ~/.local/bin
 args = ["--model", "opus"]               # added to every launch, before `fleet run ... -- args`
+
+# Docker sandboxes (see "Docker sandbox"). Every key is optional.
+[sandbox]
+default = "none"                 # "docker" sandboxes agents that do not ask for either
+image = "fleet-agent:latest"     # built by `fleet sandbox build`
+dir = "~/fleet-sandbox"          # default ~/.fleet/sandbox; must be visible to Docker
+env = ["CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]   # passed in when set
+auth = ["claude", "codex"]       # share the server's logins with sandboxes (default: none)
+network = ""                     # docker run --network; default: Docker's bridge
+args = ["--memory=8g", "--cpus=4"]   # extra docker run flags, e.g. limits
+docker = "docker"                # the docker CLI
 ```
 
 The daemon reads `config.toml` at startup. Changes made through the CLI
@@ -235,8 +324,21 @@ Honest limits:
 - **Roots restrict where agents start, not what they can touch.** An agent
   runs as the daemon's user with that user's full permissions and
   environment (the claude adapter only removes `ANTHROPIC_API_KEY` and
-  `CLAUDECODE`). It can read and write anything that user can, anywhere.
-  Sandboxing is up to the agent CLI's own permission system.
+  `CLAUDECODE`). It can read and write anything that user can, anywhere,
+  unless it runs in a Docker sandbox (`--docker`), which confines it to
+  its checkout and a home directory of its own.
+- **A sandboxed agent can still reach the network,** and it can write the
+  repository's git objects and refs (it commits). It cannot write
+  `.git/config` or `.git/hooks`, but it could, for example, add a
+  `.git/commondir` file to a pinned repository that points git on the host
+  at a config it wrote. Treat a sandboxed agent's repository like one you
+  cloned from a stranger until you have looked at it.
+- **`[sandbox] auth` hands your login to the agent.** A sandboxed agent
+  with the server's Claude or Codex credentials can use them like you, also
+  from outside the container. Leave it off when you run code you do not
+  trust.
+- **`--clone` uses the daemon's git credentials.** Any paired device can
+  make the daemon clone anything those credentials can read.
 - **The pairing code is short.** The proof is an HMAC keyed with a 40-bit
   code. An active man in the middle on the LAN who captures a pairing
   exchange during the code's 5-minute window can brute-force the code
@@ -284,6 +386,9 @@ restart with re-adoption. Known gaps:
   orphans. There is no lock on the socket name.
 - **Stale socket file.** tmux does not delete `/tmp/tmux-<uid>/fleet` when
   it exits because the last session ended. Harmless.
+- **`no-new-privileges` is not set on sandboxes.** Snap-packaged Docker's
+  AppArmor profile makes every exec fail with it. Add
+  `"--security-opt=no-new-privileges"` to `[sandbox] args` where it works.
 - **Some Claude hooks not verified live.** The `PostToolUseFailure` and
   `PermissionDenied` handling was written from the CLI's schema. Whether
   answering "No" in a permission dialog fires one of them has not been

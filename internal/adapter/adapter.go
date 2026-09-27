@@ -12,6 +12,7 @@
 //   - initial prompt, resume: advertise them in Capabilities.
 //   - startup dialogs no hook reports (folder trust): implement
 //     PromptDetector, and honour LaunchRequest.TrustDir to skip them.
+//   - sandboxes: honour LaunchRequest.Sandbox and LaunchRequest.Home.
 package adapter
 
 import (
@@ -47,6 +48,19 @@ type Adapter interface {
 // NEEDS_INPUT with the returned detail while it matches.
 type PromptDetector interface {
 	DetectPrompt(screen string) (detail string, ok bool)
+}
+
+// AuthProvider is implemented by adapters whose CLI keeps its login in a
+// file. With [sandbox] auth, the daemon keeps that file in sync between the
+// daemon user's home and the sandbox home, so sandboxed agents use the
+// host's login.
+type AuthProvider interface {
+	// AuthFile is the credentials file for a home directory. home "" means
+	// the daemon user's own, honouring the CLI's config dir variable.
+	AuthFile(home string) string
+	// LockAuth takes the lock the CLI holds while writing file, if it uses
+	// one, so a sync never interleaves with the CLI's own write.
+	LockAuth(ctx context.Context, file string) (unlock func(), err error)
 }
 
 // Capabilities mirrors fleetv1.AdapterCapabilities.
@@ -97,6 +111,15 @@ type LaunchRequest struct {
 	// git, its directory. The adapter should keep the CLI from asking
 	// whether to trust it.
 	TrustDir string
+	// Sandbox is set when the command runs in a container whose image
+	// provides the CLI on its PATH: Argv[0] should be the bare command name,
+	// and the CLI need not be installed on the host. Every path in this
+	// request is the same inside the container.
+	Sandbox bool
+	// Home, if set, is the host directory the agent uses as its home
+	// directory (HOME inside a sandbox). Per-user config the adapter writes,
+	// such as folder trust, goes there instead of the daemon user's home.
+	Home string
 }
 
 // LaunchSpec is the command the daemon runs in tmux.

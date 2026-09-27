@@ -36,6 +36,14 @@ Shared helpers:
      folder as trusted wherever the CLI keeps trust, preferably per launch
      (Codex: a `-c` override), else in its own config under its own lock
      (Claude: `~/.claude.json`).
+   - When `req.Sandbox` is set, the command runs in a container whose image
+     provides the CLI: use the bare command name as `Argv[0]` and do not
+     require the host binary. All paths in the request are the same inside
+     the container. Per-user config the adapter writes (trust) goes into
+     `req.Home`, the container's home directory, not the daemon user's.
+   - If the CLI keeps its login in a file, implement `adapter.AuthProvider`
+     (`AuthFile`, and `LockAuth` if the CLI locks it while writing) so
+     `[sandbox] auth` can share the host login with sandboxes.
    - Use `UnsetEnv` for variables that change the agent's behaviour behind
      the user's back, such as `ANTHROPIC_API_KEY`, which switches Claude
      Code to metered billing.

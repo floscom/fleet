@@ -238,3 +238,79 @@ func TestIdentity(t *testing.T) {
 		t.Errorf("%s %q %+v", a.ID(), a.DisplayName(), a.Capabilities())
 	}
 }
+
+func TestLaunchSandbox(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // the daemon user's config must stay untouched
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	home := filepath.Join(t.TempDir(), "sandbox-home")
+	state := t.TempDir()
+	// The host binary does not exist: in a sandbox the image provides it.
+	a := New(filepath.Join(t.TempDir(), "missing"), nil)
+	spec, err := a.Launch(context.Background(), adapter.LaunchRequest{
+		AgentID: "a", FleetBinary: "/f", StateDir: state, Sandbox: true, Home: home, TrustDir: "/work/repo",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Argv[0] != "claude" {
+		t.Errorf("argv[0] = %q, want claude", spec.Argv[0])
+	}
+	b, err := os.ReadFile(filepath.Join(home, ".claude.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		HasCompletedOnboarding bool `json:"hasCompletedOnboarding"`
+		Projects               map[string]struct {
+			HasTrustDialogAccepted bool `json:"hasTrustDialogAccepted"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(b, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.HasCompletedOnboarding || !cfg.Projects["/work/repo"].HasTrustDialogAccepted {
+		t.Errorf("sandbox config = %s", b)
+	}
+	if fileExists(filepath.Join(os.Getenv("HOME"), ".claude.json")) {
+		t.Error("the daemon user's ~/.claude.json was written")
+	}
+
+	// An existing config is kept, onboarding state included.
+	os.WriteFile(filepath.Join(home, ".claude.json"), []byte(`{"theme":"dark"}`), 0o600)
+	if _, err := a.Launch(context.Background(), adapter.LaunchRequest{
+		AgentID: "a", FleetBinary: "/f", StateDir: state, Sandbox: true, Home: home,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(home, ".claude.json")); string(b) != `{"theme":"dark"}` {
+		t.Errorf("existing config changed: %s", b)
+	}
+}
+
+func TestAuthFile(t *testing.T) {
+	a := New("", nil).(adapter.AuthProvider)
+	t.Setenv("HOME", "/h")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	if got := a.AuthFile(""); got != "/h/.claude/.credentials.json" {
+		t.Errorf("AuthFile = %q", got)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", "/cfg")
+	if got := a.AuthFile(""); got != "/cfg/.credentials.json" {
+		t.Errorf("AuthFile with CLAUDE_CONFIG_DIR = %q", got)
+	}
+	if got := a.AuthFile("/sb"); got != "/sb/.claude/.credentials.json" {
+		t.Errorf("AuthFile(/sb) = %q", got)
+	}
+	dir := t.TempDir()
+	unlock, err := a.LockAuth(context.Background(), filepath.Join(dir, ".credentials.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fileExists(filepath.Join(dir, ".storage-write.lock")) {
+		t.Error("lock dir not taken")
+	}
+	unlock()
+	if fileExists(filepath.Join(dir, ".storage-write.lock")) {
+		t.Error("lock dir not released")
+	}
+}

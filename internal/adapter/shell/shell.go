@@ -46,9 +46,17 @@ func (s *shell) binary() *detect.Binary {
 
 func (s *shell) Detect(ctx context.Context) adapter.Detection { return s.binary().Detect(ctx) }
 
+// sandboxScript starts bash as a login shell where the image has it, else sh.
+const sandboxScript = `if command -v bash >/dev/null 2>&1; then exec bash -l "$@"; fi; exec sh -l "$@"`
+
 // Launch returns `<shell> -l`; the daemon starts it in req.Cwd. Prompt and
-// hooks are not supported and ignored.
+// hooks are not supported and ignored. In a sandbox the host's $SHELL means
+// nothing, so bash (or sh) from the image is used.
 func (s *shell) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapter.LaunchSpec, error) {
+	if req.Sandbox {
+		argv := append([]string{"/bin/sh", "-c", sandboxScript, "sh"}, req.ExtraArgs...)
+		return &adapter.LaunchSpec{Argv: argv}, nil
+	}
 	path, err := s.binary().Find()
 	if err != nil {
 		return nil, fmt.Errorf("shell: %w", err)

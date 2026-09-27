@@ -56,6 +56,15 @@ func (c *conn) handle(m *fleetv1.ClientMessage) (keep bool) {
 // dispatch enforces authentication and routes to the handler, which sends
 // its own reply. A returned error is sent as an Error reply.
 func (c *conn) dispatch(id uint64, m *fleetv1.ClientMessage) error {
+	if c.hookAgent != "" {
+		switch msg := m.GetMsg().(type) {
+		case *fleetv1.ClientMessage_Ping:
+		case *fleetv1.ClientMessage_Hook:
+			msg.Hook.AgentId = c.hookAgent
+		default:
+			return errf(codeDenied, "this socket only accepts hook events")
+		}
+	}
 	switch msg := m.GetMsg().(type) {
 	case *fleetv1.ClientMessage_Ping:
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_Pong{Pong: &fleetv1.Pong{}}})

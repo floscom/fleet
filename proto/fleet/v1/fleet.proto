@@ -353,6 +353,22 @@ enum Isolation {
   ISOLATION_PINNED = 1;
   // Daemon creates a git worktree on a new branch and runs the agent there.
   ISOLATION_WORKTREE = 2;
+  // Daemon clones RunAgentRequest.clone_url into a fresh directory (under
+  // the daemon's home, outside any root), on a new branch, and runs the
+  // agent there. Only valid together with clone_url.
+  ISOLATION_CLONE = 3;
+}
+
+// Where the agent process runs.
+enum Sandbox {
+  // Daemon default ([sandbox] default in config.toml, "none" unless set).
+  SANDBOX_UNSPECIFIED = 0;
+  // Directly on the daemon host, as the daemon user.
+  SANDBOX_NONE = 1;
+  // In a Docker container that only sees the agent's checkout (plus the
+  // repository's git metadata), a private home directory and its hook
+  // socket. The terminal, state and cleanup work as for SANDBOX_NONE.
+  SANDBOX_DOCKER = 2;
 }
 
 message Agent {
@@ -382,6 +398,10 @@ message Agent {
   string tmux_session = 16;
   // Number of clients currently attached to its terminal.
   int32 attached_clients = 17;
+  // SANDBOX_NONE or SANDBOX_DOCKER (never UNSPECIFIED).
+  Sandbox sandbox = 18;
+  // Set for CLONE isolation: the repository that was cloned.
+  string clone_url = 19;
 }
 
 message ListAgentsRequest {
@@ -402,7 +422,9 @@ message RunAgentRequest {
   // Optional; generated when empty.
   string name = 5;
   Isolation isolation = 6;
-  // Optional branch name for WORKTREE isolation. Default "fleet/<name>".
+  // Optional branch name for WORKTREE and CLONE isolation. Default
+  // "fleet/<name>". For a clone, a branch that exists on the remote is
+  // checked out; otherwise it is created from the default branch.
   string branch = 7;
   // Optional initial prompt (if the adapter supports it).
   string prompt = 8;
@@ -411,6 +433,13 @@ message RunAgentRequest {
   // Initial terminal size; defaults 200x50.
   uint32 cols = 10;
   uint32 rows = 11;
+  Sandbox sandbox = 12;
+  // Clone this git repository instead of using a folder (root, path and
+  // absolute_path must be empty; isolation must be UNSPECIFIED or CLONE).
+  // https://, ssh:// and scp-like (git@host:org/repo) URLs are accepted, and
+  // "owner/repo" as a shorthand for https://github.com/owner/repo.git. The
+  // daemon clones with its own git credentials.
+  string clone_url = 13;
 }
 message RunAgentResponse {
   Agent agent = 1;
@@ -419,8 +448,9 @@ message RunAgentResponse {
 message KillAgentRequest {
   // Agent id or name.
   string agent = 1;
-  // Also remove the git worktree (WORKTREE isolation only). Refused when the
-  // worktree has uncommitted changes unless force is set.
+  // Also remove the git worktree (WORKTREE isolation) or the clone (CLONE
+  // isolation). Refused when it has uncommitted changes, or for a clone,
+  // commits that are on no remote branch, unless force is set.
   bool remove_worktree = 2;
   bool force = 3;
   // Remove the agent from history as well (also works for finished agents).

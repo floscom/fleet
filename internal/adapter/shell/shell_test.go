@@ -68,3 +68,14 @@ func TestNoHooks(t *testing.T) {
 		t.Error("HandleHook accepted an event")
 	}
 }
+
+func TestLaunchSandbox(t *testing.T) {
+	t.Setenv("SHELL", "/nonexistent/zsh")
+	spec, err := New("").Launch(context.Background(), adapter.LaunchRequest{Sandbox: true, ExtraArgs: []string{"-x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/bin/sh", "-c", sandboxScript, "sh", "-x"}; !slices.Equal(spec.Argv, want) {
+		t.Errorf("Argv = %q, want %q", spec.Argv, want)
+	}
+}

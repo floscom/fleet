@@ -32,8 +32,13 @@ const (
 func (m *manager) loop(ctx context.Context) {
 	t := time.NewTicker(reconcileInterval)
 	defer t.Stop()
+	var lastAuth time.Time
 	for {
 		m.reconcile(ctx)
+		if time.Since(lastAuth) >= authSyncInterval && m.sandboxesLive() {
+			m.syncAuth(ctx, m.d.config())
+			lastAuth = time.Now()
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -42,9 +47,22 @@ func (m *manager) loop(ctx context.Context) {
 	}
 }
 
+// sandboxesLive reports whether any sandboxed agent is live.
+func (m *manager) sandboxesLive() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, a := range m.agents {
+		if a.live() && a.Container != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // adopt runs once at startup: live agents whose session still exists are
 // re-adopted, the rest are marked EXITED, and fleet-* sessions without a
-// live agent (orphans) are killed.
+// live agent (orphans) are killed. Sandboxed agents get their hook socket
+// back, and containers without a live agent are removed.
 func (m *manager) adopt(ctx context.Context) error {
 	panes, err := m.d.tmux.List(ctx)
 	if err != nil {
@@ -57,7 +75,10 @@ func (m *manager) adopt(ctx context.Context) error {
 	m.mu.Lock()
 	owned := map[string]bool{}
 	adopted := 0
+	hooks := map[string]string{} // agent id -> state dir
+	sandboxed := false
 	for _, a := range m.sortedLocked() {
+		sandboxed = sandboxed || a.Container != ""
 		if !a.live() {
 			continue
 		}
@@ -68,6 +89,9 @@ func (m *manager) adopt(ctx context.Context) error {
 		}
 		owned[a.TmuxSession] = true
 		adopted++
+		if a.Container != "" {
+			hooks[a.ID] = a.stateDir()
+		}
 		if a.State == stateStarting {
 			a.State = stateRunning
 			m.changedLocked(a)
@@ -85,6 +109,14 @@ func (m *manager) adopt(ctx context.Context) error {
 		if err := m.d.tmux.KillSession(ctx, p.Session); err != nil {
 			m.d.log.Warn("killing orphan failed", "session", p.Session, "err", err)
 		}
+	}
+	for id, dir := range hooks {
+		if err := m.openHookSocket(id, dir); err != nil {
+			m.d.log.Warn("reopening hook socket failed", "agent", id, "err", err)
+		}
+	}
+	if sandboxed {
+		m.reapContainers(ctx)
 	}
 	if adopted > 0 {
 		m.d.log.Info("re-adopted running agents", "count", adopted)
@@ -118,6 +150,7 @@ func (m *manager) reconcile(ctx context.Context) {
 		quick bool
 	}
 	var dead []deadPane
+	var released []*agentRec // sandboxed agents whose session vanished
 
 	m.mu.Lock()
 	now := time.Now()
@@ -132,6 +165,9 @@ func (m *manager) reconcile(ctx context.Context) {
 			a.finish(stateExited, "session disappeared", nil)
 			m.changedLocked(a)
 			finished = true
+			if a.Container != "" {
+				released = append(released, a)
+			}
 		case p.Dead:
 			quick := p.Failed() && now.Sub(time.UnixMilli(a.StartedAtMs)) < quickFailure+reconcileInterval
 			dead = append(dead, deadPane{a, p, quick})
@@ -143,6 +179,9 @@ func (m *manager) reconcile(ctx context.Context) {
 	}
 	m.mu.Unlock()
 
+	for _, a := range released {
+		m.releaseSandbox(ctx, a.ID, a.Container)
+	}
 	for _, x := range dead {
 		state, detail := stateExited, x.p.Detail()
 		if x.quick {
@@ -153,6 +192,9 @@ func (m *manager) reconcile(ctx context.Context) {
 		}
 		if err := m.d.tmux.KillSession(ctx, x.p.Session); err != nil {
 			m.d.log.Warn("killing dead session failed", "session", x.p.Session, "err", err)
+		}
+		if x.a.Container != "" {
+			m.releaseSandbox(ctx, x.a.ID, x.a.Container)
 		}
 		m.mu.Lock()
 		m.readyLocked(x.a)

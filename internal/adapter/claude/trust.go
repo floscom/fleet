@@ -72,6 +72,28 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
+// seedConfig creates Claude's global config file with onboarding marked as
+// done, unless it exists. Used for the private home of sandboxed agents,
+// where the theme and login walkthrough would greet every new container.
+// Logging in (CLAUDE_CODE_OAUTH_TOKEN, or /login once) is still needed.
+func seedConfig(file string) error {
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString("{\n  \"hasCompletedOnboarding\": true\n}\n")
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 // trustFolder marks dir as trusted in Claude's global config file. A missing
 // file is left alone: Claude has not been set up yet and will show its
 // onboarding (and the trust prompt) anyway.

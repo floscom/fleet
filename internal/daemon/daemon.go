@@ -21,6 +21,7 @@ import (
 	"fleet/internal/config"
 	"fleet/internal/discovery"
 	"fleet/internal/identity"
+	"fleet/internal/sandbox"
 	"fleet/internal/tmux"
 )
 
@@ -43,6 +44,8 @@ type daemon struct {
 	opts    Options
 	log     *slog.Logger
 	started time.Time
+	// ctx is Run's context; it ends when the daemon stops.
+	ctx context.Context
 
 	cfgMu sync.Mutex
 	cfg   *config.Config
@@ -51,7 +54,14 @@ type daemon struct {
 	devices *identity.DeviceStore
 	codes   *identity.PairingCodes
 	tmux    *tmux.Tmux
+	docker  *sandbox.Docker
 	agents  *manager
+
+	// sbMu guards the per-sandbox-dir caches: dirs Docker was shown to
+	// mount, and the fleet binary copied into each.
+	sbMu     sync.Mutex
+	sbProbed map[string]bool
+	sbFleet  map[string]string
 
 	connsMu sync.Mutex
 	conns   map[*conn]struct{}
@@ -95,8 +105,13 @@ func Run(ctx context.Context, opts Options) error {
 		started: time.Now(),
 		cfg:     cfg,
 		codes:   identity.NewPairingCodes(),
+		ctx:     ctx,
 		tmux:    tmux.New(cfg.TmuxSocket),
+		docker:  &sandbox.Docker{Binary: cfg.Sandbox.DockerOrDefault()},
 		conns:   map[*conn]struct{}{},
+
+		sbProbed: map[string]bool{},
+		sbFleet:  map[string]string{},
 	}
 	// The identity lives in <home>/identity; LoadOrCreateServer appends it.
 	if d.server, err = identity.LoadOrCreateServer(home, cfg.Name); err != nil {
@@ -108,12 +123,14 @@ func Run(ctx context.Context, opts Options) error {
 	if _, err := d.tmux.Available(ctx); err != nil {
 		return fmt.Errorf("tmux is required: %w", err)
 	}
+	d.checkAuthConfig(*cfg)
 	if d.agents, err = newManager(d); err != nil {
 		return err
 	}
 	if err := d.agents.adopt(ctx); err != nil {
 		return err
 	}
+	defer d.agents.closeHookSockets()
 
 	unixLn, err := listenUnix(config.SocketPath())
 	if err != nil {
@@ -160,7 +177,7 @@ func Run(ctx context.Context, opts Options) error {
 		bg.Add(1)
 		go func(ln net.Listener, local bool) {
 			defer bg.Done()
-			d.serve(ctx, ln, local)
+			d.serve(ctx, ln, local, "")
 		}(ln, i == 0)
 	}
 
@@ -168,6 +185,7 @@ func Run(ctx context.Context, opts Options) error {
 	for _, ln := range lns {
 		ln.Close()
 	}
+	d.agents.closeHookSockets()
 	d.closeAllConns()
 	bg.Wait()
 	d.connWG.Wait()

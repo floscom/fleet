@@ -75,9 +75,12 @@ func (c *codex) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapter
 	if req.FleetBinary == "" {
 		return nil, errors.New("codex: FleetBinary is required")
 	}
-	path, err := c.bin.Find()
-	if err != nil {
-		return nil, fmt.Errorf("codex: %w", err)
+	path := c.bin.Name
+	if !req.Sandbox {
+		var err error
+		if path, err = c.bin.Find(); err != nil {
+			return nil, fmt.Errorf("codex: %w", err)
+		}
 	}
 	argv := []string{path, "-c", "check_for_update_on_startup=false"}
 	for _, o := range HookOverrides(req.FleetBinary, req.AgentID) {

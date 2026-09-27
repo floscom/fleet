@@ -548,7 +548,7 @@ req.auth = .with {
   order**, and its responses come back in request order. A slow request
   therefore delays everything sent after it on the same connection:
   `RunAgentRequest` can take seconds (git worktree creation, up to a 60 s
-  limit), `ListAdaptersRequest` runs each CLI's `--version` the first time
+  limit; a `clone_url` clone, up to 10 minutes), `ListAdaptersRequest` runs each CLI's `--version` the first time
   (up to 3 s each), and `DetachRequest` waits up to 5 s. Use separate
   connections for independent work (section 13).
 - Pushed messages have `id` 0 and can arrive at any time between responses:
@@ -704,11 +704,16 @@ agents. No errors.
 
 **`RunAgentRequest` → `RunAgentResponse{agent}`**
 
-Target directory, one of:
+Target, one of:
 
 - `root` + `path` (relative inside the root; `""` is the root itself), or
 - `absolute_path` (used when `root` is empty); the most specific root that
-  contains it is chosen.
+  contains it is chosen, or
+- `clone_url`: a git repository the daemon clones (see `ISOLATION_CLONE`).
+  `https://…`, `ssh://…`, scp-like `git@host:org/repo`, and the shorthands
+  `owner/repo` (GitHub) and `host.tld/owner/repo` (https) are accepted;
+  local paths, `file://` and other transports are refused. The daemon
+  clones with its own git credentials. Roots do not apply.
 
 The directory is fully symlink-resolved and must exist and lie inside the
 root.
@@ -725,6 +730,31 @@ Isolation:
   (`branch`, default `fleet/<name>`) and runs the agent in the same
   sub-directory of the worktree that was requested. `Agent.path` is the
   requested directory, `Agent.cwd` is the directory inside the worktree.
+- `ISOLATION_CLONE`: only with `clone_url` (which implies it). The daemon
+  clones the repository into `$FLEET_HOME/clones/<name>` (submodules are not
+  cloned) and checks out `branch` (default `fleet/<name>`): the remote
+  branch of that name if there is one, else a new branch from the default
+  branch. `Agent.path` and `Agent.cwd` are the clone, `Agent.clone_url` the
+  normalized URL.
+
+Sandbox (`sandbox`):
+
+- `SANDBOX_UNSPECIFIED`: `[sandbox] default` in `config.toml`, `NONE`
+  unless set.
+- `SANDBOX_NONE`: the agent runs on the daemon host.
+- `SANDBOX_DOCKER`: the agent runs in a Docker container (the agent CLI
+  comes from the image, not the host). The tmux pane runs `docker run -it`,
+  so attaching, `SendText`, states and exit codes work as without a
+  sandbox. The container sees only the agent's checkout at its host path
+  (worktree, clone, or for `PINNED` the folder, or the whole repository
+  when the folder is inside one), the repository's shared git directory
+  (read-write, so the agent can commit; its `config` and `hooks` read-only),
+  a persistent sandbox home directory, and a socket that only accepts hook
+  events for this agent. Worktrees and clones of sandboxed agents are
+  created under `[sandbox] dir` instead of `$FLEET_HOME`. Folder trust
+  prompts are always pre-answered in a sandbox. The container is removed
+  when the agent ends or is killed. `Agent.sandbox` is never
+  `UNSPECIFIED`.
 
 Other fields:
 
@@ -749,9 +779,12 @@ Behaviour:
 
 Errors: `NOT_FOUND` (unknown adapter, unknown root, missing directory);
 `ADAPTER_UNAVAILABLE` (CLI not installed, or the adapter could not build its
-command); `INVALID_ARGUMENT` (neither root nor absolute_path, relative
-`absolute_path`, not a directory, `WORKTREE` outside a git repository,
-invalid name, unknown isolation, worktree creation failed);
+command; for `SANDBOX_DOCKER`: Docker unreachable, image missing, or Docker
+cannot mount `[sandbox] dir`; the clone failed); `INVALID_ARGUMENT` (no
+target, `clone_url` together with a folder or a non-`CLONE` isolation,
+unsupported `clone_url`, relative `absolute_path`, not a directory,
+`WORKTREE` outside a git repository, `CLONE` without `clone_url`, invalid
+name, unknown isolation or sandbox, worktree creation failed);
 `OUTSIDE_ROOTS`; `PERMISSION_DENIED` (adapter not allowed in that root);
 `ALREADY_EXISTS` (name taken); `DIRECTORY_BUSY` (another pinned agent);
 `INTERNAL` (tmux failed).
@@ -760,13 +793,15 @@ invalid name, unknown isolation, worktree creation failed);
 
 - `agent` is an id or a name. Names prefer the live agent, then the newest
   finished one.
-- A live agent's tmux session is killed. The agent becomes `EXITED` with
-  detail `"killed"` (or the real exit status if it had already died).
+- A live agent's tmux session is killed (and its container removed, for
+  `SANDBOX_DOCKER`). The agent becomes `EXITED` with detail `"killed"` (or
+  the real exit status if it had already died).
   Killing a finished agent is allowed; it just does the worktree and forget
   steps.
-- `remove_worktree`: also remove the agent's worktree (branch is kept). It
-  is kept, with `worktree_kept = true` and a reason, if it has uncommitted
-  changes, unless `force` is set.
+- `remove_worktree`: also remove the agent's worktree (branch is kept) or
+  clone. It is kept, with `worktree_kept = true` and a reason, if it has
+  uncommitted changes, or for a clone, commits that are on no remote
+  branch, unless `force` is set.
 - `forget`: remove the agent from history (`agent_removed` event).
 - Errors: `INVALID_ARGUMENT` (empty `agent`, or the agent is busy starting
   or being killed; retry later); `NOT_FOUND`; `INTERNAL` (tmux failed).

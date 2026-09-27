@@ -232,3 +232,30 @@ func TestDetectPrompt(t *testing.T) {
 		t.Error("composer detected as a dialog")
 	}
 }
+
+func TestLaunchSandbox(t *testing.T) {
+	spec, err := New(filepath.Join(t.TempDir(), "missing"), nil).Launch(context.Background(),
+		adapter.LaunchRequest{AgentID: "a", FleetBinary: "/f", Sandbox: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Argv[0] != "codex" {
+		t.Errorf("argv[0] = %q, want codex", spec.Argv[0])
+	}
+}
+
+func TestAuthFile(t *testing.T) {
+	a := New("", nil).(adapter.AuthProvider)
+	t.Setenv("HOME", "/h")
+	t.Setenv("CODEX_HOME", "")
+	if got := a.AuthFile(""); got != "/h/.codex/auth.json" {
+		t.Errorf("AuthFile = %q", got)
+	}
+	t.Setenv("CODEX_HOME", "/ch")
+	if got := a.AuthFile(""); got != "/ch/auth.json" {
+		t.Errorf("AuthFile with CODEX_HOME = %q", got)
+	}
+	if got := a.AuthFile("/sb"); got != "/sb/.codex/auth.json" {
+		t.Errorf("AuthFile(/sb) = %q", got)
+	}
+}

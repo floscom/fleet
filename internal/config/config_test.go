@@ -272,3 +272,50 @@ func must(t *testing.T, err error) {
 		t.Fatal(err)
 	}
 }
+
+func TestSandboxConfig(t *testing.T) {
+	h := setHome(t)
+	write := func(s string) {
+		t.Helper()
+		os.MkdirAll(h, 0o700)
+		if err := os.WriteFile(filepath.Join(h, "config.toml"), []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := c.Sandbox
+	if s.Default != "" || s.ImageOrDefault() != DefaultSandboxImage || s.DockerOrDefault() != "docker" ||
+		s.DirOrDefault() != filepath.Join(h, "sandbox") || strings.Join(s.EnvOrDefault(), ",") != strings.Join(DefaultSandboxEnv, ",") {
+		t.Fatalf("sandbox defaults wrong: %+v", s)
+	}
+
+	write("[sandbox]\ndefault = \"docker\"\nenv = []\ndir = \"~/fleet-sandbox\"\n")
+	if c, err = Load(); err != nil {
+		t.Fatal(err)
+	}
+	u, _ := os.UserHomeDir()
+	if c.Sandbox.Default != "docker" || len(c.Sandbox.EnvOrDefault()) != 0 || c.Sandbox.DirOrDefault() != filepath.Join(u, "fleet-sandbox") {
+		t.Fatalf("sandbox = %+v", c.Sandbox)
+	}
+
+	for _, bad := range []string{"[sandbox]\ndefault = \"vm\"\n", "[sandbox]\ndir = \"rel/dir\"\n"} {
+		write(bad)
+		if _, err := Load(); err == nil {
+			t.Errorf("Load accepted %q", bad)
+		}
+	}
+
+	// An empty [sandbox] table is not written back.
+	write("")
+	c, _ = Load()
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(h, "config.toml"))
+	if strings.Contains(string(b), "sandbox") {
+		t.Errorf("saved config mentions sandbox:\n%s", b)
+	}
+}

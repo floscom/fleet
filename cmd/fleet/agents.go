@@ -55,14 +55,21 @@ func newLsCmd() *cobra.Command {
 	return cmd
 }
 
-// agentPath shows where the agent runs, with its branch for worktrees.
+// agentPath shows where the agent runs, with its branch for worktrees and
+// clones, and whether it is sandboxed.
 func agentPath(a *fleetv1.Agent) string {
 	p := a.Path
 	if p == "" {
 		p = a.Cwd
 	}
+	if a.CloneUrl != "" {
+		p = a.CloneUrl
+	}
 	if a.Branch != "" {
 		p += " [" + a.Branch + "]"
+	}
+	if a.Sandbox == fleetv1.Sandbox_SANDBOX_DOCKER {
+		p += " (docker)"
 	}
 	return orDash(p)
 }
@@ -106,8 +113,8 @@ func parseRunPath(p string) (root, rel, abs string, err error) {
 
 func newRunCmd() *cobra.Command {
 	var (
-		name, branch, prompt       string
-		pinned, worktree, attachTo bool
+		name, branch, prompt, clone, sandbox string
+		pinned, worktree, attachTo, docker   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run <adapter> [path] [-- extra args]",
@@ -117,10 +124,16 @@ func newRunCmd() *cobra.Command {
 path is "root:rel/path", an absolute path, or (local daemon only) a path
 relative to the current directory. Default ".". Inside a git repository the
 agent gets its own worktree and branch unless --pinned is given.
+With --clone, the daemon clones a repository instead (no path).
+
+--docker runs the agent in a container that only sees its checkout
+(the server needs Docker and the image from "fleet sandbox build").
 Arguments after "--" are passed to the agent CLI.`,
 		Example: `  fleet run claude
   fleet run codex code:api --prompt "fix the flaky test"
   fleet run claude ~/code/web --pinned --attach
+  fleet run claude code:api --docker
+  fleet run claude --clone owner/repo --docker --prompt "fix issue 42"
   fleet run claude . -- --model opus`,
 		Args: cobra.ArbitraryArgs, // validated below; args after "--" are the agent's
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -134,23 +147,44 @@ Arguments after "--" are passed to the agent CLI.`,
 			if pinned && worktree {
 				return errors.New("--pinned and --worktree are mutually exclusive")
 			}
-			target := "."
-			if len(args) == 2 {
-				target = args[1]
-			}
-			root, rel, abs, err := parseRunPath(target)
-			if err != nil {
-				return err
-			}
 			req := &fleetv1.RunAgentRequest{
-				Adapter: args[0], Root: root, Path: rel, AbsolutePath: abs,
-				Name: name, Branch: branch, Prompt: prompt, ExtraArgs: extra,
+				Adapter: args[0], Name: name, Branch: branch, Prompt: prompt, ExtraArgs: extra,
+			}
+			if clone != "" {
+				if len(args) == 2 || pinned || worktree {
+					return errors.New("--clone takes no path, --pinned or --worktree")
+				}
+				req.CloneUrl = clone
+			} else {
+				target := "."
+				if len(args) == 2 {
+					target = args[1]
+				}
+				var err error
+				if req.Root, req.Path, req.AbsolutePath, err = parseRunPath(target); err != nil {
+					return err
+				}
 			}
 			switch {
 			case pinned:
 				req.Isolation = fleetv1.Isolation_ISOLATION_PINNED
 			case worktree:
 				req.Isolation = fleetv1.Isolation_ISOLATION_WORKTREE
+			}
+			if docker {
+				if sandbox != "" && sandbox != "docker" {
+					return errors.New("--docker and --sandbox " + sandbox + " contradict each other")
+				}
+				sandbox = "docker"
+			}
+			switch sandbox {
+			case "":
+			case "docker":
+				req.Sandbox = fleetv1.Sandbox_SANDBOX_DOCKER
+			case "none":
+				req.Sandbox = fleetv1.Sandbox_SANDBOX_NONE
+			default:
+				return fmt.Errorf("unknown sandbox %q (docker or none)", sandbox)
 			}
 			if cols, rows, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
 				req.Cols, req.Rows = uint32(cols), uint32(rows)
@@ -169,6 +203,9 @@ Arguments after "--" are passed to the agent CLI.`,
 			if a.Branch != "" {
 				where += " on branch " + a.Branch
 			}
+			if a.Sandbox == fleetv1.Sandbox_SANDBOX_DOCKER {
+				where += ", in docker"
+			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "started %s (%s, %s) in %s\n", a.Name, a.Id, a.Adapter, where)
 			if !attachTo {
 				fmt.Fprintf(cmd.ErrOrStderr(), "attach with: fleet attach %s\n", a.Name)
@@ -181,7 +218,10 @@ Arguments after "--" are passed to the agent CLI.`,
 	f.StringVar(&name, "name", "", "agent name (default: generated)")
 	f.BoolVar(&pinned, "pinned", false, "run directly in the folder (no worktree)")
 	f.BoolVar(&worktree, "worktree", false, "require a git worktree on a new branch")
-	f.StringVar(&branch, "branch", "", "branch for the worktree (default fleet/<name>)")
+	f.StringVar(&branch, "branch", "", "branch for the worktree or clone (default fleet/<name>)")
+	f.StringVar(&clone, "clone", "", "clone this repository (URL or owner/repo) instead of using a folder")
+	f.BoolVar(&docker, "docker", false, "run in a Docker sandbox (same as --sandbox docker)")
+	f.StringVar(&sandbox, "sandbox", "", `"docker" or "none" (default: the server's [sandbox] default)`)
 	f.StringVar(&prompt, "prompt", "", "initial prompt, if the adapter supports it")
 	f.BoolVar(&attachTo, "attach", false, "attach to the agent's terminal right away")
 	return cmd
@@ -210,7 +250,11 @@ func newKillCmd() *cobra.Command {
 					}
 					fmt.Fprintf(cmd.OutOrStdout(), "%s %s (%s)\n", verb, a.GetName(), a.GetId())
 					if r.WorktreeKept && rmWorktree {
-						fmt.Fprintf(cmd.OutOrStdout(), "  worktree kept: %s\n", r.WorktreeKeptReason)
+						what := "worktree"
+						if a.GetIsolation() == fleetv1.Isolation_ISOLATION_CLONE {
+							what = "clone"
+						}
+						fmt.Fprintf(cmd.OutOrStdout(), "  %s kept: %s\n", what, r.WorktreeKeptReason)
 					}
 				}
 				if failed != nil {
@@ -220,7 +264,7 @@ func newKillCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVar(&rmWorktree, "rm-worktree", false, "also remove the agent's git worktree (kept if it has uncommitted changes)")
+	cmd.Flags().BoolVar(&rmWorktree, "rm-worktree", false, "also remove the agent's git worktree or clone (kept if it has uncommitted or unpushed work)")
 	cmd.Flags().BoolVar(&force, "force", false, "remove the worktree even with uncommitted changes")
 	cmd.Flags().BoolVar(&forget, "forget", false, "remove the agent from history too")
 	return cmd

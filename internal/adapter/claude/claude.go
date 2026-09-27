@@ -79,12 +79,25 @@ func (c *claude) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapte
 	if req.FleetBinary == "" || req.StateDir == "" {
 		return nil, errors.New("claude: FleetBinary and StateDir are required")
 	}
-	path, err := c.bin.Find()
-	if err != nil {
-		return nil, fmt.Errorf("claude: %w", err)
+	path := c.bin.Name
+	if !req.Sandbox {
+		var err error
+		if path, err = c.bin.Find(); err != nil {
+			return nil, fmt.Errorf("claude: %w", err)
+		}
+	}
+	if req.Home != "" {
+		// A private home starts without Claude's config; skip onboarding
+		// there so the agent starts straight into its session.
+		if err := seedConfig(filepath.Join(req.Home, ".claude.json")); err != nil {
+			return nil, fmt.Errorf("claude: %w", err)
+		}
 	}
 	if req.TrustDir != "" {
 		file, err := globalConfigFile()
+		if req.Home != "" {
+			file, err = filepath.Join(req.Home, ".claude.json"), nil
+		}
 		if err == nil {
 			err = trustFolder(ctx, file, req.TrustDir)
 		}
@@ -99,6 +112,7 @@ func (c *claude) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapte
 	extra := append(slices.Clone(c.extraArgs), req.ExtraArgs...)
 	argv := []string{path}
 	var sid string
+	var err error
 	if !resumes(extra) {
 		if sid, err = newUUID(); err != nil {
 			return nil, fmt.Errorf("claude: session id: %w", err)

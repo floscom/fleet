@@ -35,6 +35,9 @@ type conn struct {
 	raw   net.Conn
 	local bool
 	nonce []byte
+	// hookAgent is set on a sandboxed agent's hook socket: the connection
+	// may only deliver hook events for that agent.
+	hookAgent string
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -51,8 +54,9 @@ type conn struct {
 	attaches map[string]*attachment
 }
 
-// serve accepts connections until ln is closed.
-func (d *daemon) serve(ctx context.Context, ln net.Listener, local bool) {
+// serve accepts connections until ln is closed. hookAgent restricts every
+// connection to hook events of that agent (see conn.hookAgent).
+func (d *daemon) serve(ctx context.Context, ln net.Listener, local bool, hookAgent string) {
 	for {
 		nc, err := ln.Accept()
 		if err != nil {
@@ -64,7 +68,7 @@ func (d *daemon) serve(ctx context.Context, ln net.Listener, local bool) {
 			return
 		}
 		cctx, cancel := context.WithCancel(ctx)
-		c := &conn{d: d, raw: nc, local: local, ctx: cctx, cancel: cancel, attaches: map[string]*attachment{}}
+		c := &conn{d: d, raw: nc, local: local, hookAgent: hookAgent, ctx: cctx, cancel: cancel, attaches: map[string]*attachment{}}
 		if !d.addConn(c) {
 			cancel()
 			nc.Close()
