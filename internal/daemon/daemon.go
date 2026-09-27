@@ -23,6 +23,7 @@ import (
 	"fleet/internal/identity"
 	"fleet/internal/sandbox"
 	"fleet/internal/tmux"
+	"fleet/internal/web"
 )
 
 // Options configures Run.
@@ -37,6 +38,8 @@ type Options struct {
 	Listen string
 	// NoMDNS disables advertisement regardless of config.
 	NoMDNS bool
+	// Web overrides config.Web when non-empty ("off" disables the web UI).
+	Web string
 }
 
 // daemon is the state shared by every connection.
@@ -93,6 +96,12 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
+	webAddr := webAddr(opts.Web, cfg.Web)
+	if webAddr != "off" {
+		if err := web.CheckAddr(webAddr); err != nil {
+			return err
+		}
+	}
 	unlock, err := lockPIDFile(config.Path("daemon.pid"))
 	if err != nil {
 		return err
@@ -116,6 +125,14 @@ func Run(ctx context.Context, opts Options) error {
 	// The identity lives in <home>/identity; LoadOrCreateServer appends it.
 	if d.server, err = identity.LoadOrCreateServer(home, cfg.Name); err != nil {
 		return err
+	}
+	var ws *web.Server
+	wsrc := &webSource{d: d}
+	if webAddr != "off" {
+		ws, err = web.New(web.Options{Addr: webAddr, Source: wsrc, TokenPath: config.Path("web-token"), Log: d.log})
+		if err != nil {
+			return err
+		}
 	}
 	if d.devices, err = identity.OpenDeviceStore(config.Path("devices.json")); err != nil {
 		return err
@@ -154,14 +171,25 @@ func Run(ctx context.Context, opts Options) error {
 		lns = append(lns, ln)
 		d.log.Info("listening", "tls", ln.Addr().String())
 	}
+	// The web UI is optional: a busy port must not stop the daemon.
+	var webLn net.Listener
+	if ws != nil {
+		if webLn, err = net.Listen("tcp", webAddr); err != nil {
+			d.log.Warn("web ui disabled", "addr", webAddr, "err", err)
+			ws = nil
+		}
+	}
 	d.log.Info("fleet daemon started", "version", opts.Version, "socket", config.SocketPath(), "server_id", d.server.ID[:16])
 
-	if tlsPort != 0 && !opts.NoMDNS && cfg.MDNSEnabled() {
+	mdns := tlsPort != 0 && !opts.NoMDNS && cfg.MDNSEnabled()
+	if mdns {
 		stop, err := discovery.Advertise(ctx, discovery.Advertisement{
 			Instance: cfg.Name, ServerID: d.server.ID, Name: cfg.Name, Port: tlsPort,
+			WebPort: lanPort(webLn),
 		})
 		if err != nil {
 			d.log.Warn("mdns advertisement failed", "err", err)
+			mdns = false // not advertised; the web UI must not claim it is
 		} else {
 			defer stop()
 		}
@@ -180,6 +208,17 @@ func Run(ctx context.Context, opts Options) error {
 			d.serve(ctx, ln, local, "")
 		}(ln, i == 0)
 	}
+	if ws != nil {
+		wsrc.listen, wsrc.mdns = listen, mdns
+		if listen == "" {
+			wsrc.listen = "off"
+		}
+		bg.Add(1)
+		go func() {
+			defer bg.Done()
+			ws.Serve(ctx, webLn)
+		}()
+	}
 
 	<-ctx.Done()
 	for _, ln := range lns {
@@ -191,6 +230,31 @@ func Run(ctx context.Context, opts Options) error {
 	d.connWG.Wait()
 	d.log.Info("fleet daemon stopped")
 	return nil
+}
+
+// lanPort returns ln's port if other machines can reach it (it does not
+// listen on loopback only), else 0.
+func lanPort(ln net.Listener) int {
+	if ln == nil {
+		return 0
+	}
+	a, ok := ln.Addr().(*net.TCPAddr)
+	if !ok || a.IP.IsLoopback() {
+		return 0
+	}
+	return a.Port
+}
+
+// webAddr resolves the web UI address: the flag, else config, else
+// config.DefaultWeb.
+func webAddr(flag, cfg string) string {
+	switch {
+	case flag != "":
+		return flag
+	case cfg != "":
+		return cfg
+	}
+	return config.DefaultWeb
 }
 
 // lockPIDFile takes an exclusive flock on path and writes our pid into it.

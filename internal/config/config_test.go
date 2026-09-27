@@ -47,7 +47,7 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	hn, _ := os.Hostname()
 	if c.Name != hn || c.Listen != DefaultListen || c.TmuxSocket != DefaultTmuxSocket() ||
-		c.DefaultIsolation != "worktree" || !c.MDNSEnabled() {
+		c.DefaultIsolation != "worktree" || !c.MDNSEnabled() || c.Web != "" {
 		t.Fatalf("defaults wrong: %+v", c)
 	}
 }
@@ -75,7 +75,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	h := setHome(t)
 	off := false
 	dir := t.TempDir()
-	c := &Config{Name: "box", Listen: "", MDNS: &off, TmuxSocket: "x", DefaultIsolation: "pinned",
+	c := &Config{Name: "box", Listen: "", Web: "off", MDNS: &off, TmuxSocket: "x", DefaultIsolation: "pinned",
 		Adapters: map[string]AdapterConfig{"claude": {Binary: "/opt/claude", Args: []string{"--x"}}}}
 	if _, err := c.AddRoot(Root{Path: dir, Name: "code", Adapters: []string{"claude"}}); err != nil {
 		t.Fatal(err)
@@ -91,7 +91,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Name != "box" || got.Listen != "" || got.MDNSEnabled() || got.TmuxSocket != "x" ||
+	if got.Name != "box" || got.Listen != "" || got.Web != "off" || got.MDNSEnabled() || got.TmuxSocket != "x" ||
 		got.DefaultIsolation != "pinned" || got.Adapters["claude"].Binary != "/opt/claude" {
 		t.Fatalf("round trip mismatch: %+v", got)
 	}

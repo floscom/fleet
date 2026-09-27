@@ -1,5 +1,15 @@
 # fleet
 
+```
+███████╗██╗     ███████╗███████╗████████╗
+██╔════╝██║     ██╔════╝██╔════╝╚══██╔══╝
+█████╗  ██║     █████╗  █████╗     ██║
+██╔══╝  ██║     ██╔══╝  ██╔══╝     ██║
+██║     ███████╗███████╗███████╗   ██║
+╚═╝     ╚══════╝╚══════╝╚══════╝   ╚═╝
+agents in formation // lan // tmux
+```
+
 fleet runs coding agents (Claude Code, Codex, a plain shell, and more
 through adapters) in tmux sessions on a server, and lets your other machines
 on the same LAN start, watch, stop and type into them.
@@ -47,6 +57,7 @@ fleet roots add ~/code --trust  # allow agents in ~/code (root name "code"), ski
 fleet adapters                  # which agent CLIs were found
 fleet run claude code:api --attach   # try it locally; detach with Ctrl-\
 fleet pair                      # one-time code + server fingerprint for a new device
+fleet web                       # admin link for the web dashboard: browse folders, add roots
 ```
 
 On the laptop, with the code and fingerprint that `fleet pair` printed:
@@ -67,8 +78,8 @@ address. Without it, commands talk to the local daemon.
 
 | Command | What it does |
 |---------|--------------|
-| `fleet daemon [--listen ADDR\|off] [--no-mdns]` | Run the daemon in the foreground (logs to stderr). |
-| `fleet start [--listen ...] [--no-mdns]` | Start the daemon in the background. |
+| `fleet daemon [--listen ADDR\|off] [--web ADDR\|off] [--no-mdns]` | Run the daemon in the foreground (logs to stderr). |
+| `fleet start [--listen ...] [--web ...] [--no-mdns]` | Start the daemon in the background. |
 | `fleet stop [--force]` | Stop the daemon. Agents keep running in tmux. |
 | `fleet status` | Daemon version, uptime, server id, agent, root and device counts. |
 | `fleet version` | Print the version. |
@@ -87,6 +98,7 @@ address. Without it, commands talk to the local daemon.
 | `fleet discover [--timeout 2s]` | List daemons on the LAN. |
 | `fleet servers` / `servers rm <name\|id>` | Daemons this machine is paired with. |
 | `fleet devices` / `devices revoke <id\|name>` | Devices paired with the daemon. |
+| `fleet web [--rotate]` | Print admin links for this machine's [web dashboard](#web-dashboard); `--rotate` signs every browser out. Run it on the server. |
 | `fleet hook ...` | Internal: called by agent hooks. |
 
 Agents are referred to by id (`a1b2c3`) or name (`claude-api-1`, or the
@@ -188,6 +200,7 @@ Everything lives in `FLEET_HOME` (default `~/.fleet`, mode 0700):
 | `daemon.pid`, `daemon.log` | pid of the running daemon; log when started with `fleet start` |
 | `identity/` | server TLS key and certificate, this machine's device key (0600) |
 | `devices.json` | devices paired with this daemon |
+| `web-token` | the web dashboard's admin token (0600), created by `fleet web` |
 | `servers.json` | daemons this machine has paired with |
 | `agents.json`, `agents/<id>/` | agent registry and per-agent adapter files |
 | `worktrees/` | git worktrees created for agents |
@@ -203,6 +216,10 @@ name = "studio"
 # TCP address for paired devices (TLS). Default "0.0.0.0:7420".
 # "off" or "" disables remote access; the CLI on the server still works.
 listen = "0.0.0.0:7420"
+
+# Web dashboard, plain HTTP (see "Web dashboard"). Default "0.0.0.0:7421".
+# "127.0.0.1:7421" keeps it on this machine; "off" disables it.
+web = "0.0.0.0:7421"
 
 # Advertise the daemon on the LAN via mDNS (_fleet._tcp). Default true.
 mdns = true
@@ -241,7 +258,65 @@ docker = "docker"                # the docker CLI
 The daemon reads `config.toml` at startup. Changes made through the CLI
 (`fleet roots add/rm`) apply immediately and rewrite the file (comments are
 not kept). Restart the daemon after editing the file by hand. Command-line
-`--listen` and `--no-mdns` override the file.
+`--listen`, `--web` and `--no-mdns` override the file.
+
+## Web dashboard
+
+The daemon serves a live dashboard at <http://SERVER:7421/>: agents and
+their states, the fleet daemons it sees on the LAN, paired devices and
+roots. It updates over a WebSocket (`/ws`) as agents start, change state or
+exit.
+
+**Viewing needs nothing; managing needs the admin link.** Run `fleet web`
+on the server:
+
+```
+$ fleet web
+Admin links for the fleet dashboard on studio (open one once per browser):
+
+    http://192.168.1.20:7421/#token=3f9c...
+    http://localhost:7421/#token=3f9c...
+```
+
+Open one in the browser you manage the fleet from. That browser then
+shows **admin** in the header and can:
+
+- **Add folders as roots**: *Roots → Add folder* opens a folder picker
+  over the server's file system. Walk into folders (click, or type to
+  filter and press Enter; Backspace goes up), paste a path, show hidden
+  folders; git repositories and existing roots are marked. Then pick a
+  name, optionally limit it to some agents, optionally trust it (see
+  [Folder trust](#folder-trust)) and add the current folder.
+- **Remove roots** (running agents are not affected).
+- **Jump to other fleets**: every daemon under *Fleet on the network*
+  links to its own dashboard. Each fleet has its own admin token: run
+  `fleet web` there once as well.
+
+Changes apply at once, rewrite `config.toml` and show up in the CLI
+(`fleet roots`) and in every open dashboard.
+
+- **The token.** `fleet web` creates `~/.fleet/web-token` (0600) and
+  prints it in the link's `#fragment`, which browsers never send to the
+  server. The page moves it to `localStorage` (per origin) and sends it as
+  an `Authorization: Bearer` header on admin requests; there is no cookie,
+  so other sites cannot make your browser act for them.
+  `fleet web --rotate` replaces it and every browser loses admin rights on
+  its next request (no restart needed). *sign out* forgets it in one
+  browser.
+- **Plain HTTP.** The token crosses the network in the clear on each admin
+  request. Use it on a network you trust, over Tailscale/WireGuard, or keep
+  the dashboard on the server (`web = "127.0.0.1:7421"`) and forward it:
+  `ssh -L 7421:127.0.0.1:7421 studio`.
+- Requests whose `Host` does not name this machine (an IP, `localhost` or
+  its hostname) get 403 (DNS rebinding), the WebSocket only accepts
+  same-origin pages, and a strict Content-Security-Policy is sent.
+- `--web ADDR` or `web` in `config.toml` sets the address, `--web off`
+  disables it. If the port is busy the daemon logs a warning and runs
+  without it. The daemon advertises the dashboard's port in mDNS (TXT
+  `web`) unless it listens on loopback only.
+- Everything is embedded in the binary. The compiled Tailwind CSS
+  (`internal/web/static/app.css`) is committed, so `make build` needs no
+  Tailwind; `make web` rebuilds it after UI changes.
 
 ## How tmux is used, and how cleanup works
 
@@ -312,6 +387,10 @@ What protects the daemon:
   (`fleet devices revoke`) closes its connections and it must pair again.
 - **Local socket.** `~/.fleet/fleet.sock` is mode 0600: any process of the
   same Unix user has full access without pairing.
+- **Web dashboard.** Anyone who can reach its port sees agents, paths,
+  roots and devices. Changing roots and listing folders needs the admin
+  token from `fleet web` (see [Web dashboard](#web-dashboard)); it cannot
+  start, stop or type into agents.
 
 Honest limits:
 
@@ -352,6 +431,11 @@ Honest limits:
 - **mDNS is unauthenticated.** Anyone on the LAN can advertise a fake
   daemon. Pinning makes this harmless for paired servers; during pairing
   the fingerprint check is what stops it.
+- **The web admin token travels over plain HTTP.** Someone who can sniff
+  the LAN can capture it from a browser's admin request and then add
+  roots (with trust) and list every folder the daemon's user can read.
+  Rotate it with `fleet web --rotate`, and bind the dashboard to
+  `127.0.0.1` on networks you do not trust.
 - **The device key is the credential.** Whoever copies
   `~/.fleet/identity/device.key` (or an app's key) has that device's access
   until it is revoked.

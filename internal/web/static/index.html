@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en" class="bg-ink-950">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#07090c">
+<meta name="referrer" content="no-referrer">
+<title>fleet</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body class="min-h-screen bg-ink-950 font-sans text-[14px] leading-normal text-zinc-300 antialiased">
+<a href="#agents" class="sr-only focus:not-sr-only focus:fixed focus:left-3 focus:top-3 focus:z-50 focus:rounded-md focus:bg-ink-800 focus:px-3 focus:py-2 focus:text-zinc-100">Skip to agents</a>
+
+<header class="header-bg border-b border-ink-700/70 bg-ink-900/40">
+  <div class="mx-auto flex max-w-[1400px] flex-col gap-6 px-4 pb-6 pt-6 sm:px-6 lg:flex-row lg:items-end lg:justify-between lg:px-8 lg:pt-8">
+    <div class="min-w-0">
+<pre class="select-none font-mono text-[8px] leading-none text-zinc-700 min-[400px]:text-[9px] lg:text-[10px]" aria-hidden="true"><span class="text-zinc-300">███████</span>╗<span class="text-zinc-300">██</span>╗     <span class="text-zinc-300">███████</span>╗<span class="text-zinc-300">███████</span>╗<span class="text-zinc-300">████████</span>╗
+<span class="text-zinc-300">██</span>╔════╝<span class="text-zinc-300">██</span>║     <span class="text-zinc-300">██</span>╔════╝<span class="text-zinc-300">██</span>╔════╝╚══<span class="text-zinc-300">██</span>╔══╝
+<span class="text-zinc-300">█████</span>╗  <span class="text-zinc-300">██</span>║     <span class="text-zinc-300">█████</span>╗  <span class="text-zinc-300">█████</span>╗     <span class="text-zinc-300">██</span>║
+<span class="text-zinc-300">██</span>╔══╝  <span class="text-zinc-300">██</span>║     <span class="text-zinc-300">██</span>╔══╝  <span class="text-zinc-300">██</span>╔══╝     <span class="text-zinc-300">██</span>║
+<span class="text-zinc-300">██</span>║     <span class="text-zinc-300">███████</span>╗<span class="text-zinc-300">███████</span>╗<span class="text-zinc-300">███████</span>╗   <span class="text-zinc-300">██</span>║
+╚═╝     ╚══════╝╚══════╝╚══════╝   ╚═╝<span class="mt-2 block text-zinc-500">agents in formation // lan // tmux<span class="animate-blink text-emerald-400 motion-reduce:animate-none">▌</span></span></pre>
+    </div>
+
+    <div class="flex min-w-0 flex-col gap-3 lg:items-end lg:text-right">
+      <div class="flex flex-wrap items-center gap-2 lg:justify-end">
+        <span id="conn" class="inline-flex items-center gap-2 rounded-full border border-ink-600 bg-ink-850 px-2.5 py-1 text-xs font-medium text-zinc-400" role="status" aria-live="polite">
+          <span id="conn-dot" class="size-2 rounded-full bg-zinc-500"></span>
+          <span id="conn-text">connecting</span>
+        </span>
+        <span id="srv-version" class="rounded-full border border-ink-600 bg-ink-850 px-2.5 py-1 font-mono text-xs text-zinc-400">–</span>
+        <span id="access" class="inline-flex items-center gap-1.5 rounded-full border border-ink-600 bg-ink-850 px-2.5 py-1 text-xs font-medium text-zinc-500">read-only</span>
+        <button id="signout" type="button" hidden class="rounded-full px-2 py-1 text-xs text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400">sign out</button>
+      </div>
+      <h1 id="srv-name" class="truncate font-mono text-2xl font-semibold tracking-tight text-zinc-50 sm:text-3xl">fleet</h1>
+      <dl class="flex flex-wrap gap-x-5 gap-y-1 text-xs text-zinc-500 lg:justify-end">
+        <div class="flex gap-1.5"><dt>host</dt><dd id="srv-host" class="font-mono text-zinc-300">–</dd></div>
+        <div class="flex gap-1.5"><dt>platform</dt><dd id="srv-platform" class="font-mono text-zinc-300">–</dd></div>
+        <div class="flex gap-1.5"><dt>listen</dt><dd id="srv-listen" class="font-mono text-zinc-300">–</dd></div>
+        <div class="flex gap-1.5"><dt>uptime</dt><dd id="srv-uptime" class="font-mono tabular-nums text-zinc-300">–</dd></div>
+      </dl>
+    </div>
+  </div>
+</header>
+
+<main id="main" class="mx-auto max-w-[1400px] px-4 pb-16 pt-6 transition-opacity duration-300 sm:px-6 lg:px-8">
+  <section aria-label="Summary" class="mb-6 grid grid-cols-6 gap-px overflow-hidden rounded-xl border border-ink-700 bg-ink-700 md:grid-cols-5">
+    <div class="col-span-2 bg-ink-900 px-3 py-2.5 sm:px-4 sm:py-3 md:col-span-1">
+      <div class="text-[10px] font-medium uppercase leading-tight tracking-wide text-zinc-500 sm:text-[11px] sm:tracking-wider">Live agents</div>
+      <div id="c-live" class="mt-0.5 font-mono text-xl font-semibold tabular-nums text-zinc-100 sm:mt-1 sm:text-2xl">0</div>
+    </div>
+    <div class="col-span-2 bg-ink-900 px-3 py-2.5 sm:px-4 sm:py-3 md:col-span-1">
+      <div class="text-[10px] font-medium uppercase leading-tight tracking-wide text-zinc-500 sm:text-[11px] sm:tracking-wider">Needs input</div>
+      <div id="c-input" class="mt-0.5 font-mono text-xl font-semibold tabular-nums text-zinc-100 sm:mt-1 sm:text-2xl">0</div>
+    </div>
+    <div class="col-span-2 bg-ink-900 px-3 py-2.5 sm:px-4 sm:py-3 md:col-span-1">
+      <div class="text-[10px] font-medium uppercase leading-tight tracking-wide text-zinc-500 sm:text-[11px] sm:tracking-wider">Working</div>
+      <div id="c-working" class="mt-0.5 font-mono text-xl font-semibold tabular-nums text-zinc-100 sm:mt-1 sm:text-2xl">0</div>
+    </div>
+    <div class="col-span-3 bg-ink-900 px-3 py-2.5 sm:px-4 sm:py-3 md:col-span-1">
+      <div class="text-[10px] font-medium uppercase leading-tight tracking-wide text-zinc-500 sm:text-[11px] sm:tracking-wider">Fleets on LAN</div>
+      <div id="c-peers" class="mt-0.5 font-mono text-xl font-semibold tabular-nums text-zinc-100 sm:mt-1 sm:text-2xl">0</div>
+    </div>
+    <div class="col-span-3 bg-ink-900 px-3 py-2.5 sm:px-4 sm:py-3 md:col-span-1">
+      <div class="text-[10px] font-medium uppercase leading-tight tracking-wide text-zinc-500 sm:text-[11px] sm:tracking-wider">Devices online</div>
+      <div id="c-devices" class="mt-0.5 font-mono text-xl font-semibold tabular-nums text-zinc-100 sm:mt-1 sm:text-2xl">0</div>
+    </div>
+  </section>
+
+  <div class="grid grid-cols-1 gap-6 xl:grid-cols-3">
+    <section id="agents" aria-labelledby="agents-h" class="min-w-0 rounded-xl border border-ink-700 bg-ink-900 xl:col-span-2 xl:self-start">
+      <div class="flex items-center justify-between gap-3 border-b border-ink-700 px-4 py-3">
+        <h2 id="agents-h" class="text-sm font-semibold text-zinc-100">Agents</h2>
+        <span id="agents-meta" class="font-mono text-xs tabular-nums text-zinc-500"></span>
+      </div>
+      <ul id="agents-live" class="divide-y divide-ink-700/70"></ul>
+      <details id="history" class="group border-t border-ink-700">
+        <summary class="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 text-xs font-medium text-zinc-500 hover:text-zinc-300 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400">
+          <span class="inline-block transition-transform group-open:rotate-90 motion-reduce:transition-none">▸</span>
+          <span>History</span>
+          <span id="history-count" class="rounded-full bg-ink-800 px-1.5 font-mono tabular-nums text-zinc-400">0</span>
+        </summary>
+        <ul id="agents-history" class="divide-y divide-ink-700/70 border-t border-ink-700/70"></ul>
+      </details>
+    </section>
+
+    <div class="flex min-w-0 flex-col gap-6">
+      <section aria-labelledby="peers-h" class="rounded-xl border border-ink-700 bg-ink-900">
+        <div class="flex items-center justify-between gap-3 border-b border-ink-700 px-4 py-3">
+          <h2 id="peers-h" class="text-sm font-semibold text-zinc-100">Fleet on the network</h2>
+          <span class="text-xs text-zinc-500">mDNS</span>
+        </div>
+        <ul id="peers" class="divide-y divide-ink-700/70"></ul>
+      </section>
+
+      <section aria-labelledby="roots-h" class="rounded-xl border border-ink-700 bg-ink-900">
+        <div class="flex items-center justify-between gap-3 border-b border-ink-700 px-4 py-3">
+          <div class="flex items-baseline gap-2">
+            <h2 id="roots-h" class="text-sm font-semibold text-zinc-100">Roots</h2>
+            <span id="roots-meta" class="font-mono text-xs tabular-nums text-zinc-500"></span>
+          </div>
+          <button id="roots-add" type="button" hidden class="inline-flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-400/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"><span aria-hidden="true">+</span> Add folder</button>
+        </div>
+        <ul id="roots" class="divide-y divide-ink-700/70"></ul>
+        <p id="roots-hint" class="border-t border-ink-700/70 px-4 py-2.5 text-xs text-zinc-500">To add folders from here, run <code class="rounded border border-ink-600 bg-ink-850 px-1 font-mono text-[11px] text-zinc-300">fleet web</code> on <span id="roots-hint-host" class="font-mono text-zinc-400">the server</span> and open the link it prints.</p>
+      </section>
+
+      <section aria-labelledby="devices-h" class="rounded-xl border border-ink-700 bg-ink-900">
+        <div class="flex items-center justify-between gap-3 border-b border-ink-700 px-4 py-3">
+          <h2 id="devices-h" class="text-sm font-semibold text-zinc-100">Paired devices</h2>
+          <span id="devices-meta" class="font-mono text-xs tabular-nums text-zinc-500"></span>
+        </div>
+        <ul id="devices" class="divide-y divide-ink-700/70"></ul>
+      </section>
+
+    </div>
+  </div>
+</main>
+
+<div id="toasts" class="pointer-events-none fixed inset-x-0 bottom-4 z-40 flex flex-col items-center gap-2 px-4 sm:inset-x-auto sm:right-6 sm:items-end" aria-live="polite"></div>
+
+<dialog id="picker" aria-labelledby="picker-h" class="m-auto max-h-[calc(100dvh-1.5rem)] w-[min(760px,calc(100vw-1.5rem))] overflow-y-auto rounded-xl sm:overflow-hidden border border-ink-600 bg-ink-900 p-0 text-[14px] text-zinc-300 shadow-2xl shadow-black/60 backdrop:bg-black/70">
+  <form id="picker-form" class="flex flex-col sm:max-h-[min(88vh,780px)]" novalidate>
+    <div class="flex items-start justify-between gap-3 border-b border-ink-700 px-4 py-3">
+      <div class="min-w-0">
+        <h2 id="picker-h" class="text-sm font-semibold text-zinc-100">Add a root folder</h2>
+        <p class="mt-0.5 text-xs text-zinc-500">Agents can start anywhere inside a root. Pick a folder on <span id="picker-host" class="font-mono text-zinc-400">the server</span>.</p>
+      </div>
+      <button id="picker-close" type="button" aria-label="Close" class="-mr-1 rounded-md px-2 py-1 text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400">✕</button>
+    </div>
+
+    <div class="flex flex-col gap-2 border-b border-ink-700 px-4 py-3">
+      <div class="flex gap-2">
+        <label for="picker-path" class="sr-only">Folder path</label>
+        <input id="picker-path" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="/path/to/folder" class="min-w-0 flex-1 rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+        <button id="picker-go" type="button" class="rounded-md border border-ink-600 bg-ink-850 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Go</button>
+      </div>
+      <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <nav id="picker-crumbs" aria-label="Current folder" class="flex min-w-0 flex-wrap items-center font-mono text-xs"></nav>
+        <div class="flex shrink-0 items-center gap-3">
+          <button id="picker-home" type="button" class="rounded px-1.5 py-0.5 font-mono text-xs text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400">~ home</button>
+          <label class="inline-flex cursor-pointer select-none items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300"><input id="picker-hidden" type="checkbox" class="accent-emerald-400"> hidden folders</label>
+        </div>
+      </div>
+    </div>
+
+    <div class="flex min-h-0 flex-1 flex-col">
+      <div class="px-4 pt-3">
+        <label for="picker-filter" class="sr-only">Filter folders</label>
+        <input id="picker-filter" type="search" spellcheck="false" autocomplete="off" placeholder="filter · ↓ to move · ⌫ for parent folder" class="w-full rounded-md border border-ink-700 bg-ink-850 px-2.5 py-1.5 text-[13px] text-zinc-200 placeholder:text-zinc-600 focus:border-emerald-400/50 focus:outline-none focus:ring-2 focus:ring-emerald-400/15">
+      </div>
+      <ul id="picker-list" aria-label="Folders" class="max-h-[45dvh] min-h-40 flex-1 overflow-y-auto px-2 py-2 transition-opacity sm:max-h-none sm:min-h-48"></ul>
+    </div>
+
+    <div class="flex flex-col gap-3 border-t border-ink-700 bg-ink-850/60 px-4 py-3">
+      <div id="picker-status" role="status" aria-live="polite" class="min-h-5 text-xs"></div>
+      <div class="grid gap-3 sm:grid-cols-2">
+        <label class="block">
+          <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Name</span>
+          <input id="picker-name" type="text" spellcheck="false" autocomplete="off" maxlength="64" class="mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+        </label>
+        <fieldset class="min-w-0">
+          <legend class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Agents <span class="normal-case tracking-normal text-zinc-600">· none ticked = all</span></legend>
+          <div id="picker-adapters" class="mt-1 flex min-h-8 flex-wrap items-center gap-1.5"><span class="text-xs text-zinc-600">loading…</span></div>
+        </fieldset>
+      </div>
+      <label class="flex cursor-pointer items-start gap-2.5 rounded-md border border-ink-700 bg-ink-900 px-3 py-2 has-checked:border-amber-400/40 has-checked:bg-amber-400/5">
+        <input id="picker-trust" type="checkbox" class="mt-0.5 accent-amber-400">
+        <span class="text-xs leading-relaxed text-zinc-400"><span class="font-medium text-zinc-200">Trust this folder.</span> Agents started here skip Claude Code's and Codex's "Do you trust this folder?" prompt, so the folder's own hooks, MCP servers and settings run. Only for code you trust.</span>
+      </label>
+    </div>
+
+    <div class="flex items-center justify-end gap-2 border-t border-ink-700 px-4 py-3">
+      <button id="picker-cancel" type="button" class="rounded-md border border-ink-600 bg-ink-850 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Cancel</button>
+      <button id="picker-add" type="submit" class="rounded-md bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Add as root</button>
+    </div>
+  </form>
+</dialog>
+
+<footer class="mx-auto max-w-[1400px] px-4 pb-8 font-mono text-[11px] text-zinc-600 sm:px-6 lg:px-8"><span id="footer-mode">read-only view</span> · <span id="srv-id" class="break-all"></span></footer>
+</body>
+</html>

@@ -104,7 +104,7 @@ func setup(t *testing.T) *env {
 	for _, h := range []string{e.home, e.clientHome} {
 		must(t, os.MkdirAll(h, 0o700))
 	}
-	cfg := fmt.Sprintf("name = \"e2e-server\"\nlisten = \"127.0.0.1:%d\"\nmdns = false\ntmux_socket = %q\n", e.port, e.sock)
+	cfg := fmt.Sprintf("name = \"e2e-server\"\nlisten = \"127.0.0.1:%d\"\nweb = \"off\"\nmdns = false\ntmux_socket = %q\n", e.port, e.sock)
 	must(t, os.WriteFile(filepath.Join(e.home, "config.toml"), []byte(cfg), 0o600))
 
 	must(t, os.MkdirAll(e.repo, 0o755))

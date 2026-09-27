@@ -34,8 +34,14 @@ func TestFromEntry(t *testing.T) {
 		t.Fatal("future protocol version accepted")
 	}
 	e.Text = []string{"id=abc"}
-	if f, _ := fromEntry(e); f.Name != "My Mac" {
-		t.Fatalf("name fallback = %q", f.Name)
+	if f, _ := fromEntry(e); f.Name != "My Mac" || f.WebPort != 0 {
+		t.Fatalf("name fallback = %q, web port %d", f.Name, f.WebPort)
+	}
+	for txt, want := range map[string]int{"web=7421": 7421, "web=0": 0, "web=70000": 0, "web=x": 0} {
+		e.Text = []string{"v=1", txt}
+		if f, _ := fromEntry(e); f.WebPort != want {
+			t.Errorf("%s: web port %d, want %d", txt, f.WebPort, want)
+		}
 	}
 }
 
@@ -74,7 +80,7 @@ func TestAdvertiseBrowseLoopback(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stop, err := Advertise(ctx, Advertisement{Instance: name, ServerID: id, Name: name, Port: 7499})
+	stop, err := Advertise(ctx, Advertisement{Instance: name, ServerID: id, Name: name, Port: 7499, WebPort: 7498})
 	if err != nil {
 		t.Skipf("multicast unavailable: %v", err)
 	}
@@ -100,7 +106,7 @@ func TestAdvertiseBrowseLoopback(t *testing.T) {
 	if found == nil {
 		t.Skip("own advertisement not seen; multicast loopback likely unavailable")
 	}
-	if found.Name != name || found.Port != 7499 || len(found.Addrs) == 0 {
+	if found.Name != name || found.Port != 7499 || found.WebPort != 7498 || len(found.Addrs) == 0 {
 		t.Fatalf("unexpected result: %+v", *found)
 	}
 	stop()

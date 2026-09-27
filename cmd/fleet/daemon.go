@@ -35,11 +35,13 @@ const (
 // daemonFlags are shared by `fleet daemon` and `fleet start`.
 type daemonFlags struct {
 	listen string
+	web    string
 	noMDNS bool
 }
 
 func (f *daemonFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.listen, "listen", "", `TCP listen address for paired devices, or "off" (default from config.toml, else `+config.DefaultListen+`)`)
+	cmd.Flags().StringVar(&f.web, "web", "", `address of the web dashboard, or "off" (default from config.toml, else `+config.DefaultWeb+`)`)
 	cmd.Flags().BoolVar(&f.noMDNS, "no-mdns", false, "do not advertise on the LAN")
 }
 
@@ -47,6 +49,9 @@ func (f *daemonFlags) args() []string {
 	var a []string
 	if f.listen != "" {
 		a = append(a, "--listen", f.listen)
+	}
+	if f.web != "" {
+		a = append(a, "--web", f.web)
 	}
 	if f.noMDNS {
 		a = append(a, "--no-mdns")
@@ -104,6 +109,7 @@ func newDaemonCmd() *cobra.Command {
 				Version:     version,
 				FleetBinary: exe,
 				Listen:      f.listen,
+				Web:         f.web,
 				NoMDNS:      f.noMDNS,
 			})
 		},

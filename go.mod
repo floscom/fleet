@@ -5,6 +5,7 @@ go 1.22
 require (
 	github.com/BurntSushi/toml v1.4.0 // indirect
 	github.com/cenkalti/backoff v2.2.1+incompatible // indirect
+	github.com/coder/websocket v1.8.12
 	github.com/creack/pty v1.1.21 // indirect
 	github.com/grandcat/zeroconf v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

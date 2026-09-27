@@ -132,6 +132,7 @@ func (e *env) start() {
 		Version:     "test",
 		FleetBinary: "/bin/true",
 		Listen:      e.listen,
+		Web:         "off",
 		NoMDNS:      true,
 	}
 	go func() { e.done <- Run(ctx, opts) }()

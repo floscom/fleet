@@ -74,6 +74,7 @@ The daemon advertises itself when its TCP listener is on and mDNS is enabled
 | TXT `v`       | `1`, the protocol version. Ignore services with any other value. |
 | TXT `id`      | the server id: full lowercase hex SHA-256 of the daemon's certificate (64 hex digits) |
 | TXT `name`    | the server name (at most 200 bytes) |
+| TXT `web`     | optional: the port of the daemon's web dashboard (plain HTTP, same host), present when it is reachable from the LAN. Apps may offer to open `http://<address>:<web>/`. |
 
 How to use it:
 

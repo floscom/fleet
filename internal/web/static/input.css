@@ -1,0 +1,77 @@
+/*
+ * fleet dashboard styles (Tailwind v4 source).
+ *
+ * Compiled with the standalone CLI into app.css, which is committed:
+ *   make tailwind   # once: fetch the pinned CLI into bin/tools
+ *   make web        # rebuild app.css (or: make web-watch)
+ *
+ * Only index.html and app.js are scanned for class names, so every class
+ * used there must appear as a complete literal string.
+ */
+@import "tailwindcss" source(none);
+
+@source "./index.html";
+@source "./app.js";
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Inter", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "Cascadia Code", "SF Mono", SFMono-Regular, Menlo, "DejaVu Sans Mono", Consolas, "Liberation Mono", monospace;
+
+  --color-ink-950: #07090c;
+  --color-ink-900: #0c0f14;
+  --color-ink-850: #10141a;
+  --color-ink-800: #151a22;
+  --color-ink-700: #1f2630;
+  --color-ink-600: #2b3440;
+  --color-accent: #34d399;
+
+  --animate-flash: flash 1.6s ease-out;
+  --animate-breathe: breathe 1.8s ease-in-out infinite;
+  --animate-shimmer: shimmer 1.4s linear infinite;
+  --animate-blink: blink 1.1s steps(1, end) infinite;
+
+  @keyframes flash {
+    0% { background-color: rgb(52 211 153 / 0.18); }
+    100% { background-color: transparent; }
+  }
+  @keyframes breathe {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgb(251 191 36 / 0.45); }
+    50% { opacity: 0.75; box-shadow: 0 0 0 4px rgb(251 191 36 / 0); }
+  }
+  @keyframes shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
+  }
+  ::selection {
+    background: rgb(52 211 153 / 0.3);
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+}
+
+@layer components {
+  /* A working-state bar: a thin moving highlight. */
+  .shimmer-bar {
+    background-image: linear-gradient(90deg, transparent 0%, rgb(96 165 250 / 0.9) 50%, transparent 100%);
+    background-size: 200% 100%;
+  }
+  /* Header backdrop: a faint dot grid fading out, plus a soft glow. */
+  .header-bg {
+    background-image:
+      radial-gradient(60rem 18rem at 12% -20%, rgb(52 211 153 / 0.07), transparent 70%),
+      radial-gradient(rgb(255 255 255 / 0.05) 1px, transparent 1px);
+    background-size: auto, 18px 18px;
+  }
+}

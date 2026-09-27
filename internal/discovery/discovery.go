@@ -2,7 +2,8 @@
 // (DNS-SD service type "_fleet._tcp", domain "local.").
 //
 // TXT records: "v=1", "id=<server id>" (full hex SHA-256 of the daemon cert),
-// "name=<server name>".
+// "name=<server name>", and "web=<port>" when the daemon's web dashboard is
+// reachable from the LAN (same host, plain HTTP).
 package discovery
 
 import (
@@ -11,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +36,8 @@ type Advertisement struct {
 	ServerID string
 	Name     string
 	Port     int
+	// WebPort is the web dashboard's port, 0 to not advertise it.
+	WebPort int
 }
 
 // Advertise registers the service until ctx is cancelled or stop is called.
@@ -49,6 +53,9 @@ func Advertise(ctx context.Context, a Advertisement) (stop func(), err error) {
 		instance = "fleet"
 	}
 	txt := []string{"v=1", "id=" + a.ServerID, "name=" + truncate(a.Name, maxTXTValue)}
+	if a.WebPort > 0 && a.WebPort <= 65535 {
+		txt = append(txt, "web="+strconv.Itoa(a.WebPort))
+	}
 	srv, err := zeroconf.Register(truncate(instance, 63), Service, domain, a.Port, txt, nil)
 	if err != nil {
 		return nil, fmt.Errorf("discovery: register: %w", err)
@@ -80,6 +87,9 @@ type Found struct {
 	// Addrs are IPs (IPv4 first) to try in order.
 	Addrs []string
 	Port  int
+	// WebPort is the web dashboard's port on the same host, 0 if not
+	// advertised.
+	WebPort int
 }
 
 // Browse collects daemons answering within timeout, de-duplicated by ServerID.
@@ -147,6 +157,10 @@ func fromEntry(e *zeroconf.ServiceEntry) (Found, bool) {
 			f.ServerID = v
 		case "name":
 			f.Name = v
+		case "web":
+			if p, err := strconv.Atoi(v); err == nil && p > 0 && p <= 65535 {
+				f.WebPort = p
+			}
 		}
 	}
 	if f.Name == "" {

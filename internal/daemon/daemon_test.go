@@ -71,7 +71,7 @@ func TestUnixHandshakeRunAndExit(t *testing.T) {
 		t.Fatalf("agents.json: %v %v", fi, err)
 	}
 	// A second daemon on the same home refuses to start.
-	err = Run(context.Background(), Options{Adapters: adapter.NewRegistry(), NoMDNS: true, Listen: "off"})
+	err = Run(context.Background(), Options{Adapters: adapter.NewRegistry(), NoMDNS: true, Listen: "off", Web: "off"})
 	if err == nil || !strings.Contains(err.Error(), "already running") {
 		t.Fatalf("second daemon: %v", err)
 	}

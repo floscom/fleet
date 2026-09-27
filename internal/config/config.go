@@ -2,12 +2,13 @@
 //
 // Layout (FLEET_HOME, default ~/.fleet, mode 0700):
 //
-//	config.toml        user config (roots, listen address, name)
+//	config.toml        user config (roots, listen and web addresses, name)
 //	fleet.sock         local control socket (mode 0600)
 //	daemon.pid         pid of the running daemon
 //	daemon.log         daemon log when started via `fleet start`
 //	identity/          server TLS key+cert, client device key (0600)
 //	devices.json       paired devices (0600)
+//	web-token          web dashboard admin token (0600, see web.LoadOrCreateToken)
 //	servers.json       daemons this machine has paired with as a client (0600)
 //	agents.json        agent registry (0600)
 //	agents/<id>/       per-agent state dir (adapter files)
@@ -35,12 +36,19 @@ import (
 // DefaultListen is the default TCP listen address for remote clients.
 const DefaultListen = "0.0.0.0:7420"
 
+// DefaultWeb is the default address of the web dashboard.
+const DefaultWeb = "0.0.0.0:7421"
+
 // Config is config.toml.
 type Config struct {
 	// Name shown to clients and in mDNS. Default: hostname.
 	Name string `toml:"name"`
 	// Listen is the TCP address for remote (TLS) clients. "" or "off" disables it.
 	Listen string `toml:"listen"`
+	// Web is the address of the web dashboard (plain HTTP; viewing needs
+	// no auth, managing roots needs the web-token). "" means DefaultWeb,
+	// "off" disables it.
+	Web string `toml:"web,omitempty"`
 	// MDNS enables LAN advertisement. Default true.
 	MDNS *bool `toml:"mdns"`
 	// TmuxSocket is the tmux -L socket name. Default: DefaultTmuxSocket.

@@ -195,3 +195,77 @@ func TestRegistryDoesNotDuplicateConfigArgs(t *testing.T) {
 		}
 	}
 }
+
+func TestWebHosts(t *testing.T) {
+	for _, tt := range []struct {
+		bind  string
+		hosts []string
+		local bool
+	}{
+		{"127.0.0.1", []string{"localhost"}, true},
+		{"::1", []string{"localhost"}, true},
+		{"localhost", []string{"localhost"}, true},
+		{"192.168.1.20", []string{"192.168.1.20"}, false},
+		{"zerox.local", []string{"zerox.local"}, false},
+	} {
+		hosts, local := webHosts(tt.bind)
+		if !slices.Equal(hosts, tt.hosts) || local != tt.local {
+			t.Errorf("webHosts(%q) = %v %v, want %v %v", tt.bind, hosts, local, tt.hosts, tt.local)
+		}
+	}
+	// Any address: this machine's LAN addresses, then localhost.
+	for _, bind := range []string{"0.0.0.0", "", "::"} {
+		hosts, local := webHosts(bind)
+		if local || len(hosts) == 0 || hosts[len(hosts)-1] != "localhost" || slices.Contains(hosts, "127.0.0.1") {
+			t.Errorf("webHosts(%q) = %v %v", bind, hosts, local)
+		}
+	}
+}
+
+func TestWebCmd(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FLEET_HOME", home)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(args ...string) string {
+		t.Helper()
+		var out strings.Builder
+		cmd := newRootCmd()
+		cmd.SetOut(&out)
+		cmd.SetArgs(args)
+		must(cmd.Execute())
+		return out.String()
+	}
+	tokenIn := func(out string) string {
+		t.Helper()
+		_, rest, ok := strings.Cut(out, "#token=")
+		if !ok {
+			t.Fatalf("no token link in:\n%s", out)
+		}
+		return strings.Fields(rest)[0]
+	}
+	must(os.WriteFile(filepath.Join(home, "config.toml"), []byte("web = \"127.0.0.1:7555\"\n"), 0o600))
+	out := run("web")
+	if !strings.Contains(out, "http://localhost:7555/#token=") || !strings.Contains(out, "ssh -L 7555:127.0.0.1:7555") {
+		t.Fatalf("output:\n%s", out)
+	}
+	tok := tokenIn(out)
+	if again := tokenIn(run("web")); again != tok {
+		t.Fatal("token changed without --rotate")
+	}
+	if rotated := tokenIn(run("web", "--rotate")); rotated == tok {
+		t.Fatal("--rotate kept the token")
+	}
+
+	must(os.WriteFile(filepath.Join(home, "config.toml"), []byte("web = \"off\"\n"), 0o600))
+	cmd := newRootCmd()
+	cmd.SetOut(new(strings.Builder))
+	cmd.SetArgs([]string{"web"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "off") {
+		t.Fatalf("web off: %v", err)
+	}
+}
