@@ -233,6 +233,24 @@ func (d *daemon) addRoot(req *fleetv1.AddRootRequest) (*fleetv1.Root, error) {
 	return r.Proto(), nil
 }
 
+// ensureRoots adds each of roots that is not a root yet (Options.Roots).
+func (d *daemon) ensureRoots(roots []config.Root) error {
+	for _, r := range roots {
+		cfg := d.config()
+		if old, ok := cfg.RootByPath(r.Path); ok {
+			d.log.Info("root already configured", "name", old.Name, "path", old.Path, "trust", old.Trust)
+			if r.Trust && !old.Trust {
+				d.log.Warn("root is not trusted; --trust only applies to new roots", "name", old.Name)
+			}
+			continue
+		}
+		if _, err := d.addRoot(&fleetv1.AddRootRequest{Path: r.Path, Name: r.Name, Adapters: r.Adapters, Trust: r.Trust}); err != nil {
+			return fmt.Errorf("add root %s: %w", r.Path, err)
+		}
+	}
+	return nil
+}
+
 func (d *daemon) removeRoot(name string) error {
 	d.cfgMu.Lock()
 	old := append([]config.Root(nil), d.cfg.Roots...)

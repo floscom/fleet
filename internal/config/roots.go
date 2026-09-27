@@ -18,11 +18,8 @@ func (c *Config) AddRoot(r Root) (Root, error) {
 	if err != nil {
 		return Root{}, err
 	}
-	for _, o := range c.Roots {
-		rr, err := filepath.EvalSymlinks(o.Path)
-		if o.Path == real || (err == nil && rr == real) {
-			return Root{}, fmt.Errorf("%s is already root %q", real, o.Name)
-		}
+	if o, dup := c.rootAt(real); dup {
+		return Root{}, fmt.Errorf("%s is already root %q", real, o.Name)
 	}
 	if r.Name == "" {
 		r.Name = c.uniqueName(filepath.Base(real))
@@ -65,6 +62,27 @@ func (c *Config) RootByName(name string) (Root, bool) {
 	for _, r := range c.Roots {
 		if r.Name == name {
 			return r, true
+		}
+	}
+	return Root{}, false
+}
+
+// RootByPath finds the root that is the directory at path (compared
+// symlink-resolved, as AddRoot does). A folder inside a root does not match.
+func (c *Config) RootByPath(path string) (Root, bool) {
+	real, err := realDir(path)
+	if err != nil {
+		return Root{}, false
+	}
+	return c.rootAt(real)
+}
+
+// rootAt finds the root whose path resolves to real.
+func (c *Config) rootAt(real string) (Root, bool) {
+	for _, o := range c.Roots {
+		rr, err := filepath.EvalSymlinks(o.Path)
+		if o.Path == real || (err == nil && rr == real) {
+			return o, true
 		}
 	}
 	return Root{}, false

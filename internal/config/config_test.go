@@ -147,6 +147,17 @@ func TestAddRemoveRoot(t *testing.T) {
 	if _, err := c.AddRoot(Root{Path: filepath.Join(base, "missing")}); err == nil {
 		t.Fatal("missing dir accepted")
 	}
+	if r, ok := c.RootByPath(link); !ok || r.Name != "code" {
+		t.Fatalf("RootByPath(link) = %+v, %v", r, ok)
+	}
+	if r, ok := c.RootByPath(b + "/"); !ok || r.Name != "code-2" {
+		t.Fatalf("RootByPath(b/) = %+v, %v", r, ok)
+	}
+	for _, p := range []string{base, filepath.Join(a, "sub"), filepath.Join(base, "missing"), ""} {
+		if r, ok := c.RootByPath(p); ok {
+			t.Fatalf("RootByPath(%q) = %+v, want none", p, r)
+		}
+	}
 	if err := c.RemoveRoot("code"); err != nil {
 		t.Fatal(err)
 	}

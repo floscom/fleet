@@ -49,6 +49,54 @@ func TestParseRunPath(t *testing.T) {
 	}
 }
 
+func TestDaemonRootPaths(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "api")
+	link := filepath.Join(base, "link")
+	file := filepath.Join(base, "file")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+
+	f := daemonFlags{roots: []string{".", link, "../api/"}, trust: true}
+	got, err := f.rootPaths()
+	if err != nil || !slices.Equal(got, []string{dir, dir, dir}) {
+		t.Fatalf("rootPaths = %q, %v", got, err)
+	}
+	if got, err := (&daemonFlags{}).rootPaths(); err != nil || got != nil {
+		t.Fatalf("no --root: %q, %v", got, err)
+	}
+	for _, tt := range []struct {
+		f    daemonFlags
+		want string
+	}{
+		{daemonFlags{trust: true}, "--trust needs --root"},
+		{daemonFlags{roots: []string{"missing"}}, "no such file"},
+		{daemonFlags{roots: []string{file}}, "not a folder"},
+	} {
+		if _, err := tt.f.rootPaths(); err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("rootPaths(%+v) = %v, want %q", tt.f, err, tt.want)
+		}
+	}
+}
+
 func TestParseHookArgs(t *testing.T) {
 	tests := []struct {
 		args                  []string

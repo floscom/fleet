@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -101,6 +103,41 @@ MCP servers and settings, so only use it for code you trust.`,
 	}
 	cmd.AddCommand(add, rm)
 	return cmd
+}
+
+// addLocalRoots makes each of paths (absolute, symlink-resolved) a root of
+// the local daemon unless it already is one (`fleet start --root`).
+func addLocalRoots(ctx context.Context, out io.Writer, paths []string, trust bool) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	c, err := client.DialLocal(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	roots, err := c.ListRoots(ctx)
+	if err != nil {
+		return err
+	}
+	for _, p := range paths {
+		i := slices.IndexFunc(roots, func(r *fleetv1.Root) bool { return r.Path == p })
+		if i >= 0 {
+			r := roots[i]
+			fmt.Fprintf(out, "%s is already root %s (trust: %s)\n", p, r.Name, yesNo(r.Trust))
+			if trust && !r.Trust {
+				fmt.Fprintf(out, "  --trust only applies to new roots; to trust it: fleet roots rm %s && fleet roots add %s --trust\n", r.Name, p)
+			}
+			continue
+		}
+		r, err := c.AddRoot(ctx, &fleetv1.AddRootRequest{Path: p, Trust: trust})
+		if err != nil {
+			return err
+		}
+		roots = append(roots, r)
+		fmt.Fprintf(out, "added root %s -> %s (adapters: %s, trust: %s)\n", r.Name, r.Path, adapterList(r.Adapters), yesNo(r.Trust))
+	}
+	return nil
 }
 
 func adapterList(a []string) string {

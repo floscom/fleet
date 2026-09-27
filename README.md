@@ -60,6 +60,10 @@ fleet pair                      # one-time code + server fingerprint for a new d
 fleet web                       # admin link for the web dashboard: browse folders, add roots
 ```
 
+Or, from inside a project folder, start the daemon and make that folder a
+root in one go: `fleet start --root .` (see
+[Starting in a folder](#starting-in-a-folder)).
+
 On the laptop, with the code and fingerprint that `fleet pair` printed:
 
 ```sh
@@ -78,8 +82,8 @@ address. Without it, commands talk to the local daemon.
 
 | Command | What it does |
 |---------|--------------|
-| `fleet daemon [--listen ADDR\|off] [--web ADDR\|off] [--no-mdns]` | Run the daemon in the foreground (logs to stderr). |
-| `fleet start [--listen ...] [--web ...] [--no-mdns]` | Start the daemon in the background. |
+| `fleet daemon [--listen ADDR\|off] [--web ADDR\|off] [--no-mdns] [--root DIR]... [--trust]` | Run the daemon in the foreground (logs to stderr). `--root`: see [Starting in a folder](#starting-in-a-folder). |
+| `fleet start [--listen ...] [--web ...] [--no-mdns] [--root DIR]... [--trust]` | Start the daemon in the background. If it already runs, only adds the `--root` folders. |
 | `fleet stop [--force]` | Stop the daemon. Agents keep running in tmux. |
 | `fleet status` | Daemon version, uptime, server id, agent, root and device counts. |
 | `fleet version` | Print the version. |
@@ -103,6 +107,32 @@ address. Without it, commands talk to the local daemon.
 
 Agents are referred to by id (`a1b2c3`) or name (`claude-api-1`, or the
 `--name` you gave).
+
+### Starting in a folder
+
+`--root` makes folders roots as the daemon starts, so a machine joins the
+fleet with one command from wherever you are:
+
+```sh
+cd ~/code/api
+fleet start --root .            # start the daemon if needed, allow agents in ~/code/api
+```
+
+- If the daemon already runs, `fleet start --root` only adds the folder.
+  A folder that already is a root is left as it is, so running it again is
+  harmless. `fleet daemon --root .` does the same in the foreground.
+- The root is named after the folder (`api`, or `api-2` if that name is
+  taken). Like `fleet roots add`, it is saved in `config.toml` and stays
+  after the daemon stops; `fleet roots rm api` removes it.
+- `--root` can be repeated. `--trust` trusts the roots it adds (see
+  [Folder trust](#folder-trust)), not roots that already existed.
+- A relative path is taken from the current folder, and the folder must
+  exist. If it does not, `fleet start` fails before starting the daemon.
+
+Once the daemon runs it is on the LAN (`fleet discover`, the dashboards of
+other fleets), and every paired device can start agents in the new root:
+`fleet -H studio run claude api: --prompt "..."`. A device that never
+paired with this machine still pairs once (`fleet pair`, `fleet connect`).
 
 ### Isolation
 
@@ -256,8 +286,8 @@ docker = "docker"                # the docker CLI
 ```
 
 The daemon reads `config.toml` at startup. Changes made through the CLI
-(`fleet roots add/rm`) apply immediately and rewrite the file (comments are
-not kept). Restart the daemon after editing the file by hand. Command-line
+(`fleet roots add/rm`, `--root`) apply immediately and rewrite the file
+(comments are not kept). Restart the daemon after editing the file by hand. Command-line
 `--listen`, `--web` and `--no-mdns` override the file.
 
 ## Web dashboard

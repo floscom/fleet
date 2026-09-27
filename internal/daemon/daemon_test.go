@@ -522,6 +522,47 @@ func TestInfoAdaptersRoots(t *testing.T) {
 	c.fails(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_Pair{Pair: &fleetv1.PairRequest{}}}, codeUnauth)
 }
 
+// TestStartupRoots checks Options.Roots (`fleet daemon --root`): new folders
+// become roots and are saved, existing roots are kept as they are, and a
+// missing folder stops the daemon from starting.
+func TestStartupRoots(t *testing.T) {
+	e := newEnv(t)
+	e.stop()
+	here, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.roots = []config.Root{{Path: here, Trust: true}, {Path: e.root, Trust: true}}
+	e.start()
+	c := e.dialUnix()
+	list := func() []*fleetv1.Root {
+		return c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_ListRoots{ListRoots: &fleetv1.ListRootsRequest{}}}).GetListRoots().GetRoots()
+	}
+	roots := list()
+	if len(roots) != 2 || roots[0].GetName() != "code" || roots[0].GetTrust() ||
+		roots[1].GetPath() != here || roots[1].GetName() != filepath.Base(here) || !roots[1].GetTrust() {
+		t.Fatalf("roots: %v", roots)
+	}
+
+	// Starting again with the same roots adds nothing.
+	e.stop()
+	e.start()
+	c = e.dialUnix()
+	if roots := list(); len(roots) != 2 {
+		t.Fatalf("roots after restart: %v", roots)
+	}
+	if cfg, err := config.Load(); err != nil || len(cfg.Roots) != 2 {
+		t.Fatalf("saved config: %+v, %v", cfg, err)
+	}
+
+	e.stop()
+	opts := Options{Adapters: adapter.NewRegistry(testAdapter{}), Web: "off", NoMDNS: true, Listen: "off",
+		Roots: []config.Root{{Path: filepath.Join(here, "missing")}}}
+	if err := Run(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("Run with a missing root: %v", err)
+	}
+}
+
 func TestSlowSubscriberDropped(t *testing.T) {
 	m := &manager{d: &daemon{log: slog.New(slog.NewTextHandler(io.Discard, nil))}, subs: map[*subscriber]struct{}{}}
 	s := &subscriber{ch: make(chan *fleetv1.Event, 1)}

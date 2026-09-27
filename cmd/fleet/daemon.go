@@ -37,14 +37,44 @@ type daemonFlags struct {
 	listen string
 	web    string
 	noMDNS bool
+	roots  []string
+	trust  bool
 }
 
 func (f *daemonFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&f.listen, "listen", "", `TCP listen address for paired devices, or "off" (default from config.toml, else `+config.DefaultListen+`)`)
 	cmd.Flags().StringVar(&f.web, "web", "", `address of the web dashboard, or "off" (default from config.toml, else `+config.DefaultWeb+`)`)
 	cmd.Flags().BoolVar(&f.noMDNS, "no-mdns", false, "do not advertise on the LAN")
+	cmd.Flags().StringArrayVar(&f.roots, "root", nil, "make `folder` a root unless it is one (\".\" = here; repeatable)")
+	cmd.Flags().BoolVar(&f.trust, "trust", false, "with --root: pre-answer the agent CLIs' folder trust prompt in new roots")
 }
 
+// rootPaths resolves --root against the cwd, symlink-resolved like stored
+// roots. Every one must be an existing folder.
+func (f *daemonFlags) rootPaths() ([]string, error) {
+	if f.trust && len(f.roots) == 0 {
+		return nil, errors.New("--trust needs --root")
+	}
+	var out []string
+	for _, p := range f.roots {
+		real, err := filepath.Abs(p)
+		if err == nil {
+			real, err = filepath.EvalSymlinks(real)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("--root %s: %w", p, err)
+		}
+		if fi, err := os.Stat(real); err != nil || !fi.IsDir() {
+			return nil, fmt.Errorf("--root %s: not a folder", p)
+		}
+		out = append(out, real)
+	}
+	return out, nil
+}
+
+// args are the flags `fleet start` passes to `fleet daemon`. --root is not
+// among them: start adds roots over the socket, which also works when the
+// daemon is already running.
 func (f *daemonFlags) args() []string {
 	var a []string
 	if f.listen != "" {
@@ -93,6 +123,14 @@ func newDaemonCmd() *cobra.Command {
 				level = slog.LevelDebug
 			}
 			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+			paths, err := f.rootPaths()
+			if err != nil {
+				return err
+			}
+			roots := make([]config.Root, len(paths))
+			for i, p := range paths {
+				roots[i] = config.Root{Path: p, Trust: f.trust}
+			}
 			if _, err := config.EnsureHome(); err != nil {
 				return err
 			}
@@ -111,6 +149,7 @@ func newDaemonCmd() *cobra.Command {
 				Listen:      f.listen,
 				Web:         f.web,
 				NoMDNS:      f.noMDNS,
+				Roots:       roots,
 			})
 		},
 	}
@@ -151,9 +190,13 @@ func newStartCmd() *cobra.Command {
 			}
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
+			roots, err := f.rootPaths()
+			if err != nil {
+				return err
+			}
 			if _, ok := localAlive(ctx); ok {
 				fmt.Fprintf(out, "fleet daemon is already running%s\n", pidSuffix())
-				return nil
+				return addLocalRoots(ctx, out, roots, f.trust)
 			}
 			if _, err := config.EnsureHome(); err != nil {
 				return err
@@ -200,7 +243,7 @@ func newStartCmd() *cobra.Command {
 					_ = os.WriteFile(pidPath, []byte(strconv.Itoa(child.Process.Pid)+"\n"), 0o600)
 				}
 				fmt.Fprintf(out, "fleet daemon started (pid %d), log: %s\n", child.Process.Pid, logPath)
-				return nil
+				return addLocalRoots(ctx, out, roots, f.trust)
 			}
 		},
 	}

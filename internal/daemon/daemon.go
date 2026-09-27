@@ -40,6 +40,10 @@ type Options struct {
 	NoMDNS bool
 	// Web overrides config.Web when non-empty ("off" disables the web UI).
 	Web string
+	// Roots are added to config.toml at startup, before any client can
+	// connect (`fleet daemon --root`). Paths must be absolute. A folder
+	// that already is a root is left as it is.
+	Roots []config.Root
 }
 
 // daemon is the state shared by every connection.
@@ -148,6 +152,9 @@ func Run(ctx context.Context, opts Options) error {
 		return err
 	}
 	defer d.agents.closeHookSockets()
+	if err := d.ensureRoots(opts.Roots); err != nil {
+		return err
+	}
 
 	unixLn, err := listenUnix(config.SocketPath())
 	if err != nil {

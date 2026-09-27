@@ -82,6 +82,8 @@ type env struct {
 	root   string // real path of the "code" root
 	tm     *tmux.Tmux
 	listen string
+	// roots is Options.Roots for the next start.
+	roots  []config.Root
 	cancel context.CancelFunc
 	done   chan error
 }
@@ -134,6 +136,7 @@ func (e *env) start() {
 		Listen:      e.listen,
 		Web:         "off",
 		NoMDNS:      true,
+		Roots:       e.roots,
 	}
 	go func() { e.done <- Run(ctx, opts) }()
 	deadline := time.Now().Add(10 * time.Second)

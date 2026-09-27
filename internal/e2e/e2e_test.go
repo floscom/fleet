@@ -64,6 +64,7 @@ func TestEndToEnd(t *testing.T) {
 	t.Run("restart", e.restart)
 
 	e.stopDaemon()
+	t.Run("start in a folder", e.startInFolder)
 }
 
 func setup(t *testing.T) *env {
@@ -184,20 +185,7 @@ func (e *env) worktree(t *testing.T) {
 
 // remote pairs a second FLEET_HOME over TLS, uses it, then revokes it.
 func (e *env) remote(t *testing.T) {
-	out := e.mustFleet(e.home, "pair")
-	code, fp := "", ""
-	fields := strings.Fields(out)
-	for i, f := range fields {
-		if len(f) == 9 && f[4] == '-' {
-			code = f
-		}
-		if f == "--fingerprint" && i+1 < len(fields) {
-			fp = fields[i+1]
-		}
-	}
-	if code == "" || fp == "" {
-		t.Fatalf("no pairing code or fingerprint in:\n%s", out)
-	}
+	code, fp := e.pairingCode()
 	addr := fmt.Sprintf("127.0.0.1:%d", e.port)
 	// A wrong fingerprint stops pairing before the code is sent.
 	if out, err := e.fleet(e.clientHome, "connect", addr, "--code", code, "--fingerprint", strings.Repeat("0", 16)); err == nil ||
@@ -220,6 +208,25 @@ func (e *env) remote(t *testing.T) {
 	if !strings.Contains(out, "revoked") && !strings.Contains(strings.ToLower(out), "auth") {
 		t.Fatalf("remote ls after revoke: want an auth error, got:\n%s", out)
 	}
+}
+
+// pairingCode runs `fleet pair` and returns the code and fingerprint.
+func (e *env) pairingCode() (code, fingerprint string) {
+	e.t.Helper()
+	out := e.mustFleet(e.home, "pair")
+	fields := strings.Fields(out)
+	for i, f := range fields {
+		if len(f) == 9 && f[4] == '-' {
+			code = f
+		}
+		if f == "--fingerprint" && i+1 < len(fields) {
+			fingerprint = fields[i+1]
+		}
+	}
+	if code == "" || fingerprint == "" {
+		e.t.Fatalf("no pairing code or fingerprint in:\n%s", out)
+	}
+	return code, fingerprint
 }
 
 // restart checks agents survive a daemon restart and orphans are killed.
@@ -246,6 +253,62 @@ func (e *env) restart(t *testing.T) {
 	}
 	e.mustFleet(e.home, "kill", "long")
 	e.waitNoSessions()
+}
+
+// startInFolder runs `fleet start --root .` from inside a folder with no
+// daemon running, then again with the daemon up: the folders become roots
+// once, and paired devices can start agents in them.
+func (e *env) startInFolder(t *testing.T) {
+	base := filepath.Dir(e.root)
+	a, b := filepath.Join(base, "here-a"), filepath.Join(base, "here-b")
+	must(t, os.MkdirAll(a, 0o755))
+	must(t, os.MkdirAll(b, 0o755))
+	t.Cleanup(func() { _, _ = e.fleet(e.home, "stop") })
+
+	if out, err := e.fleetIn(a, "start", "--trust"); err == nil || !strings.Contains(out, "--trust needs --root") {
+		t.Fatalf("start --trust without --root: %v\n%s", err, out)
+	}
+	if out, err := e.fleetIn(a, "start", "--root", "missing"); err == nil || !strings.Contains(out, "no such file") {
+		t.Fatalf("start --root missing: %v\n%s", err, out)
+	}
+	if _, err := e.fleet(e.home, "status"); err == nil {
+		t.Fatal("a failed start --root left a daemon running")
+	}
+
+	out := e.mustFleetIn(a, "start", "--root", ".")
+	for _, want := range []string{"fleet daemon started", "added root here-a -> " + a + " (adapters: all, trust: no)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("start --root .: want %q in:\n%s", want, out)
+		}
+	}
+	out = e.mustFleetIn(b, "start", "--root", ".", "--root", a, "--trust")
+	for _, want := range []string{
+		"fleet daemon is already running",
+		"added root here-b -> " + b + " (adapters: all, trust: yes)",
+		a + " is already root here-a (trust: no)",
+		"--trust only applies to new roots",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("second start --root: want %q in:\n%s", want, out)
+		}
+	}
+	out = e.mustFleet(e.home, "roots")
+	if strings.Count(out, "\nhere-a ") != 1 || strings.Count(out, "\nhere-b ") != 1 {
+		t.Fatalf("roots:\n%s", out)
+	}
+
+	// A paired device can start an agent in the new root (remote revoked
+	// the client, so it pairs again).
+	code, fp := e.pairingCode()
+	e.mustFleet(e.clientHome, "connect", fmt.Sprintf("127.0.0.1:%d", e.port), "--code", code, "--fingerprint", fp, "--name", "e2e-client")
+	e.mustFleet(e.clientHome, "-H", "e2e-server", "run", "shell", "here-b:", "--name", "remote-here")
+	ag := e.waitAgent("remote-here", func(a agent) bool { return a.State == "AGENT_STATE_RUNNING" })
+	if ag.Cwd != b {
+		t.Fatalf("agent cwd %q, want %q", ag.Cwd, b)
+	}
+	e.mustFleet(e.home, "kill", "remote-here")
+	e.waitNoSessions()
+	e.mustFleet(e.home, "stop")
 }
 
 // --- daemon lifecycle ---
@@ -326,6 +389,26 @@ func (e *env) fleet(home string, args ...string) (string, error) {
 	cmd.Env = e.environ(home)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// fleetIn runs fleet on the server's home with dir as working directory.
+func (e *env) fleetIn(dir string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, e.bin, args...)
+	cmd.Env = e.environ(e.home)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func (e *env) mustFleetIn(dir string, args ...string) string {
+	e.t.Helper()
+	out, err := e.fleetIn(dir, args...)
+	if err != nil {
+		e.t.Fatalf("fleet %s (in %s): %v\n%s\ndaemon log:\n%s", strings.Join(args, " "), dir, err, out, e.daemonLog())
+	}
+	return out
 }
 
 func (e *env) mustFleet(home string, args ...string) string {
