@@ -7,6 +7,7 @@ import (
 	"time"
 
 	fleetv1 "fleet/gen/fleetv1"
+	"fleet/internal/adapter"
 	"fleet/internal/identity"
 )
 
@@ -163,7 +164,7 @@ func (d *daemon) listAdapters(ctx context.Context) *fleetv1.ListAdaptersResponse
 	resp := &fleetv1.ListAdaptersResponse{}
 	for _, a := range d.opts.Adapters.All() {
 		det := a.Detect(ctx)
-		resp.Adapters = append(resp.Adapters, &fleetv1.AdapterInfo{
+		info := &fleetv1.AdapterInfo{
 			Id:                a.ID(),
 			DisplayName:       a.DisplayName(),
 			Available:         det.Available,
@@ -171,7 +172,17 @@ func (d *daemon) listAdapters(ctx context.Context) *fleetv1.ListAdaptersResponse
 			Version:           det.Version,
 			UnavailableReason: det.Reason,
 			Capabilities:      a.Capabilities().Proto(),
-		})
+		}
+		if md, ok := a.(adapter.Modeler); ok {
+			ms := md.Models()
+			for _, m := range ms.Models {
+				info.Models = append(info.Models, &fleetv1.ModelChoice{Id: m.ID, Label: m.Label, Efforts: m.Efforts})
+			}
+			for _, e := range ms.Efforts {
+				info.Efforts = append(info.Efforts, &fleetv1.EffortChoice{Id: e.ID, Label: e.Label})
+			}
+		}
+		resp.Adapters = append(resp.Adapters, info)
 	}
 	return resp
 }

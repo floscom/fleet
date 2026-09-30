@@ -13,6 +13,7 @@ import (
 	fleetv1 "fleet/gen/fleetv1"
 	"fleet/internal/config"
 	"fleet/internal/web"
+	"fleet/internal/workflow"
 )
 
 func TestTranscriptFile(t *testing.T) {
@@ -128,6 +129,54 @@ func TestChatTranscript(t *testing.T) {
 	e.stop()
 	e.start()
 	check("after restart", "again", "and again")
+}
+
+func TestWebWorkflows(t *testing.T) {
+	e := newWebEnv(t)
+	c := e.dialUnix()
+	a := c.run(&fleetv1.RunAgentRequest{Root: "code"})
+	dir := testAdapter{}.TranscriptDir("")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(dir, a.GetSessionId())
+	agentAPI := "/api/agents/" + a.GetId() + "/workflows"
+	var r struct{ Runs []workflow.Run }
+	if code := e.webCall("GET", agentAPI, "", &r); code != 200 || len(r.Runs) != 0 {
+		t.Fatalf("no transcript yet: %d %+v", code, r)
+	}
+	os.WriteFile(base+".jsonl", []byte("hi\n"), 0o600)
+	os.WriteFile(base+".runs", []byte(`[{"id":"wf_1","name":"demo","status":"running","phases":[],"agents":[{"id":"s1","status":"running"}]}]`), 0o600)
+	os.WriteFile(base+".wf_1.s1.jsonl", []byte("task\nworking\n"), 0o600)
+	if code := e.webCall("GET", agentAPI, "", &r); code != 200 || len(r.Runs) != 1 || r.Runs[0].Status != workflow.Running {
+		t.Fatalf("runs: %d %+v", code, r)
+	}
+	var list struct{ Workflows []struct{ Agent string } }
+	if code := e.webCall("GET", "/api/workflows", "", &list); code != 200 || len(list.Workflows) != 1 || list.Workflows[0].Agent != a.GetId() {
+		t.Fatalf("list: %d %+v", code, list)
+	}
+	var ch struct{ Entries []struct{ Text string } }
+	if code := e.webCall("GET", agentAPI+"/wf_1/agents/s1/chat", "", &ch); code != 200 || len(ch.Entries) != 2 || ch.Entries[1].Text != "working" {
+		t.Fatalf("workflow agent chat: %d %+v", code, ch)
+	}
+	// Transcripts out of the transcript dir are not read: by a symlink, or
+	// by a run that climbs out.
+	os.Symlink(filepath.Join(e.home, "config.toml"), base+".wf_1.evil.jsonl")
+	os.WriteFile(filepath.Join(e.home, "x.y.jsonl"), []byte("secret\n"), 0o600)
+	for _, p := range []string{agentAPI + "/wf_1/agents/evil/chat", agentAPI + "/..%2F..%2Fx/agents/y/chat"} {
+		if code := e.webCall("GET", p, "", nil); code != 404 {
+			t.Fatalf("%s: %d", p, code)
+		}
+	}
+
+	// The session ends: its run cannot go on.
+	c.ok(killReq(&fleetv1.KillAgentRequest{Agent: a.GetId()}))
+	if code := e.webCall("GET", agentAPI, "", &r); code != 200 || len(r.Runs) != 1 || r.Runs[0].Status != workflow.Stopped || r.Runs[0].Agents[0].Status != workflow.Stopped {
+		t.Fatalf("runs of an ended session: %d %+v", code, r)
+	}
+	if code := e.webCall("GET", "/api/workflows", "", &list); code != 200 || len(list.Workflows) != 0 {
+		t.Fatalf("list after the session ended: %d %+v", code, list)
+	}
 }
 
 func TestWebInputAndScreen(t *testing.T) {

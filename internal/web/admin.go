@@ -76,6 +76,10 @@ type Adapter struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Available bool   `json:"available"`
+	// Models and Efforts are what an agent can be started with; empty
+	// when the adapter offers no choice.
+	Models  []ModelChoice  `json:"models"`
+	Efforts []EffortChoice `json:"efforts"`
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +177,11 @@ func (s *Server) apiHandler() http.Handler {
 	admin.HandleFunc("GET /api/agents/{id}/chat", s.apiChat)
 	admin.HandleFunc("GET /api/agents/{id}/screen", s.apiScreen)
 	admin.HandleFunc("POST /api/agents/{id}/input", s.apiInput)
+	admin.HandleFunc("POST /api/agents/{id}/model", s.apiSwitchModel)
 	admin.HandleFunc("POST /api/agents/{id}/stop", s.apiStopAgent)
+	admin.HandleFunc("GET /api/workflows", s.apiWorkflows)
+	admin.HandleFunc("GET /api/agents/{id}/workflows", s.apiAgentWorkflows)
+	admin.HandleFunc("GET /api/agents/{id}/workflows/{run}/agents/{sub}/chat", s.apiWorkflowChat)
 	browser := http.NewServeMux()
 	browser.HandleFunc("GET /api/join", s.apiJoin)
 	browser.HandleFunc("/api/hosts/{id}/{rest...}", s.apiHost)

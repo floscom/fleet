@@ -213,6 +213,29 @@ func newAdaptersCmd() *cobra.Command {
 					t.row(a.Id, a.DisplayName, avail, orDash(a.Version), orDash(a.BinaryPath), features(a.Capabilities))
 				}
 				t.flush()
+				// What `fleet run --model/--effort` take.
+				var choices [][]string
+				for _, a := range list {
+					if len(a.Models) == 0 && len(a.Efforts) == 0 {
+						continue
+					}
+					var ms, es []string
+					for _, m := range a.Models {
+						ms = append(ms, m.Id)
+					}
+					for _, e := range a.Efforts {
+						es = append(es, e.Id)
+					}
+					choices = append(choices, []string{a.Id, orDash(strings.Join(ms, ",")), orDash(strings.Join(es, ","))})
+				}
+				if len(choices) > 0 {
+					fmt.Fprintln(cmd.OutOrStdout())
+					t := newTable(cmd.OutOrStdout(), "ID", "--MODEL", "--EFFORT")
+					for _, c := range choices {
+						t.row(c...)
+					}
+					t.flush()
+				}
 				return nil
 			})
 		},

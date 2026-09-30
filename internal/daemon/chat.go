@@ -66,11 +66,30 @@ func inTranscriptDir(dir, path string) bool {
 // path is "" while there is no transcript (yet), or when the adapter keeps
 // none (parse is then nil too).
 func (m *manager) chat(ref string) (*fleetv1.Agent, string, transcript.Parser, error) {
+	s, err := m.session(ref)
+	if s.t == nil {
+		return s.agent, "", nil, err
+	}
+	return s.agent, s.path, s.t.ParseTranscript, nil
+}
+
+// sessionFiles is where an agent's session is recorded.
+type sessionFiles struct {
+	agent *fleetv1.Agent
+	// t is the agent's adapter if it keeps transcripts (else nil), dir its
+	// transcript dir, path the transcript ("" while there is none).
+	t    adapter.Transcripter
+	dir  string
+	path string
+}
+
+// session finds an agent's transcript.
+func (m *manager) session(ref string) (sessionFiles, error) {
 	m.mu.Lock()
 	a, err := m.find(ref)
 	if err != nil {
 		m.mu.Unlock()
-		return nil, "", nil, err
+		return sessionFiles{}, err
 	}
 	pa, adapterID, sessionID, path, home := a.proto(), a.Adapter, a.SessionID, a.Transcript, a.home()
 	m.mu.Unlock()
@@ -78,7 +97,7 @@ func (m *manager) chat(ref string) (*fleetv1.Agent, string, transcript.Parser, e
 	ad, _ := m.d.opts.Adapters.Get(adapterID)
 	t, ok := ad.(adapter.Transcripter)
 	if !ok {
-		return pa, "", nil, nil
+		return sessionFiles{agent: pa}, nil
 	}
 	dir := t.TranscriptDir(home)
 	if path == "" && sessionID != "" {
@@ -94,10 +113,10 @@ func (m *manager) chat(ref string) (*fleetv1.Agent, string, transcript.Parser, e
 			m.mu.Unlock()
 		}
 	}
-	if path == "" || !inTranscriptDir(dir, path) {
-		return pa, "", t.ParseTranscript, nil
+	if path != "" && !inTranscriptDir(dir, path) {
+		path = ""
 	}
-	return pa, path, t.ParseTranscript, nil
+	return sessionFiles{agent: pa, t: t, dir: dir, path: path}, nil
 }
 
 // liveSession returns the tmux session and adapter of a live agent.

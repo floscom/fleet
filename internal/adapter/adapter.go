@@ -16,6 +16,10 @@
 //   - chat view: implement Transcripter, and report the transcript file in
 //     StateUpdate.Transcript.
 //   - input from the dashboard into dialogs: implement DialogDetector.
+//   - workflows (subagents a session runs in the background): implement
+//     Workflower.
+//   - a choice of model and reasoning effort: implement Modeler, and
+//     ModelSwitcher to switch a running session.
 package adapter
 
 import (
@@ -25,6 +29,7 @@ import (
 
 	fleetv1 "fleet/gen/fleetv1"
 	"fleet/internal/transcript"
+	"fleet/internal/workflow"
 )
 
 // Adapter launches one kind of agent CLI.
@@ -90,6 +95,98 @@ type Transcripter interface {
 	ParseTranscript(line []byte) []transcript.Entry
 }
 
+// Workflower is implemented by Transcripters whose CLI runs workflows:
+// scripts that start many subagents, in phases, in the background of a
+// session. The dashboard shows their progress and each subagent's
+// transcript.
+type Workflower interface {
+	// Workflows lists the workflow runs of the session whose transcript is
+	// at path, oldest first. It is called again and again while a run goes
+	// on, so it should read only what changed.
+	Workflows(path string) []workflow.Run
+	// WorkflowTranscript returns the transcript of agent agent of run run
+	// of that session, and the parser for its lines.
+	WorkflowTranscript(path, run, agent string) (string, transcript.Parser, bool)
+}
+
+// Modeler is implemented by adapters whose CLI runs a chosen model at a
+// chosen reasoning effort: Launch honours LaunchRequest.Model and .Effort,
+// and the dashboard shows which ones a session runs at.
+type Modeler interface {
+	// Models lists the models and effort levels to offer.
+	Models() Models
+	// ModelLine updates m from one line of a session's transcript (see
+	// Transcripter) that names the model or effort in use, such as a reply
+	// or a switch to another model. It is given every line, in order; m
+	// starts as what the agent was launched with.
+	ModelLine(line []byte, m *SessionModel)
+}
+
+// ModelSwitcher is implemented by Modelers that can switch a running
+// session to another model or effort, for that session only.
+type ModelSwitcher interface {
+	// SwitchModel switches the session running in term. model and effort
+	// are IDs from Models; "" keeps the current one.
+	SwitchModel(ctx context.Context, term Terminal, model, effort string) error
+}
+
+// Terminal is the terminal of a live agent.
+type Terminal interface {
+	// Screen is its visible screen, as text.
+	Screen(ctx context.Context) (string, error)
+	// Type types text, then presses Enter if submit.
+	Type(ctx context.Context, text string, submit bool) error
+	// Press presses keys, by tmux key name ("Enter", "Down", "s").
+	Press(ctx context.Context, keys ...string) error
+}
+
+// Models is what a Modeler offers.
+type Models struct {
+	Models []Model
+	// Efforts are the reasoning effort levels, least first.
+	Efforts []Choice
+}
+
+// Model is a model a Modeler offers.
+type Model struct {
+	ID, Label string
+	// Efforts are the IDs of the efforts it runs at, none if it has no
+	// effort levels.
+	Efforts []string
+}
+
+// Choice is one of a list of options.
+type Choice struct{ ID, Label string }
+
+// SessionModel is the model and effort a session runs at.
+type SessionModel struct {
+	// Model is the ID of one of the Modeler's models, "" if unknown or none
+	// matches; Name is what the CLI calls it, e.g. "claude-opus-5-5".
+	Model, Name string
+	// Effort is the ID of one of its efforts, "" if unknown or none.
+	Effort string
+}
+
+// Find returns the model with ID id.
+func (ms Models) Find(id string) (Model, bool) {
+	for _, m := range ms.Models {
+		if m.ID == id {
+			return m, true
+		}
+	}
+	return Model{}, false
+}
+
+// HasEffort reports whether id is one of the effort levels.
+func (ms Models) HasEffort(id string) bool {
+	for _, e := range ms.Efforts {
+		if e.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // Capabilities mirrors fleetv1.AdapterCapabilities.
 type Capabilities struct {
 	ActivityState bool
@@ -125,6 +222,10 @@ type LaunchRequest struct {
 	Cwd string
 	// Prompt is the optional initial prompt.
 	Prompt string
+	// Model and Effort are the model and reasoning effort to run at, for
+	// Modelers: IDs from Models (Model may also be any name the CLI takes).
+	// "" leaves it to the CLI's own default.
+	Model, Effort string
 	// ExtraArgs are appended verbatim.
 	ExtraArgs []string
 	// FleetBinary is the absolute path of the running fleet executable, for

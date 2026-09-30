@@ -46,6 +46,8 @@ var unsetEnv = []string{"ANTHROPIC_API_KEY", "CLAUDECODE"}
 type claude struct {
 	bin       *detect.Binary
 	extraArgs []string
+	// wf is what was read of workflow runs (workflow.go).
+	wf workflowCache
 }
 
 // New returns the Claude Code adapter. binaryOverride replaces the binary
@@ -70,7 +72,7 @@ func (c *claude) Detect(ctx context.Context) adapter.Detection { return c.bin.De
 
 // Launch writes the hook settings file and returns
 //
-//	claude --session-id <uuid> --settings <file> [extra...] [-- prompt]
+//	claude --session-id <uuid> --settings <file> [extra...] [--model M] [--effort E] [-- prompt]
 //
 // When the extra args resume a conversation (-c/--continue, -r/--resume),
 // --session-id is left out (claude rejects it there without --fork-session)
@@ -121,6 +123,12 @@ func (c *claude) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapte
 	}
 	argv = append(argv, "--settings", settings)
 	argv = append(argv, extra...)
+	if req.Model != "" {
+		argv = append(argv, "--model", req.Model)
+	}
+	if req.Effort != "" {
+		argv = append(argv, "--effort", req.Effort)
+	}
 	if req.Prompt != "" {
 		// "--" keeps a prompt starting with "-" from being read as a flag.
 		argv = append(argv, "--", req.Prompt)

@@ -252,6 +252,16 @@
         <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Prompt <span class="normal-case tracking-normal text-zinc-600">· optional, the agent waits for your first message without one</span></span>
         <textarea id="launch-prompt" rows="4" spellcheck="true" placeholder="What should the agent do?" class="mt-1 block w-full resize-y rounded-md border border-ink-600 bg-ink-950 px-2.5 py-2 text-[13px] leading-relaxed max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20"></textarea>
       </label>
+      <div id="launch-model-row" hidden class="grid gap-3 sm:grid-cols-2">
+        <label class="block">
+          <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Model</span>
+          <select id="launch-model" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20"></select>
+        </label>
+        <label class="block">
+          <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Effort</span>
+          <select id="launch-effort" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20 disabled:opacity-50"></select>
+        </label>
+      </div>
       <details class="group rounded-md border border-ink-700 bg-ink-850/40">
         <summary class="touch:min-h-11 flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400">
           <span class="inline-block transition-transform group-open:rotate-90 motion-reduce:transition-none">▸</span> Options <span id="launch-options-note" class="font-normal text-zinc-600"></span>
@@ -311,20 +321,52 @@
   </div>
   <div id="chat-confirm" hidden class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-rose-500/25 bg-rose-500/5 px-4 py-2.5"></div>
   <div id="chat-detail" hidden class="border-b border-amber-400/20 bg-amber-400/5 px-4 py-2 text-xs text-amber-200/90"></div>
-  <div id="chat-scroll" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
+  <!-- Shown once the session has run a workflow. -->
+  <div id="chat-tabs" hidden role="tablist" aria-label="Session views" class="flex items-center gap-1 border-b border-ink-700 px-3">
+    <button id="chat-tab-chat" type="button" role="tab" aria-selected="true" aria-controls="chat-scroll" class="touch:min-h-11 -mb-px border-b-2 border-transparent px-2.5 py-2 text-xs font-medium text-zinc-500 hover:text-zinc-200 aria-selected:border-emerald-400 aria-selected:text-zinc-100 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400">Chat</button>
+    <button id="chat-tab-wf" type="button" role="tab" aria-selected="false" aria-controls="wf-view" tabindex="-1" class="touch:min-h-11 -mb-px inline-flex items-center gap-1.5 border-b-2 border-transparent px-2.5 py-2 text-xs font-medium text-zinc-500 hover:text-zinc-200 aria-selected:border-fuchsia-400 aria-selected:text-zinc-100 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-fuchsia-400">Workflows <span id="chat-tab-wf-n" hidden class="inline-flex items-center gap-1 rounded-full bg-ink-800 px-1.5 py-px font-mono text-[10px] tabular-nums text-zinc-400"></span></button>
+  </div>
+  <div id="chat-scroll" role="tabpanel" aria-labelledby="chat-tab-chat" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
     <div id="chat-log" class="mx-auto flex max-w-3xl flex-col gap-3" aria-live="polite"></div>
+  </div>
+  <div id="wf-view" hidden role="tabpanel" aria-labelledby="chat-tab-wf" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 max-sm:px-2.5">
+    <div id="wf-list" class="mx-auto flex max-w-3xl flex-col gap-3"></div>
+  </div>
+  <!-- One agent of a workflow run: its conversation, read-only. -->
+  <div id="sub-view" hidden role="tabpanel" aria-labelledby="chat-tab-wf" class="flex min-h-0 flex-1 flex-col">
+    <div class="flex items-start gap-3 border-b border-ink-700 bg-ink-850/60 px-4 py-2.5 max-sm:gap-2 max-sm:px-2.5">
+      <button id="sub-back" type="button" class="touch:min-h-11 flex min-w-0 max-w-[40%] shrink-0 items-center gap-1 rounded-md border border-ink-600 bg-ink-850 px-2 py-1 text-xs text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-fuchsia-400"><span aria-hidden="true">‹</span><span id="sub-back-name" class="truncate font-mono">workflow</span></button>
+      <div class="min-w-0 flex-1">
+        <div class="flex flex-wrap items-center gap-2">
+          <h3 id="sub-title" class="truncate font-mono text-[13px] font-semibold text-zinc-100"></h3>
+          <span id="sub-badges" class="flex flex-wrap items-center gap-1.5"></span>
+        </div>
+        <div id="sub-meta" class="mt-0.5 truncate text-[11px] text-zinc-500"></div>
+      </div>
+    </div>
+    <div id="sub-scroll" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
+      <div id="sub-log" class="mx-auto flex max-w-3xl flex-col gap-3" aria-live="polite"></div>
+    </div>
   </div>
   <section id="chat-screen" hidden aria-label="Terminal screen" class="max-h-[45%] min-h-24 overflow-auto border-t border-ink-700 bg-ink-950">
     <pre id="chat-screen-pre" class="w-max min-w-full px-3 py-2 font-mono text-[11px] leading-[1.35] text-zinc-300"></pre>
   </section>
-  <div class="border-t border-ink-700 bg-ink-850/60 px-3 py-2.5">
+  <div id="chat-foot" class="border-t border-ink-700 bg-ink-850/60 px-3 py-2.5">
     <div id="chat-keys" class="touch:gap-1.5 mb-2 flex items-center gap-1 overflow-x-auto"></div>
     <form id="chat-form" class="flex items-end gap-2" novalidate>
       <label for="chat-input" class="sr-only">Message</label>
       <textarea id="chat-input" rows="1" spellcheck="true" placeholder="Message the agent · Enter sends, Shift+Enter for a new line" class="touch:min-h-11 max-h-48 min-h-9 min-w-0 flex-1 resize-none rounded-md border border-ink-600 bg-ink-950 px-2.5 py-2 text-[13.5px] leading-snug max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20 disabled:opacity-50"></textarea>
       <button id="chat-send" type="submit" class="touch:h-11 touch:px-4 h-9 shrink-0 rounded-md bg-emerald-400 px-3 text-xs font-semibold text-ink-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Send</button>
     </form>
-    <div id="chat-status" role="status" aria-live="polite" class="mt-1 min-h-4 truncate text-[11px] text-zinc-500"></div>
+    <div class="mt-1.5 flex min-h-5 items-center gap-2">
+      <div id="chat-model" hidden class="flex shrink-0 items-center gap-1.5">
+        <label for="chat-model-sel" class="text-[10px] font-medium uppercase tracking-wider text-zinc-600">model</label>
+        <select id="chat-model-sel" class="touch:min-h-11 max-w-40 rounded-md border border-ink-600 bg-ink-900 py-0.5 pl-1.5 pr-1 font-mono text-[11px] max-sm:text-base pointer-coarse:text-base text-zinc-300 hover:border-zinc-500 hover:text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20 disabled:opacity-60 disabled:hover:border-ink-600 disabled:hover:text-zinc-300"></select>
+        <label for="chat-effort-sel" class="ml-1 text-[10px] font-medium uppercase tracking-wider text-zinc-600">effort</label>
+        <select id="chat-effort-sel" class="touch:min-h-11 max-w-32 rounded-md border border-ink-600 bg-ink-900 py-0.5 pl-1.5 pr-1 font-mono text-[11px] max-sm:text-base pointer-coarse:text-base text-zinc-300 hover:border-zinc-500 hover:text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20 disabled:opacity-60 disabled:hover:border-ink-600 disabled:hover:text-zinc-300"></select>
+      </div>
+      <div id="chat-status" role="status" aria-live="polite" class="min-h-4 min-w-0 flex-1 truncate text-[11px] text-zinc-500"></div>
+    </div>
   </div>
 </dialog>
 

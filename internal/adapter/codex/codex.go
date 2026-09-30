@@ -43,6 +43,8 @@ const ID = "codex"
 type codex struct {
 	bin       *detect.Binary
 	extraArgs []string
+	// models is what was read of Codex's model list (model.go).
+	models modelCache
 }
 
 // New returns the Codex adapter. binaryOverride replaces the binary search
@@ -67,7 +69,7 @@ func (c *codex) Detect(ctx context.Context) adapter.Detection { return c.bin.Det
 
 // Launch returns
 //
-//	codex -c check_for_update_on_startup=false -c hooks.<Event>=... -c hooks.state=... [-c projects=...] [extra...] [-- prompt]
+//	codex -c check_for_update_on_startup=false -c hooks.<Event>=... -c hooks.state=... [-c projects=...] [extra...] [-m M] [-c model_reasoning_effort=E] [-- prompt]
 //
 // Codex creates its session id lazily, so SessionID is left empty; it is
 // learned from the SessionStart hook.
@@ -91,6 +93,12 @@ func (c *codex) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapter
 	}
 	argv = append(argv, c.extraArgs...)
 	argv = append(argv, req.ExtraArgs...)
+	if req.Model != "" {
+		argv = append(argv, "-m", req.Model)
+	}
+	if req.Effort != "" {
+		argv = append(argv, "-c", "model_reasoning_effort="+tomlString(req.Effort))
+	}
 	if req.Prompt != "" {
 		// "--" keeps a prompt starting with "-" from being read as a flag.
 		argv = append(argv, "--", req.Prompt)

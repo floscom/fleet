@@ -205,12 +205,12 @@ func forwardable(method, rest string) bool {
 	switch method {
 	case http.MethodGet:
 		switch rest {
-		case "session", "fs", "adapters", "roots", "agents":
+		case "session", "fs", "adapters", "roots", "agents", "workflows":
 			return true
 		}
-		return agentRoute(rest, "chat", "screen")
+		return agentRoute(rest, "chat", "screen", "workflows") || workflowChatRoute(rest)
 	case http.MethodPost:
-		return rest == "roots" || rest == "agents" || agentRoute(rest, "input", "stop")
+		return rest == "roots" || rest == "agents" || agentRoute(rest, "input", "model", "stop")
 	case http.MethodDelete:
 		return oneSegment(strings.CutPrefix(rest, "roots/"))
 	}
@@ -231,16 +231,28 @@ func agentRoute(rest string, actions ...string) bool {
 	return false
 }
 
+// workflowChatRoute reports whether rest is
+// agents/<id>/workflows/<run>/agents/<sub>/chat.
+func workflowChatRoute(rest string) bool {
+	p := strings.Split(rest, "/")
+	return len(p) == 7 && p[0] == "agents" && p[1] != "" && p[2] == "workflows" && p[3] != "" &&
+		p[4] == "agents" && p[5] != "" && p[6] == "chat"
+}
+
 // oneSegment reports whether s is a non-empty path segment (and ok).
 func oneSegment(s string, ok bool) bool {
 	return ok && s != "" && !strings.Contains(s, "/")
 }
 
 // forwardTimeout bounds a forwarded request: starting an agent may take
-// long (a worktree, a container), a chat request waits up to chatWait.
+// long (a worktree, a container), and so may switching its model; a chat
+// request waits up to chatWait.
 func forwardTimeout(method, rest string) time.Duration {
 	if method == http.MethodPost && rest == "agents" {
 		return runTimeout
+	}
+	if method == http.MethodPost && agentRoute(rest, "model") {
+		return modelTimeout
 	}
 	return peerTimeout
 }

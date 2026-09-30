@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,8 +120,8 @@ type block struct {
 //
 //	user text, slash command           -> User (images as "[image]")
 //	user tool_result                   -> Result (ID = tool_use_id)
-//	slash command output,
-//	  task notification, interruption  -> Note
+//	slash command output, interruption -> Note
+//	task notification                  -> Task (ID = tool-use-id)
 //	assistant text                     -> Assistant
 //	assistant tool_use                 -> Tool
 //	assistant API error                -> Note
@@ -131,8 +132,18 @@ type block struct {
 // path notes, caveats), the compaction summary, thinking blocks, synthetic
 // replies, and all other line types.
 func parseLine(line []byte) []transcript.Entry {
+	return parse(line, false)
+}
+
+// parseSidechain parses the transcript of a subagent, whose lines are all
+// sidechains, like parseLine.
+func parseSidechain(line []byte) []transcript.Entry {
+	return parse(line, true)
+}
+
+func parse(line []byte, sidechain bool) []transcript.Entry {
 	var r record
-	if !decode(line, &r) || r.IsSidechain || r.IsMeta {
+	if !decode(line, &r) || r.IsSidechain && !sidechain || r.IsMeta {
 		return nil
 	}
 	var out []transcript.Entry
@@ -222,10 +233,18 @@ func userContent(raw json.RawMessage) []transcript.Entry {
 // output, background task notifications, ! shell commands and
 // interruptions as user text wrapped in pseudo-XML tags. A slash command
 // is what the user typed ("/review the auth code"), so it stays a User
-// entry; the rest become notes. Only a tag at the very start counts, so a
-// prompt that merely mentions one stays a prompt.
+// entry; a task notification becomes a Task, the rest notes. Only a tag at
+// the very start counts, so a prompt that merely mentions one stays a
+// prompt.
 func userText(s string) []transcript.Entry {
 	s = strings.TrimSpace(stripTag(s, "system-reminder"))
+	if strings.HasPrefix(s, workflowTask) {
+		// A workflow agent's task, computed by the script: after a header
+		// about where it came from, every line indented by two spaces.
+		if _, task, ok := strings.Cut(s, "follows:\n"); ok {
+			s = strings.TrimSpace(strings.ReplaceAll("\n"+task, "\n  ", "\n"))
+		}
+	}
 	switch {
 	case s == "":
 		return nil
@@ -247,11 +266,7 @@ func userText(s string) []transcript.Entry {
 	case strings.HasPrefix(s, "<local-command-caveat>"):
 		return nil
 	case strings.HasPrefix(s, "<task-notification>"):
-		summary, _ := inner(s, "summary")
-		if summary = strings.TrimSpace(summary); summary == "" {
-			summary = "background task finished"
-		}
-		return note(summary)
+		return taskEnd(s)
 	case strings.HasPrefix(s, "<bash-input>"):
 		cmd, _ := inner(s, "bash-input")
 		return note("! " + strings.TrimSpace(cmd))
@@ -259,6 +274,30 @@ func userText(s string) []transcript.Entry {
 		return output(s, "bash-stdout", "bash-stderr")
 	}
 	return []transcript.Entry{{Kind: transcript.User, Text: transcript.Clip(s, transcript.MaxText)}}
+}
+
+// workflowTask starts the task of a workflow agent.
+const workflowTask = "[Workflow harness"
+
+// taskEnd maps the notification that a background task ended. Its summary
+// and result are HTML-escaped.
+func taskEnd(s string) []transcript.Entry {
+	field := func(tag string) string {
+		v, _ := inner(s, tag)
+		return strings.TrimSpace(html.UnescapeString(v))
+	}
+	e := transcript.Entry{
+		Kind:   transcript.Task,
+		ID:     field("tool-use-id"),
+		Name:   field("status"),
+		Text:   transcript.Clip(field("summary"), transcript.MaxText),
+		Output: transcript.Clip(field("result"), transcript.MaxOutput),
+	}
+	if e.Text == "" {
+		e.Text = "background task finished"
+	}
+	e.Error = e.Name == "failed"
+	return []transcript.Entry{e}
 }
 
 // output makes a note of the non-empty contents of the given tags.
@@ -452,14 +491,25 @@ func toolUse(id, name string, input json.RawMessage) transcript.Entry {
 		text = str("url")
 	case "WebSearch", "ToolSearch":
 		text = str("query")
-	case "Task", "Agent", "Workflow", "Monitor":
+	case "Task", "Agent", "Monitor":
 		text = str("description")
+	case "Workflow":
+		// A script (its meta names it), a saved script, or a named one.
+		name, desc, _ := scriptMeta([]byte(str("script")))
+		if name == "" {
+			name = str("name")
+		}
+		if name == "" && str("scriptPath") != "" {
+			name = filepath.Base(str("scriptPath"))
+		}
+		text = strings.TrimPrefix(name+": "+desc, ": ")
+		text = strings.TrimSuffix(text, ": ")
 	case "Skill":
 		text = strings.TrimSpace(str("skill") + " " + str("args"))
 	case "TaskCreate":
 		text = str("subject")
 	case "ExitPlanMode":
-		text = str("plan")
+		text = strings.TrimLeft(strings.TrimSpace(str("plan")), "# ") // its heading
 	case "TodoWrite":
 		if todos, ok := in["todos"].([]any); ok {
 			text = plural(len(todos), "todo")
@@ -495,13 +545,19 @@ func toolUse(id, name string, input json.RawMessage) transcript.Entry {
 		detail = strings.Join(hunks, "\n")
 	case "Write":
 		detail = str("content")
+	case "Workflow":
+		detail = str("script")
 	case "ExitPlanMode":
 		detail = str("plan")
 	}
 	if detail == "" {
 		detail = indentJSON(input)
 	}
-	if detail = transcript.Clip(detail, transcript.MaxDetail); detail != e.Text {
+	limit := transcript.MaxDetail
+	if name == "Workflow" {
+		limit = transcript.MaxText // the script is what the chat shows of a run
+	}
+	if detail = transcript.Clip(detail, limit); detail != e.Text {
 		e.Detail = detail
 	}
 	return e

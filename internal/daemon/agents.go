@@ -72,6 +72,10 @@ type agentRec struct {
 	// Transcript is the agent's transcript file on this host, as reported
 	// by its hooks (see adapter.Transcripter).
 	Transcript string `json:"transcript,omitempty"`
+	// Model and Effort are what the agent was launched with or last
+	// switched to from fleet, "" for the CLI's default (adapter.Modeler).
+	Model  string `json:"model,omitempty"`
+	Effort string `json:"effort,omitempty"`
 
 	attached int32
 	// dialogGone counts the screens in a row that showed none of Dialogs
@@ -160,6 +164,12 @@ type manager struct {
 	hookMu  sync.Mutex
 	hookLns map[string]net.Listener
 	hookWG  sync.WaitGroup
+
+	// models follow each agent's session for its model and effort, and
+	// switching marks agents whose model is being switched (model.go).
+	modelMu   sync.Mutex
+	models    map[string]*modelCursor
+	switching map[string]bool
 }
 
 // readyLocked clears a's busy flag and stamps it with a new ready generation.
@@ -231,6 +241,7 @@ func (m *manager) changedLocked(a *agentRec) {
 // removeLocked drops an agent from the registry and deletes its state dir.
 func (m *manager) removeLocked(a *agentRec) {
 	delete(m.agents, a.ID)
+	m.dropCursor(a.ID)
 	m.saveLocked()
 	m.broadcastLocked(&fleetv1.Event{Kind: &fleetv1.Event_AgentRemoved{AgentRemoved: a.ID}})
 	if err := os.RemoveAll(a.stateDir()); err != nil {

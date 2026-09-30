@@ -6,9 +6,10 @@ package web
 //
 //	GET  /api/agents                  every agent, finished ones included
 //	POST /api/agents                  start one
-//	GET  /api/agents/{id}/chat        its conversation (see apiChat)
+//	GET  /api/agents/{id}/chat        its conversation (see serveChat)
 //	GET  /api/agents/{id}/screen      its terminal screen, as text
 //	POST /api/agents/{id}/input       type text and/or press keys (see apiInput)
+//	POST /api/agents/{id}/model       switch its model and/or effort
 //	POST /api/agents/{id}/stop        kill it
 
 import (
@@ -38,6 +39,9 @@ const (
 	runTimeout = 75 * time.Second
 	// maxKeys caps the keys of one input request.
 	maxKeys = 32
+	// modelTimeout bounds switching a session's model: the daemon types
+	// into its terminal and waits for each step to show.
+	modelTimeout = 30 * time.Second
 )
 
 // Chat is where an agent's conversation is (Source.Chat).
@@ -47,6 +51,40 @@ type Chat struct {
 	Path string
 	// Parse parses its lines; nil when the adapter keeps no transcript.
 	Parse transcript.Parser
+	// Model is the model and effort the session runs at; nil when its
+	// adapter offers no choice of model.
+	Model *Model
+}
+
+// Model is the model and effort an agent's session runs at, and what it
+// may run at instead.
+type Model struct {
+	// Model is the ID of one of Models, "" if unknown or none matches; Name
+	// is what the CLI calls it, e.g. "claude-opus-5-5".
+	Model string `json:"model"`
+	Name  string `json:"name"`
+	// Effort is the ID of one of Efforts, "" if unknown or none.
+	Effort string `json:"effort"`
+	// Switch is set when the running session can be switched to another
+	// model or effort (POST /api/agents/{id}/model).
+	Switch  bool           `json:"switch"`
+	Models  []ModelChoice  `json:"models"`
+	Efforts []EffortChoice `json:"efforts"`
+}
+
+// ModelChoice is a model an adapter offers.
+type ModelChoice struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
+	// Efforts are the IDs of the efforts it runs at; none if it has no
+	// effort levels.
+	Efforts []string `json:"efforts"`
+}
+
+// EffortChoice is a reasoning effort level an adapter offers.
+type EffortChoice struct {
+	ID    string `json:"id"`
+	Label string `json:"label"`
 }
 
 // keyNames maps the key names the page sends to tmux key names.
@@ -77,6 +115,8 @@ func (s *Server) apiRunAgent(w http.ResponseWriter, r *http.Request) {
 		Branch    string `json:"branch"`
 		Isolation string `json:"isolation"` // "", "worktree" or "pinned"
 		Sandbox   string `json:"sandbox"`   // "", "docker" or "none"
+		Model     string `json:"model"`     // "" for the CLI's default
+		Effort    string `json:"effort"`    // "" for the CLI's default
 	}
 	if !decode(w, r, &req) {
 		return
@@ -107,6 +147,7 @@ func (s *Server) apiRunAgent(w http.ResponseWriter, r *http.Request) {
 		Adapter: req.Adapter, Root: req.Root, Path: strings.Trim(req.Path, "/"),
 		Name: strings.TrimSpace(req.Name), Branch: strings.TrimSpace(req.Branch),
 		Prompt: req.Prompt, Isolation: iso, Sandbox: sb,
+		Model: strings.TrimSpace(req.Model), Effort: strings.TrimSpace(req.Effort),
 	})
 	if err != nil {
 		s.writeSourceError(w, err)
@@ -171,6 +212,27 @@ func (s *Server) apiInput(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"held": held})
 }
 
+// apiSwitchModel switches a running session to another model and/or
+// effort ("" keeps the current one), for that session only, and answers
+// {"model": Model}.
+func (s *Server) apiSwitchModel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Model  string `json:"model"`
+		Effort string `json:"effort"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), modelTimeout)
+	defer cancel()
+	m, err := s.opts.Source.SwitchModel(ctx, r.PathValue("id"), req.Model, req.Effort)
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]*Model{"model": m})
+}
+
 func (s *Server) apiScreen(w http.ResponseWriter, r *http.Request) {
 	screen, err := s.opts.Source.Screen(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -200,9 +262,19 @@ type chatReply struct {
 	Reset bool `json:"reset"`
 	// More means newer entries are waiting: ask again right away.
 	More bool `json:"more"`
+	// Model is the model and effort the session runs at, if its adapter
+	// offers a choice.
+	Model *Model `json:"model,omitempty"`
 }
 
 // apiChat serves an agent's conversation, parsed from its transcript.
+func (s *Server) apiChat(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.serveChat(w, r, func() (Chat, error) { return s.opts.Source.Chat(id) })
+}
+
+// serveChat serves the conversation in the transcript find returns (again
+// each time a waiting request looks for news):
 //
 //	(no offsets)         the latest entries (Reset)
 //	file=F&after=N       entries after offset N of file F; with wait=1 and
@@ -212,21 +284,21 @@ type chatReply struct {
 //
 // A file that is not the agent's transcript (anymore) gives the latest
 // entries of the current one, with Reset.
-func (s *Server) apiChat(w http.ResponseWriter, r *http.Request) {
+func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, find func() (Chat, error)) {
 	q := r.URL.Query()
-	id, file := r.PathValue("id"), q.Get("file")
+	file := q.Get("file")
 	after, afterErr := strconv.ParseInt(q.Get("after"), 10, 64)
 	before, beforeErr := strconv.ParseInt(q.Get("before"), 10, 64)
 	wait := q.Get("wait") == "1" && afterErr == nil
 	seen, _ := strconv.ParseInt(q.Get("v"), 10, 64)
 	deadline := time.Now().Add(chatWait)
 	for {
-		c, err := s.opts.Source.Chat(id)
+		c, err := find()
 		if err != nil {
 			s.writeSourceError(w, err)
 			return
 		}
-		reply := chatReply{Agent: agentOf(c.Agent), File: fileKey(c.Path), Entries: []transcript.Entry{}}
+		reply := chatReply{Agent: agentOf(c.Agent), File: fileKey(c.Path), Entries: []transcript.Entry{}, Model: c.Model}
 		switch {
 		case c.Path == "":
 			reply.Reset = file != ""
@@ -241,7 +313,7 @@ func (s *Server) apiChat(w http.ResponseWriter, r *http.Request) {
 			err = reply.tail(c)
 		}
 		if errors.Is(err, fs.ErrNotExist) {
-			reply = chatReply{Agent: reply.Agent, Entries: []transcript.Entry{}, Reset: file != ""}
+			reply = chatReply{Agent: reply.Agent, Entries: []transcript.Entry{}, Reset: file != "", Model: c.Model}
 			err = nil
 		}
 		if err != nil {

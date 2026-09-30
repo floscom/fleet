@@ -89,8 +89,8 @@ address. Without it, commands talk to the local daemon.
 | `fleet version` | Print the version. |
 | `fleet roots` / `roots add <path> [--name N] [--adapters a,b] [--trust]` / `roots rm <name>` | Manage the folders agents may run in. `--trust`: see [Folder trust](#folder-trust). |
 | `fleet browse [root[/path]] [-a]` | List folders inside a root, marking git repos and running agents. |
-| `fleet adapters` | Adapters, whether their CLI is installed, version and features. |
-| `fleet run <adapter> [path] [flags] [-- agent args]` | Start an agent. `path` is `root:rel/path`, an absolute path, or (local only) a relative path; default `.`. Flags: `--name`, `--pinned`, `--worktree`, `--branch`, `--prompt`, `--attach`, `--clone <repo>` (instead of a path), `--docker` / `--sandbox docker\|none`. |
+| `fleet adapters` | Adapters, whether their CLI is installed, version and features, and the models and efforts `fleet run --model/--effort` take. |
+| `fleet run <adapter> [path] [flags] [-- agent args]` | Start an agent. `path` is `root:rel/path`, an absolute path, or (local only) a relative path; default `.`. Flags: `--name`, `--pinned`, `--worktree`, `--branch`, `--prompt`, `--model`, `--effort`, `--attach`, `--clone <repo>` (instead of a path), `--docker` / `--sandbox docker\|none`. |
 | `fleet ls [-a] [--json]` | List agents (`-a` includes exited and failed ones). |
 | `fleet attach <agent> [-r]` | Attach to an agent's terminal. Detach with Ctrl-\\. |
 | `fleet send <agent> <text...> [--no-enter]` | Type text into an agent's terminal and press Enter. |
@@ -376,8 +376,20 @@ it needs input), and *Agents → New session* starts one:
 
 - **Start**: pick the machine, the agent (Claude Code, Codex, shell), a
   root and a folder inside it, and optionally a prompt (Ctrl+Enter starts).
-  *Options* choose a worktree or the folder itself, the Docker sandbox, a
-  name and a branch, like `fleet run`. The session opens right away.
+  *Model* and *Effort* choose what the agent runs at (Claude Code: Opus,
+  Fable, Sonnet, Haiku at Low to Max or Ultracode; Codex: the models it
+  lists), *Default* leaves it to the CLI's own settings; the page remembers
+  the pick per agent. *Options* choose a worktree or the folder itself, the
+  Docker sandbox, a name and a branch, like `fleet run`. The session opens
+  right away.
+- **Model and effort.** Under the message box, *model* and *effort* show
+  what the session runs at (read from the transcript: the model of the
+  last reply, or a switch since). In a Claude Code session they switch it,
+  for this session only: the daemon opens `/model` in the terminal, picks
+  the model and effort, and presses `s`, which, unlike Enter or
+  `/model <name>`, does not make them your default for new sessions
+  (`POST /api/agents/{id}/model`). Codex saves any `/model` pick as its
+  default, so a Codex session shows its model and effort without switching.
 - **Chat.** The conversation is read from the transcript the CLI writes
   (`~/.claude/projects/…/<session>.jsonl` for Claude Code,
   `~/.codex/sessions/…/rollout-….jsonl` for Codex; in a sandbox, those in
@@ -400,12 +412,35 @@ it needs input), and *Agents → New session* starts one:
   double tap cannot stop a session; *Stop session* there kills it like
   `fleet kill` (the worktree is kept). On a phone the session fills the
   screen and closes with the back arrow at the top left.
+- **Workflows.** When Claude Code runs a workflow (its Workflow tool: a
+  script that starts many subagents in phases, in the background), the
+  agent's row shows each run going on: its phase, a bar per subagent and
+  how long it has run (a finished run stays for 10 minutes). The session
+  gets a *Workflows* tab, and the Workflow call in the chat a *progress*
+  link. Each run is a card: its phases side by side, then every subagent
+  by phase with what
+  it does right now (its latest tool call), its tool calls, tokens and
+  time; once the run ended, the script's log and its result (JSON shown
+  as sections, text as markdown), or the error it failed with. Click a
+  subagent for its whole conversation, read-only (Esc goes back). The tab
+  long-polls (`GET /api/agents/{id}/workflows?wait=1`); the list asks
+  `GET /api/workflows` every 3 seconds, on every joined machine.
 
 The agent's hooks tell the daemon where its transcript is; fleet only
 reads transcripts inside the CLI's own transcript folder (and, for
 sandboxed agents, inside the sandbox home), so a sandboxed agent cannot
 point the dashboard at other files on the server. Agents started before
 this version are found by their session id.
+
+Claude Code keeps a workflow run next to the session's transcript
+(`<session>/subagents/workflows/<run>/`: a journal of the agents started
+and finished, and each agent's transcript; the script in
+`<session>/workflows/scripts/`). How a run ended is in the session's
+transcript; the whole result and the script's log are in the task's output
+file under `/tmp/claude-<uid>/`, which fleet reads only at the exact path
+of that session and task. Symlinks there are not followed. Fleet reads
+each of these files once and then only what is appended, so following a
+run with dozens of agents costs a few hundred microseconds a poll.
 
 ### Several machines, one dashboard
 
@@ -434,7 +469,7 @@ the nonce, the method, the path and the body). The key never crosses the
 network, a signature is good for one request to one daemon, and a machine
 that only pretends to be a fleet learns nothing it can use. Only folder
 listings, adding or removing roots, and the session routes (list, start,
-chat, screen, input, stop) are forwarded.
+chat, screen, input, model, stop, workflows) are forwarded.
 
 - The key lives in `~/.fleet/fleet-key` (0600). `fleet web --rotate` does
   not change it. For a new key, delete the file and run `fleet web`

@@ -135,6 +135,9 @@ func (m *manager) run(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleet
 	if req.GetName() != "" && name == "" {
 		return nil, errf(codeInvalid, "invalid agent name %q", req.GetName())
 	}
+	if err := checkModel(ad, req.GetModel(), req.GetEffort()); err != nil {
+		return nil, err
+	}
 
 	// Reserve the agent so concurrent requests see its name and directory.
 	m.mu.Lock()
@@ -161,6 +164,7 @@ func (m *manager) run(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleet
 		Isolation: iso, State: stateStarting, CreatedAtMs: now,
 		TmuxSession: tmux.SessionName(id), busy: true,
 		Sandbox: sb, CloneURL: cloneURL,
+		Model: req.GetModel(), Effort: req.GetEffort(),
 	}
 	if sb == sandboxDocker {
 		a.Container = containerName(cfg, id)
@@ -279,6 +283,8 @@ func (m *manager) launch(ctx context.Context, ad adapter.Adapter, a agentRec, re
 		AgentName:   a.Name,
 		Cwd:         res.cwd,
 		Prompt:      req.GetPrompt(),
+		Model:       a.Model,
+		Effort:      a.Effort,
 		ExtraArgs:   extra,
 		FleetBinary: fleetBin,
 		StateDir:    stateDir,

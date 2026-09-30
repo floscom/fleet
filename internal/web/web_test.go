@@ -20,6 +20,7 @@ import (
 
 	fleetv1 "fleet/gen/fleetv1"
 	"fleet/internal/discovery"
+	"fleet/internal/workflow"
 )
 
 // fakeSource feeds the hub from a channel the test writes to.
@@ -43,6 +44,12 @@ type fakeSource struct {
 	// dialog makes SendInput report Enter held back, as for an open dialog.
 	dialog bool
 	chat   Chat
+	// wfRuns are the agent's workflow runs, wfChats the chats of their
+	// agents by "<run>/<sub>".
+	wfRuns  []workflow.Run
+	wfChats map[string]Chat
+	// switches are the model switches received (see model_test.go).
+	switches []fakeSwitch
 }
 
 type fakeInput struct {
@@ -144,6 +151,26 @@ func (s *fakeSource) Screen(_ context.Context, agent string) (string, error) {
 		return "", &Error{Status: 404, Msg: "no agent " + agent}
 	}
 	return "> hello\n\n", nil
+}
+
+func (s *fakeSource) Workflows(agent string) (*fleetv1.Agent, []workflow.Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.agent == nil || agent != s.agent.Id {
+		return nil, nil, &Error{Status: 404, Msg: "no agent " + agent}
+	}
+	return s.agent, append([]workflow.Run(nil), s.wfRuns...), nil
+}
+
+func (s *fakeSource) WorkflowChat(agent, run, sub string) (Chat, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.wfChats[run+"/"+sub]
+	if s.agent == nil || agent != s.agent.Id || !ok {
+		return Chat{}, &Error{Status: 404, Msg: "no agent " + sub}
+	}
+	c.Agent = s.agent
+	return c, nil
 }
 
 func (s *fakeSource) Chat(agent string) (Chat, error) {

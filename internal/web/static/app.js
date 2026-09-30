@@ -23,6 +23,7 @@
     roots: [],
     agents: new Map(), // id -> agent
     remote: new Map(), // server id of another fleet -> {agents: Map(id -> agent), fails}
+    workflows: new Map(), // agentKey -> workflow runs going on (see pollWorkflows)
     snapshotDone: false,
     peersSeen: false, // first complete (post-browse) peers list of this connection received
   };
@@ -237,6 +238,10 @@
     }
     if (a.stateDetail && !done) meta.append(h('span', 'truncate text-amber-200/70', a.stateDetail));
     body.append(meta);
+
+    // line 3: its workflow runs going on, the latest first
+    const runs = (admin && S.workflows.get(agentKey(host, a.id))) || [];
+    for (const run of runs.slice(-3).reverse()) body.append(workflowLine(host, a, run));
 
     // working: a thin shimmer under the row
     if (a.state === 'working') {
@@ -575,6 +580,10 @@
       const t = (el.dataset.prefix || '') + rel(ts);
       if (el.textContent !== t) el.textContent = t;
     }
+    for (const el of document.querySelectorAll('[data-since]')) {
+      const t = dur(Date.now() - Number(el.dataset.since));
+      if (el.textContent !== t) el.textContent = t;
+    }
   }, 1000);
 
   // ----------------------------------------------------------------- toasts
@@ -786,12 +795,14 @@
       closeLaunch();
       closeChat();
       S.remote.clear();
+      S.workflows.clear();
     } else {
       closeUnlock();
     }
     renderAccess();
     invalidate('roots', 'agents');
     scheduleRemote(0);
+    scheduleWorkflows(0);
   }
 
   // lostAdmin handles a rejected token (rotated, or from another server).
@@ -1573,7 +1584,7 @@
   const launch = {
     open: false,
     host: '', // server id; '' = this daemon
-    adapters: null, // [{id, name, available}] of the machine
+    adapters: null, // [{id, name, available, models, efforts}] of the machine
     roots: null, // roots of another machine (this one's are S.roots)
     root: '', // chosen root name
     sub: '', // folder inside the root, relative, '' = the root itself
@@ -1583,6 +1594,7 @@
     loading: false,
     busy: false, // a start is in flight
     error: '',
+    modelSig: '', // what the model pickers show (see renderLaunchModel)
   };
 
   const launchAPI = (path) => (launch.host ? `/api/hosts/${encodeURIComponent(launch.host)}/${path}` : '/api/' + path);
@@ -1694,6 +1706,61 @@
     $('launch-host').textContent = hostName(launch.host);
   }
 
+  // Model and effort picks, per agent CLI, kept for the next session.
+  const LAUNCH_PICKS = 'fleet.launch.models';
+
+  function launchPicks() {
+    try {
+      return JSON.parse(localStorage.getItem(LAUNCH_PICKS)) || {};
+    } catch {
+      return {};
+    }
+  }
+
+  // launchPick returns the model and effort chosen for the chosen agent
+  // CLI, as far as it still offers them: {ad, model, effort, efforts}.
+  function launchPick() {
+    const ad = (launch.adapters || []).find((a) => a.id === launch.adapter);
+    // Daemons older than model choices send none.
+    if (!ad || (!(ad.models || []).length && !(ad.efforts || []).length)) return null;
+    const pick = launchPicks()[ad.id] || {};
+    const model = (ad.models || []).find((m) => m.id === pick.model);
+    const efforts = model ? (ad.efforts || []).filter((e) => model.efforts.includes(e.id)) : ad.efforts || [];
+    const effort = efforts.find((e) => e.id === pick.effort);
+    return { ad, model, effort, efforts };
+  }
+
+  // renderLaunchModel offers the chosen agent's models, and the efforts of
+  // the chosen model. "Default" leaves either to the CLI's own settings.
+  function renderLaunchModel() {
+    const p = launchPick();
+    $('launch-model-row').hidden = !p;
+    if (!p) return;
+    // Rebuilt only when they change: browsing folders renders the dialog
+    // again, and would close a picker the user has open.
+    const sig = JSON.stringify([p.ad.id, p.ad.models, p.ad.efforts, p.model && p.model.id, p.effort && p.effort.id]);
+    if (sig === launch.modelSig) return;
+    launch.modelSig = sig;
+    const msel = $('launch-model');
+    msel.replaceChildren(opt('', 'Default'), ...p.ad.models.map((m) => opt(m.id, m.label)));
+    msel.value = p.model ? p.model.id : '';
+    const esel = $('launch-effort');
+    esel.replaceChildren(opt('', p.model && !p.efforts.length ? 'none' : 'Default'), ...p.efforts.map((e) => opt(e.id, e.label)));
+    esel.value = p.effort ? p.effort.id : '';
+    esel.disabled = !p.efforts.length;
+  }
+
+  function saveLaunchPick() {
+    const picks = launchPicks();
+    picks[launch.adapter] = { model: $('launch-model').value, effort: $('launch-effort').value };
+    try {
+      localStorage.setItem(LAUNCH_PICKS, JSON.stringify(picks));
+    } catch {
+      // private mode: the pick lasts until the dialog renders again
+    }
+    renderLaunch();
+  }
+
   // pickAdapter keeps the chosen adapter if the root allows it and it is
   // installed, else takes Claude Code, Codex or the first one that is.
   function pickAdapter(list) {
@@ -1730,6 +1797,8 @@
       }));
     }
 
+    renderLaunchModel();
+
     // roots
     const sel = $('launch-root');
     const roots = launchRoots();
@@ -1759,7 +1828,10 @@
       st.textContent = launch.error;
     } else if (root) {
       st.className = 'min-h-5 min-w-0 break-all text-xs text-zinc-500';
-      st.replaceChildren(h('span', '', 'starts ', h('span', 'font-mono text-zinc-200', launch.adapter || '…'), ' in ',
+      const p = launchPick();
+      const runs = p && [p.model && p.model.label, p.effort && p.effort.label + ' effort'].filter(Boolean).join(' · ');
+      st.replaceChildren(h('span', '', 'starts ', h('span', 'font-mono text-zinc-200', launch.adapter || '…'),
+        runs ? h('span', 'text-zinc-400', ` (${runs})`) : null, ' in ',
         h('span', 'font-mono text-zinc-200', shortPath(launch.sub ? joinPath(root.path, launch.sub) : root.path))));
     } else {
       st.className = 'min-h-5 text-xs text-zinc-500';
@@ -1843,8 +1915,11 @@
     launch.busy = true;
     launch.error = '';
     renderLaunch();
+    const pick = launchPick();
     try {
       const r = await api('POST', launchAPI('agents'), {
+        model: (pick && pick.model && pick.model.id) || '',
+        effort: (pick && pick.effort && pick.effort.id) || '',
         adapter: launch.adapter,
         root: root.name,
         path: launch.sub,
@@ -1886,6 +1961,8 @@
       launch.adapter = ev.target.value;
       renderLaunch();
     });
+    $('launch-model').addEventListener('change', saveLaunchPick);
+    $('launch-effort').addEventListener('change', saveLaunchPick);
     $('launch-root').addEventListener('change', (ev) => {
       launch.root = ev.target.value;
       launch.sub = '';
@@ -1916,29 +1993,27 @@
   //
   // One session: the conversation parsed from the agent's transcript
   // (GET .../chat, long-polled), its terminal screen for dialogs the chat
-  // does not show, keys and messages typed into it, and stop.
+  // does not show, keys and messages typed into it, and stop. A session
+  // that runs workflows gets a Workflows tab (see workflows below).
 
   const chat = {
     open: false,
     host: '',
     id: '',
     agent: null,
-    file: '', // transcript the offsets belong to; '' = none yet
-    start: 0, // offset of the oldest entry shown
-    end: 0, // offset after the newest
-    seq: 0, // bumped on open and close: loops of an old session stop
-    tools: new Map(), // tool call id -> {el, status, body, done}
-    orphans: new Map(), // tool call id -> {el, output, error}: a result shown without its call
-    loaded: false, // first reply in
-    earlier: false, // loading older entries
+    seq: 0, // bumped on open and close: requests of an old session are dropped
+    view: 'chat', // 'chat'; 'wf': its workflow runs; 'sub': one workflow agent
+    feed: null, // the conversation (see feeds)
     screenOpen: false,
     screenAuto: true, // open the screen by itself while the agent needs input
     screenTimer: 0,
     sending: false,
     held: false, // the last message went into a dialog, without Enter
+    model: null, // {model, name, effort, switch, models, efforts}; null: the agent offers no choice
+    switching: false, // a model switch is in flight
+    switchedAt: 0, // when the last one ended: replies read before it are stale
     confirmStop: false,
     stopping: false,
-    error: '',
   };
 
   const chatAPI = (rest) => {
@@ -1949,28 +2024,38 @@
   const chatLive = () => chat.agent && !isFinished(chat.agent);
   const chatDialog = () => chatLive() && chat.agent.state === 'needs_input';
 
-  function openChat(host, id, agent) {
+  // openChat shows a session. opts.view 'wf' opens its Workflows tab, with
+  // run opts.run unfolded.
+  function openChat(host, id, agent, opts) {
     if (!admin) return;
     closeLaunch();
     chat.seq++;
+    const view = (opts && opts.view) || 'chat';
     Object.assign(chat, {
-      open: true, host, id, agent: agent || null, file: '', start: 0, end: 0, loaded: false, earlier: false,
-      sending: false, held: false, confirmStop: false, stopping: false, error: '', screenAuto: true,
+      open: true, host, id, agent: agent || null, view,
+      sending: false, held: false, confirmStop: false, stopping: false, screenAuto: true,
+      model: null, switching: false, switchedAt: 0,
     });
-    chat.tools.clear();
-    chat.orphans.clear();
+    Object.assign(wf, { runs: [], v: '', loaded: false, sub: null, hint: (S.workflows.get(agentKey(host, id)) || []).length });
+    wf.shown.clear();
+    wf.known.clear();
+    wf.cards.clear();
+    if (opts && opts.run) wf.shown.add(opts.run);
     chat.screenOpen = !!agent && (agent.state === 'needs_input' || agent.adapter === 'shell');
-    $('chat-log').replaceChildren(h('div', 'py-10 text-center font-mono text-xs text-zinc-600', '// loading…'));
     $('chat-input').value = '';
     autosize();
     $('chat-screen-pre').textContent = '';
+    $('wf-list').replaceChildren();
     const d = $('chat');
     if (!d.open) d.showModal();
     renderChatHead();
-    renderChatScreen();
+    renderChatView();
     renderChatInput();
-    chatLoop(chat.seq);
-    if (!touch()) $('chat-input').focus();
+    renderWorkflows();
+    stopFeed(wf.feed);
+    startFeed(chat.feed);
+    wfLoop(chat.seq);
+    if (!touch() && view === 'chat') $('chat-input').focus();
   }
 
   function closeChat() {
@@ -1984,7 +2069,7 @@
     if (chat.agent && (a.updatedAtMs || 0) < (chat.agent.updatedAtMs || 0)) return;
     const was = chat.agent && chat.agent.state;
     chat.agent = a;
-    if (a.state !== was) paintPending();
+    if (a.state !== was) paintPending(chat.feed);
     if (a.state === 'needs_input' && was !== 'needs_input' && chat.screenAuto && !chat.screenOpen) {
       chat.screenOpen = true;
       renderChatScreen();
@@ -1993,134 +2078,176 @@
     renderChatInput();
   }
 
-  // chatLoop follows the conversation until the dialog closes or shows
-  // another session: the latest entries first, then long polls for more.
-  async function chatLoop(seq) {
+  // chatEmpty is the note for a session without a conversation.
+  function chatEmpty() {
+    const a = chat.agent || {};
+    return a.adapter === 'shell' ? 'A shell keeps no chat. Its terminal is under Screen.'
+      : chatLive() ? 'No messages yet. The conversation shows up here once the first message is sent.'
+      : 'This session left no conversation.';
+  }
+
+  // ------------------------------------------------------------------ feeds
+  //
+  // A feed shows one transcript in a log: its latest entries first, then
+  // new ones as they are written (long polls), older ones on request. The
+  // session's conversation is one, a workflow agent's another.
+
+  // newFeed makes a feed. o holds its scroller and log elements; url(query)
+  // of its chat requests; live() while more may be written; working()
+  // while its agent works (a call without output yet is then running);
+  // empty(), the note for no transcript; and optionally onReply(reply),
+  // onStatus() when its error or entries changed, onFile() when a
+  // transcript appeared or went.
+  function newFeed(o) {
+    return Object.assign({
+      seq: 0, // bumped on start and stop: loops of an old start stop
+      file: '', // transcript the offsets belong to; '' = none yet
+      start: 0, // offset of the oldest entry shown
+      end: 0, // offset after the newest
+      loaded: false, // first reply in
+      earlier: false, // loading older entries
+      error: '',
+      tools: new Map(), // tool call id -> {el, status, body, name, done}
+      orphans: new Map(), // tool call id -> {el, output, error}: a result shown without its call
+      watch: new Set(), // repaints of the nodes that show workflow runs (see applyWorkflows)
+    }, o);
+  }
+
+  function startFeed(f) {
+    stopFeed(f);
+    Object.assign(f, { file: '', start: 0, end: 0, loaded: false, earlier: false, error: '' });
+    f.log.replaceChildren(h('div', 'py-10 text-center font-mono text-xs text-zinc-600', '// loading…'));
+    feedLoop(f, f.seq);
+  }
+
+  function stopFeed(f) {
+    f.seq++;
+    f.tools.clear();
+    f.orphans.clear();
+    f.watch.clear();
+  }
+
+  // feedLoop follows a transcript until the feed stops or the dialog
+  // closes: the latest entries first, then long polls for more.
+  async function feedLoop(f, seq) {
     let failures = 0;
-    while (chat.open && seq === chat.seq) {
+    while (chat.open && seq === f.seq) {
       const q = new URLSearchParams();
-      if (chat.loaded) {
-        q.set('file', chat.file);
-        q.set('after', String(chat.end));
+      if (f.loaded) {
+        q.set('file', f.file);
+        q.set('after', String(f.end));
         q.set('wait', '1');
         q.set('v', String((chat.agent && chat.agent.updatedAtMs) || 0));
       }
       let r;
       try {
-        r = await api('GET', chatAPI('chat?' + q));
+        r = await api('GET', f.url(q));
       } catch (e) {
-        if (seq !== chat.seq) return;
-        chat.error = e.message;
-        renderChatStatus();
-        if (e.status === 404) return; // the agent is gone
+        if (seq !== f.seq) return;
+        f.error = e.message;
+        if (f.onStatus) f.onStatus();
+        if (e.status === 404) return; // gone
         await sleep(Math.min(10000, 1000 * 2 ** failures++));
         continue;
       }
-      if (seq !== chat.seq) return;
+      if (seq !== f.seq) return;
       failures = 0;
-      chat.error = '';
-      const first = !chat.loaded;
-      chat.loaded = true;
-      if (r.agent) chatAgent(chat.host, r.agent);
-      applyChat(r, first);
-      // A finished session whose transcript is read to the end is done.
-      if (!first && !r.more && !r.entries.length && !chatLive()) return;
+      f.error = '';
+      const first = !f.loaded;
+      f.loaded = true;
+      if (f.onReply) f.onReply(r);
+      feedApply(f, r, first);
+      // A finished transcript read to the end is done.
+      if (!first && !r.more && !r.entries.length && !f.live()) return;
     }
   }
 
-  function applyChat(r, first) {
-    const log = $('chat-log');
-    const scroller = $('chat-scroll');
+  function feedApply(f, r, first) {
+    const { log, scroller } = f;
     const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120;
-    const hadFile = !!chat.file;
-    chat.file = r.file || '';
-    chat.end = r.end || 0;
-    if (hadFile !== !!chat.file) renderChatScreen();
+    const hadFile = !!f.file;
+    f.file = r.file || '';
+    f.end = r.end || 0;
+    if (hadFile !== !!f.file && f.onFile) f.onFile();
     if (r.reset || first) {
-      chat.start = r.start || 0;
-      chat.tools.clear();
-      chat.orphans.clear();
-      log.replaceChildren(...chatHead(), ...entryNodes(r.entries));
-      renderChatStatus();
+      f.start = r.start || 0;
+      f.tools.clear();
+      f.orphans.clear();
+      f.watch.clear();
+      log.replaceChildren(...feedHead(f), ...entryNodes(f, r.entries));
+      if (f.onStatus) f.onStatus();
       scroller.scrollTop = scroller.scrollHeight;
       return;
     }
-    const nodes = entryNodes(r.entries);
+    const nodes = entryNodes(f, r.entries);
     if (nodes.length) {
       log.querySelector('[data-empty]')?.remove();
       log.append(...nodes);
     }
-    renderChatStatus();
+    if (f.onStatus) f.onStatus();
     if (atBottom) scroller.scrollTop = scroller.scrollHeight;
   }
 
-  // chatHead is what goes above the entries: "load earlier", or a note
+  // feedHead is what goes above the entries: "load earlier", or a note
   // when there is nothing to show.
-  function chatHead() {
-    if (chat.start > 0) {
+  function feedHead(f) {
+    if (f.start > 0) {
       const b = h('button', 'touch:min-h-11 mx-auto rounded-md border border-ink-600 bg-ink-850 px-3 py-1 text-xs text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-emerald-400', 'Load earlier');
       b.type = 'button';
-      b.dataset.earlier = '1';
-      b.addEventListener('click', loadEarlier);
+      b.addEventListener('click', (ev) => loadEarlier(f, ev));
       return [b];
     }
-    if (!chat.file) {
-      const a = chat.agent || {};
-      const hint = a.adapter === 'shell'
-        ? 'A shell keeps no chat. Its terminal is under Screen.'
-        : chatLive()
-          ? 'No messages yet. The conversation shows up here once the first message is sent.'
-          : 'This session left no conversation.';
-      const el = h('div', 'py-10 text-center', h('div', 'font-mono text-xs text-zinc-600', '// ' + hint));
+    if (!f.file) {
+      const el = h('div', 'py-10 text-center', h('div', 'font-mono text-xs text-zinc-600', '// ' + f.empty()));
       el.dataset.empty = '1';
       return [el];
     }
     return [];
   }
 
-  async function loadEarlier(ev) {
-    if (chat.earlier || chat.start <= 0) return;
-    const seq = chat.seq;
+  async function loadEarlier(f, ev) {
+    if (f.earlier || f.start <= 0) return;
+    const seq = f.seq;
     const btn = ev.currentTarget;
-    chat.earlier = true;
+    f.earlier = true;
     btn.disabled = true;
     btn.textContent = 'Loading…';
     let r = null;
     try {
-      r = await api('GET', chatAPI('chat?' + new URLSearchParams({ file: chat.file, before: String(chat.start) })));
+      r = await api('GET', f.url(new URLSearchParams({ file: f.file, before: String(f.start) })));
     } catch (e) {
       toast(`could not load earlier messages: ${e.message}`, 'error');
     }
-    chat.earlier = false;
-    if (seq !== chat.seq) return;
-    if (!r || r.reset || r.file !== chat.file) {
+    f.earlier = false;
+    if (seq !== f.seq) return;
+    if (!r || r.reset || r.file !== f.file) {
       btn.disabled = false;
       btn.textContent = 'Load earlier';
       return;
     }
-    const scroller = $('chat-scroll');
+    const scroller = f.scroller;
     const fromBottom = scroller.scrollHeight - scroller.scrollTop;
-    chat.start = r.start || 0;
+    f.start = r.start || 0;
     // Results in this page attach to the calls in it; later results whose
     // call is in it already showed on their own.
-    const known = chat.tools;
-    chat.tools = new Map();
-    const nodes = entryNodes(r.entries);
+    const known = f.tools;
+    f.tools = new Map();
+    const nodes = entryNodes(f, r.entries);
     // Their results, if any, are already shown on their own.
-    for (const t of chat.tools.values()) {
+    for (const t of f.tools.values()) {
       if (!t.done) t.status.className = TOOL_STATUS.stale;
       t.done = true;
     }
-    for (const [k, v] of known) chat.tools.set(k, v);
-    btn.replaceWith(...chatHead(), ...nodes);
+    for (const [k, v] of known) f.tools.set(k, v);
+    btn.replaceWith(...feedHead(f), ...nodes);
     scroller.scrollTop = scroller.scrollHeight - fromBottom;
   }
 
   // entryNodes renders entries; a result is attached to its tool call.
-  function entryNodes(entries) {
+  function entryNodes(f, entries) {
     const out = [];
     for (const e of entries || []) {
-      const n = entryNode(e);
+      const n = entryNode(f, e);
       if (n) out.push(n);
     }
     return out;
@@ -2131,25 +2258,28 @@
     return el;
   };
 
-  function entryNode(e) {
+  function entryNode(f, e) {
     switch (e.kind) {
       case 'user':
+        if (f !== chat.feed) return taskNode(e);
         return timeTitle(h('div', 'flex justify-end',
           h('div', 'max-w-[85%] whitespace-pre-wrap break-words rounded-lg rounded-br-sm bg-emerald-400/10 px-3 py-2 text-[13.5px] leading-relaxed text-zinc-100 ring-1 ring-inset ring-emerald-400/20', e.text || '')), e);
       case 'assistant':
         return timeTitle(md(e.text || ''), e);
       case 'tool':
-        return toolNode(e);
+        return toolNode(f, e);
+      case 'task':
+        return taskEndNode(f, e);
       case 'result': {
-        const t = e.id && chat.tools.get(e.id);
+        const t = e.id && f.tools.get(e.id);
         if (t) {
           setToolOutput(t, e.output, e.error);
           return null;
         }
         // The call is before the loaded range (or, rarely, written after
         // its result): shown on its own until the call turns up.
-        const el = toolNode({ kind: 'tool', name: 'result', text: oneLine(e.output), output: e.output, error: e.error });
-        if (e.id) chat.orphans.set(e.id, { el, output: e.output, error: e.error });
+        const el = toolNode(f, { kind: 'tool', name: 'result', text: oneLine(e.output), output: e.output, error: e.error });
+        if (e.id) f.orphans.set(e.id, { el, output: e.output, error: e.error });
         return el;
       }
       default:
@@ -2159,6 +2289,17 @@
 
   const oneLine = (s) => ((s || '').split('\n').find((l) => l.trim()) || '').trim();
 
+  // taskNode shows what a workflow agent was told: written by the script,
+  // often pages long, so folded to its start.
+  function taskNode(e) {
+    const text = e.text || '';
+    const body = h('div', 'whitespace-pre-wrap break-words text-[13px] leading-relaxed text-zinc-300', text);
+    const box = h('div', 'min-w-0 rounded-lg border border-fuchsia-400/20 bg-fuchsia-400/5 px-3 py-2',
+      h('div', 'mb-1 text-[10px] font-semibold uppercase tracking-wider text-fuchsia-300/80', 'Task'), body);
+    foldLong(box, body, text, 'max-h-36', 'touch:min-h-11 mt-1.5 rounded px-1.5 py-0.5 text-xs font-medium text-fuchsia-300 hover:bg-fuchsia-400/10 hover:text-fuchsia-200 focus-visible:outline-2 focus-visible:outline-fuchsia-400');
+    return timeTitle(box, e);
+  }
+
   const TOOL_STATUS = {
     pending: 'size-2 shrink-0 rounded-full border-[1.5px] border-sky-400 border-t-transparent animate-spin motion-reduce:animate-none',
     stale: 'size-1.5 shrink-0 rounded-full bg-zinc-600',
@@ -2166,103 +2307,869 @@
     error: 'size-1.5 shrink-0 rounded-full bg-rose-500',
   };
 
-  function toolNode(e) {
+  // toolNode shows a call folded to one line. Its input and output are
+  // drawn when it is first opened: most never are.
+  function toolNode(f, e) {
+    if (e.name === 'Workflow' && f === chat.feed) return workflowNode(f, e);
     const d = h('details', 'group min-w-0 rounded-md border border-ink-700 bg-ink-850/50 open:bg-ink-850');
     const status = h('span', '');
     const sum = h('summary', 'touch:min-h-11 flex cursor-pointer list-none items-center gap-2 rounded-md px-2.5 py-1.5 font-mono text-[12px] hover:bg-ink-800/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400',
       status,
       h('span', 'shrink-0 font-semibold text-sky-300', e.name || 'tool'),
-      h('span', 'min-w-0 truncate text-zinc-400', e.text || ''));
+      h('span', 'min-w-0 truncate text-zinc-400', FILE_TOOLS.has(e.name) ? relPath(e.text) : e.text || ''));
     const body = h('div', 'flex min-w-0 flex-col gap-2 border-t border-ink-700 px-2.5 py-2');
-    if (e.detail) body.append(codeBlock(e.detail, 'input'));
     d.append(sum, body);
     timeTitle(sum, e);
-    const t = { el: d, status, body, done: false };
-    const early = e.id && chat.orphans.get(e.id);
-    if (early) {
-      chat.orphans.delete(e.id);
-      early.el.remove();
-      setToolOutput(t, early.output, early.error);
-    } else if (e.id) {
-      // Claude: the output follows in a result.
-      status.className = chat.agent && chat.agent.state === 'working' ? TOOL_STATUS.pending : TOOL_STATUS.stale;
-      chat.tools.set(e.id, t);
-    } else {
-      setToolOutput(t, e.output, e.error);
-    }
+    const t = { el: d, status, body, name: e.name, call: e, done: false, output: null, error: false, built: false };
+    d.addEventListener('toggle', () => {
+      if (d.open) buildTool(t);
+    });
+    trackTool(f, t, e);
     return d;
   }
 
-  // paintPending shows calls without output as running while the agent
-  // works, and as unfinished otherwise (interrupted, or waiting for a
-  // permission).
-  function paintPending(tools) {
-    const cls = chat.agent && chat.agent.state === 'working' ? TOOL_STATUS.pending : TOOL_STATUS.stale;
-    for (const t of (tools || chat.tools).values()) if (!t.done) t.status.className = cls;
+  // Tools whose summary is a file's path.
+  const FILE_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+
+  // relPath shortens a path in the session's folder to the part in it, so
+  // the file's name shows.
+  function relPath(p) {
+    const cwd = chat.agent && chat.agent.cwd;
+    return cwd && p && p.startsWith(cwd + '/') ? p.slice(cwd.length + 1) : shortPath(p);
+  }
+
+  // trackTool gives a call its output: its own, a result shown before the
+  // call turned up, or (Claude) the result that follows.
+  function trackTool(f, t, e) {
+    const early = e.id && f.orphans.get(e.id);
+    if (early) {
+      f.orphans.delete(e.id);
+      early.el.remove();
+      f.tools.set(e.id, t);
+      setToolOutput(t, early.output, early.error);
+    } else if (e.id) {
+      t.status.className = f.working() ? TOOL_STATUS.pending : TOOL_STATUS.stale;
+      f.tools.set(e.id, t);
+    } else {
+      setToolOutput(t, e.output, e.error);
+    }
+  }
+
+  // paintPending shows calls without output as running while the feed's
+  // agent works, and as unfinished otherwise (interrupted, or waiting for
+  // a permission).
+  function paintPending(f, tools) {
+    const cls = f.working() ? TOOL_STATUS.pending : TOOL_STATUS.stale;
+    for (const t of (tools || f.tools).values()) if (!t.done) t.status.className = cls;
   }
 
   function setToolOutput(t, output, error) {
     t.done = true;
+    t.output = output || '';
+    t.error = !!error;
     t.status.className = error ? TOOL_STATUS.error : TOOL_STATUS.ok;
+    if (t.onOutput) {
+      t.onOutput();
+      return;
+    }
     if (error) t.el.classList.add('border-rose-500/30');
-    if (output) t.body.append(codeBlock(output, error ? 'error' : 'output'));
+    if (t.built) addOutput(t);
+  }
+
+  function buildTool(t) {
+    if (t.built) return;
+    t.built = true;
+    if (t.call.detail) t.body.append(inputView(t.call));
+    if (t.done) addOutput(t);
+  }
+
+  function addOutput(t) {
+    if (t.output == null) return; // shown on its own (see loadEarlier)
+    if (t.output) t.body.append(outputView(t));
     else if (!t.body.childElementCount) t.body.append(h('div', 'font-mono text-[11px] text-zinc-600', '// no output'));
   }
 
-  function codeBlock(text, label) {
-    return h('div', 'min-w-0',
-      h('div', label === 'error' ? 'mb-1 text-[10px] font-medium uppercase tracking-wider text-rose-300/80' : 'mb-1 text-[10px] font-medium uppercase tracking-wider text-zinc-600', label),
-      h('pre', 'max-h-80 overflow-auto whitespace-pre-wrap break-words rounded border border-ink-700 bg-ink-950 px-2.5 py-1.5 font-mono text-[11.5px] leading-snug text-zinc-300', text));
+  // Tools whose output is the agent's or a page's text, in markdown.
+  const MD_OUTPUT = new Set(['Agent', 'Task', 'WebFetch', 'WebSearch']);
+
+  // inputView shows a call's input: a command, a diff, a file's content,
+  // a script, a plan, or JSON.
+  function inputView(e) {
+    const n = e.name;
+    if (n === 'ExitPlanMode') return mdView(e.detail, 'plan');
+    const o = { label: 'input', text: e.detail, wrap: true, max: true };
+    if (n === 'Bash' || n === 'shell') o.lang = 'sh';
+    else if (n === 'Edit' || n === 'MultiEdit' || n === 'edit') {
+      o.lang = 'diff';
+      o.inner = extLang((e.text || '').split(', ')[0]);
+    } else if (n === 'Write') o.lang = extLang(e.text);
+    else if (n === 'Workflow') o.lang = 'js';
+    else if (looksJSON(e.detail)) o.lang = 'json';
+    return codeView(o);
   }
 
-  // md renders the agent's markdown loosely: fenced code, headings, inline
-  // `code` and **bold**. Everything else stays text; nothing is parsed as
-  // HTML.
-  function md(text) {
-    const box = h('div', 'flex min-w-0 flex-col gap-2 text-[13.5px] leading-relaxed text-zinc-200');
-    const lines = text.split('\n');
-    let para = [];
-    const flush = () => {
-      if (para.length) box.append(inline(h('p', 'whitespace-pre-wrap break-words'), para.join('\n')));
-      para = [];
-    };
-    for (let i = 0; i < lines.length; i++) {
-      const l = lines[i];
-      if (/^\s*```/.test(l)) {
-        flush();
-        const code = [];
-        for (i++; i < lines.length && !/^\s*```/.test(lines[i]); i++) code.push(lines[i]);
-        box.append(h('pre', 'overflow-x-auto rounded-md border border-ink-700 bg-ink-950 px-3 py-2 font-mono text-[12px] leading-snug text-zinc-300', code.join('\n')));
-        continue;
+  // outputView shows what a call returned: a file with its line numbers
+  // (Read), markdown, JSON, a diff, or text.
+  function outputView(t) {
+    const out = t.output;
+    const o = { label: t.error ? 'error' : 'output', text: out, error: t.error, wrap: true, max: true };
+    if (t.error) return codeView(o);
+    // MCP tools (Codex names them server.tool) often answer in markdown.
+    if (MD_OUTPUT.has(t.name) || (/^mcp__|\./.test(t.name || '') && looksMarkdown(out))) return mdView(out, o.label);
+    if (t.name === 'Read' && READ_LINE.test(out)) {
+      o.lang = extLang(t.call.text);
+      o.read = true;
+    } else if (looksJSON(out)) o.lang = 'json';
+    else if (looksDiff(out)) o.lang = 'diff';
+    return codeView(o);
+  }
+
+  const looksJSON = (s) => /^\s*[[{]\s*["[{\]}]/.test(s || '');
+  const looksDiff = (s) => /^diff --git /m.test(s) || (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(s) && /^[+-]/m.test(s));
+  const looksMarkdown = (s) => /^#{1,6} \S/m.test(s) || /^\s*(?:```|~~~)/m.test(s) || /^\s*\|.*\|\s*\n\s*\|?[\s:|-]*-[\s:|-]*$/m.test(s) ||
+    (/\*\*[^*\n]+\*\*/.test(s) && /^\s*(?:[-*]|\d+\.) \S/m.test(s));
+
+  // ---- the workflow a call started, and background tasks that ended
+
+  // workflowNode shows a Workflow call as the run it started, live from
+  // the Workflows tab's data: its phases, the agents at work, its totals,
+  // and the script. Its output names the run.
+  function workflowNode(f, e) {
+    const [name, ...desc] = (e.text || '').split(': ');
+    const status = h('span', '');
+    const title = h('span', 'min-w-0 truncate font-mono text-[13px] font-semibold text-fuchsia-50', name || 'workflow');
+    const badge = h('span', 'flex shrink-0 items-center');
+    const time = h('span', 'flex items-center');
+    const about = h('p', 'mt-1 text-xs leading-relaxed text-zinc-400', desc.join(': '));
+    const live = h('div', 'min-w-0');
+    const open = h('button', 'touch:min-h-11 shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-fuchsia-300 hover:bg-fuchsia-400/10 hover:text-fuchsia-200 focus-visible:outline-2 focus-visible:outline-fuchsia-400', 'Open run ›');
+    open.type = 'button';
+    open.hidden = true;
+    const head = h('div', 'px-3.5 pb-2.5 pt-3',
+      h('div', 'flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1',
+        status, h('span', 'font-mono text-fuchsia-400/70', '⧉'), title, badge,
+        h('span', 'ml-auto flex shrink-0 items-center gap-2', time, open)),
+      about);
+    const card = h('div', 'min-w-0 overflow-hidden rounded-lg border border-fuchsia-400/20 bg-fuchsia-400/[0.03]', head, live);
+    timeTitle(head, e);
+    const t = { el: card, status, name: e.name, call: e, done: false, output: null, error: false, run: '' };
+    open.addEventListener('click', () => setView('wf', t.run));
+
+    const paint = () => {
+      const run = t.run && wf.runs.find((r) => r.id === t.run);
+      open.hidden = !t.run;
+      if (!run) {
+        badge.replaceChildren(h('span', 'text-[11px] text-zinc-500', t.error ? '' : !t.done ? 'launching…' : t.run && wf.loaded ? 'starting…' : ''));
+        return;
       }
-      const head = /^(#{1,6})\s+(.*)$/.exec(l);
-      if (head) {
+      status.hidden = true; // the badge says it now
+      title.textContent = run.name;
+      if (run.description) about.textContent = run.description;
+      badge.replaceChildren(wfBadge(run.status));
+      time.replaceChildren(elapsed(run.startedMs, run.status === 'running' ? 0 : run.endedMs || run.updatedMs, 'font-mono text-xs tabular-nums text-zinc-400'));
+      live.replaceChildren(...runLive(run));
+    };
+    t.onOutput = () => {
+      const m = /\bRun ID: (wf_[\w-]+)/.exec(t.output);
+      if (m) t.run = m[1];
+      // A launch that failed, or said something else than expected.
+      if (t.error || !m) head.append(h('div', 'mt-2', codeView({ label: t.error ? 'error' : 'output', text: t.output || '(no output)', error: t.error, wrap: true, max: true })));
+      paint();
+    };
+
+    if (e.detail) {
+      const script = h('details', 'group min-w-0 border-t border-fuchsia-400/10');
+      script.append(h('summary', 'touch:min-h-11 flex cursor-pointer list-none items-center gap-2 px-3.5 py-1.5 text-[11px] text-zinc-500 hover:bg-fuchsia-400/5 hover:text-zinc-300 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-fuchsia-400',
+        h('span', 'inline-block transition-transform group-open:rotate-90 motion-reduce:transition-none', '▸'),
+        'Script',
+        h('span', 'font-mono text-zinc-600', `${e.detail.split('\n').length} lines`)));
+      script.addEventListener('toggle', () => {
+        if (script.open && script.childElementCount === 1) script.append(h('div', 'px-3.5 pb-3', codeView({ text: e.detail, lang: 'js', tag: 'js', wrap: true, max: true })));
+      });
+      card.append(script);
+    }
+    trackTool(f, t, e);
+    paint();
+    f.watch.add(paint);
+    return card;
+  }
+
+  // runLive is a run in the chat: its phases at a glance, the agents at
+  // work (each opens its conversation), and its totals.
+  function runLive(run) {
+    const out = [phaseStrip(run)];
+    const busy = run.agents.filter((a) => a.status === 'running');
+    if (busy.length) {
+      const list = h('ul', 'flex min-w-0 flex-col px-2 pb-2');
+      for (const a of busy.slice(-3)) {
+        const b = h('button', 'touch:min-h-11 group flex w-full min-w-0 items-center gap-2 rounded px-1.5 py-1 text-left text-xs hover:bg-fuchsia-400/5 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-fuchsia-400',
+          h('span', 'flex w-3 shrink-0 justify-center', h('span', WF.running.dot)),
+          h('span', 'shrink-0 font-mono text-[11.5px] text-zinc-200', a.label || a.id),
+          h('span', 'min-w-0 flex-1 truncate text-zinc-500',
+            a.tool ? h('span', 'font-mono text-sky-300/80', a.tool + ' ') : null, a.activity || 'starting…'),
+          h('span', 'shrink-0 text-zinc-600 group-hover:text-zinc-300', '›'));
+        b.type = 'button';
+        b.addEventListener('click', () => openSub(run.id, a.id));
+        b.setAttribute('aria-label', `${a.label || a.id}, at work. Open its conversation`);
+        list.append(h('li', '', b));
+      }
+      if (busy.length > 3) list.append(h('li', 'py-0.5 pl-7 pr-1.5 text-[11px] text-zinc-600', `+${busy.length - 3} more at work`));
+      out.push(list);
+    }
+    const done = run.counts.done + run.counts.failed + run.counts.stopped;
+    out.push(h('div', 'flex flex-wrap gap-x-3 gap-y-0.5 border-t border-fuchsia-400/10 px-3.5 py-1.5 font-mono text-[11px] tabular-nums text-zinc-500',
+      h('span', '', `${done}/${run.agents.length} agents`),
+      run.counts.failed ? h('span', 'text-rose-300/80', `${run.counts.failed} failed`) : null,
+      h('span', '', `${run.toolUses} tool calls`),
+      h('span', '', `${fmtTokens(run.tokens)} tokens`),
+      h('span', 'ml-auto text-zinc-600', run.id)));
+    return out;
+  }
+
+  const TASK_END = {
+    completed: ['min-w-0 overflow-hidden rounded-lg border border-emerald-400/20 bg-emerald-400/[0.03]', 'shrink-0 text-[11px] font-semibold uppercase tracking-wider text-emerald-300/90', 'min-w-0 border-t border-emerald-400/15 px-3.5 py-2.5'],
+    failed: ['min-w-0 overflow-hidden rounded-lg border border-rose-500/30 bg-rose-500/[0.04]', 'shrink-0 text-[11px] font-semibold uppercase tracking-wider text-rose-300', 'min-w-0 border-t border-rose-500/20 px-3.5 py-2.5'],
+    stopped: ['min-w-0 overflow-hidden rounded-lg border border-ink-600 bg-ink-850/40', 'shrink-0 text-[11px] font-semibold uppercase tracking-wider text-zinc-400', 'min-w-0 border-t border-ink-700 px-3.5 py-2.5'],
+  };
+
+  // taskEndNode shows that a background task ended: a workflow run, with
+  // what it returned, or a background command or agent.
+  function taskEndNode(f, e) {
+    const st = e.error ? 'failed' : e.name === 'completed' ? 'completed' : 'stopped';
+    const call = e.id ? f.tools.get(e.id) : null;
+    const runOf = () => (call && call.run && wf.runs.find((r) => r.id === call.run)) ||
+      wf.runs.find((r) => r.summary && r.summary === e.text);
+    if (!(call && call.name === 'Workflow') && !runOf() && !/^Dynamic workflow\b/.test(e.text || '')) return bgTaskNode(e, st);
+    const [boxCls, labelCls, bodyCls] = TASK_END[st];
+    const title = h('span', 'min-w-0 truncate font-mono text-[12.5px] font-semibold text-zinc-100');
+    const stats = h('span', 'flex items-center gap-1 font-mono text-[11px] tabular-nums text-zinc-500');
+    const open = h('button', 'touch:min-h-11 shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-fuchsia-300 hover:bg-fuchsia-400/10 hover:text-fuchsia-200 focus-visible:outline-2 focus-visible:outline-fuchsia-400', 'Open run ›');
+    open.type = 'button';
+    open.addEventListener('click', () => {
+      const run = runOf();
+      setView('wf', run ? run.id : '');
+    });
+    const head = h('div', 'flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-3.5 py-2',
+      h('span', wfStatus(st).dot), h('span', 'font-mono text-fuchsia-400/70', '⧉'),
+      h('span', labelCls, `workflow ${wfStatus(st).label}`), title,
+      h('span', 'ml-auto flex shrink-0 items-center gap-2', stats, open));
+    const part = h('div', bodyCls);
+    const box = timeTitle(h('div', boxCls, head, part), e);
+    let shown = null;
+    const paint = () => {
+      const run = runOf();
+      title.textContent = run ? run.name : call ? (call.call.text || '').split(': ')[0] : (/"(.*)"/.exec(e.text || '') || [])[1] || '';
+      title.title = e.text || '';
+      open.hidden = !run;
+      if (run) stats.replaceChildren(`${run.agents.length} agents ·`, elapsed(run.startedMs, run.endedMs || run.updatedMs));
+      // The notification cuts the result at 8000 characters; the run has
+      // all of it.
+      const result = (run && run.result) || e.output || '';
+      if (result === shown) return;
+      shown = result;
+      part.hidden = !result && st !== 'failed';
+      if (!result) {
+        part.replaceChildren(h('pre', 'whitespace-pre-wrap break-words font-mono text-[11.5px] leading-snug text-rose-100/90', e.text || ''));
+        return;
+      }
+      const body = h('div', 'min-w-0', resultNode(result));
+      part.replaceChildren(body);
+      foldLong(part, body, result, 'max-h-60', 'touch:min-h-11 mt-1.5 rounded px-1.5 py-0.5 text-xs font-medium text-emerald-300 hover:bg-emerald-400/10 hover:text-emerald-200 focus-visible:outline-2 focus-visible:outline-emerald-400');
+    };
+    paint();
+    f.watch.add(paint);
+    return box;
+  }
+
+  // bgTaskNode shows a background command or agent that ended, and what it
+  // returned (an agent's report) when opened.
+  function bgTaskNode(e, st) {
+    const text = h('span', 'min-w-0 flex-1 break-words', e.text || '');
+    if (!e.output) {
+      return timeTitle(h('div', 'flex min-w-0 items-center gap-2 rounded-md border border-ink-700/70 bg-ink-850/30 px-2.5 py-1.5 text-xs text-zinc-400', h('span', wfStatus(st).dot), text), e);
+    }
+    const d = h('details', 'group min-w-0 rounded-md border border-ink-700/70 bg-ink-850/30 open:bg-ink-850');
+    d.append(timeTitle(h('summary', 'touch:min-h-11 flex cursor-pointer list-none items-center gap-2 rounded-md px-2.5 py-1.5 text-xs text-zinc-400 hover:bg-ink-800/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400',
+      h('span', wfStatus(st).dot), text,
+      h('span', 'shrink-0 text-[10px] font-medium uppercase tracking-wider text-zinc-600 group-open:hidden', 'result')), e));
+    d.addEventListener('toggle', () => {
+      if (d.open && d.childElementCount === 1) d.append(h('div', 'border-t border-ink-700 px-2.5 py-2', mdView(e.output, 'result')));
+    });
+    return d;
+  }
+
+  // foldLong caps body, a part of box, at cls (a max height) when text is
+  // long, with a button (of classes btn) to show it all.
+  function foldLong(box, body, text, cls, btn) {
+    if (text.length <= 600 && text.split('\n').length <= 8) return;
+    body.classList.add(cls, 'overflow-hidden');
+    const more = h('button', btn, 'Show all');
+    more.type = 'button';
+    more.setAttribute('aria-expanded', 'false');
+    more.addEventListener('click', () => {
+      const folded = body.classList.toggle(cls);
+      body.classList.toggle('overflow-hidden', folded);
+      more.textContent = folded ? 'Show all' : 'Show less';
+      more.setAttribute('aria-expanded', String(!folded));
+    });
+    box.append(more);
+  }
+
+  // ---- code
+
+  // A clipped text ends with this note (transcript.Clip).
+  const CLIP = /\n… \((\d+) more bytes\)$/;
+  // A line of a Read output: its number, then a tab.
+  const READ_LINE = /^ *(\d+)(?:\t|→)/;
+
+  const fmtBytes = (n) => (n < 1024 ? `${n} bytes` : `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`);
+
+  // codeBar is the bar over code: a label (input, output, error) or a tag
+  // (the language a fence names), and a button to copy raw.
+  function codeBar(o, raw) {
+    const copy = h('button', 'touch:min-h-11 ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10.5px] font-medium text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400', 'Copy');
+    copy.type = 'button';
+    copy.addEventListener('click', () => copyRaw(raw, copy));
+    return h('div', 'flex min-w-0 items-center gap-2 border-b border-ink-700/70 bg-ink-900/70 py-0.5 pl-2.5 pr-1',
+      o.label ? h('span', o.error ? 'text-[10px] font-medium uppercase tracking-wider text-rose-300/80' : 'text-[10px] font-medium uppercase tracking-wider text-zinc-500', o.label) : null,
+      o.tag ? h('span', 'font-mono text-[10.5px] text-zinc-500', o.tag) : null,
+      copy);
+  }
+
+  // codeView frames o.text as code, highlighted as o.lang ('diff': a
+  // diff, its code highlighted as o.inner). o.read shows the line numbers
+  // of a Read output in a gutter; o.wrap wraps long lines instead of
+  // scrolling them; o.max caps the height; o.error tints it.
+  function codeView(o) {
+    let text = o.text || '';
+    const clip = CLIP.exec(text);
+    if (clip) text = text.slice(0, clip.index);
+    let raw = text;
+    let body;
+    const rows = o.lang === 'diff' || o.read;
+    if (o.lang === 'diff') body = diffRows(text, o.inner || '');
+    else if (o.read) [body, raw] = readRows(text, o.lang);
+    else body = hlInto(h('code', ''), text, o.lang);
+    const cls = ['font-mono leading-snug text-zinc-300', o.max ? 'max-h-80 overflow-auto text-[11.5px]' : 'overflow-x-auto text-[12px]'];
+    if (rows) cls.push('py-1.5');
+    else cls.push(o.wrap ? 'whitespace-pre-wrap break-words px-2.5 py-1.5' : 'px-3 py-2');
+    return h('div', o.error ? 'min-w-0 overflow-hidden rounded-md border border-rose-500/30 bg-ink-950' : 'min-w-0 overflow-hidden rounded-md border border-ink-700 bg-ink-950',
+      codeBar(o, raw),
+      h('pre', cls.join(' '), body),
+      clip ? h('div', 'border-t border-ink-700/70 px-2.5 py-1 font-mono text-[10.5px] text-zinc-600', `… ${fmtBytes(Number(clip[1]))} more not shown`) : null);
+  }
+
+  // mdView frames markdown text, rendered.
+  function mdView(text, label) {
+    return h('div', 'min-w-0 overflow-hidden rounded-md border border-ink-700 bg-ink-900/40',
+      codeBar({ label }, text),
+      h('div', 'max-h-96 overflow-y-auto px-3 py-2', md(text)));
+  }
+
+  const GUTTER = ['w-7', 'w-7', 'w-7', 'w-9', 'w-11', 'w-13'];
+
+  // readRows shows a Read output ("N\tline" a line) with the numbers in a
+  // gutter. It returns the rows and the file's text without them.
+  function readRows(text, lang) {
+    const nums = [];
+    const code = text.split('\n').map((l) => {
+      const m = READ_LINE.exec(l);
+      nums.push(m ? m[1] : '');
+      return m ? l.slice(m[0].length) : l;
+    });
+    const raw = code.join('\n');
+    const w = GUTTER[Math.min(5, nums.reduce((n, s) => Math.max(n, s.length), 0))];
+    const box = h('div', '');
+    hlLines(raw, lang).forEach((nodes, i) => box.append(h('div', 'flex min-w-0 px-1.5',
+      h('span', 'shrink-0 select-none pr-3 text-right tabular-nums text-zinc-600 ' + w, nums[i]),
+      h('span', 'min-w-0 flex-1 whitespace-pre-wrap break-words', ...(nodes.length ? nodes : [' '])))));
+    return [box, raw];
+  }
+
+  const DIFF_ROW = {
+    '+': ['flex min-w-0 bg-emerald-400/10 px-1.5', 'w-4 shrink-0 select-none text-emerald-400'],
+    '-': ['flex min-w-0 bg-rose-500/10 px-1.5', 'w-4 shrink-0 select-none text-rose-400'],
+    ' ': ['flex min-w-0 px-1.5', 'w-4 shrink-0 select-none'],
+  };
+  // A diff's file header: git's, or Codex's "M path" (A, M, D).
+  const DIFF_FILE = /^(?:diff --git |index [\da-f]+\.\.|--- (?:a\/|\/dev\/null)|\+\+\+ (?:b\/|\/dev\/null)|[^+\- @\\])/;
+
+  // diffRows shows a diff: added and removed lines marked and tinted,
+  // their code highlighted as lang, or as the file a header names.
+  function diffRows(text, lang) {
+    const box = h('div', '');
+    let cur = lang;
+    let code = []; // [mark, line] of the current hunk
+    const flush = () => {
+      if (!code.length) return;
+      const lines = hlLines(code.map((c) => c[1]).join('\n'), cur);
+      code.forEach(([mark], i) => {
+        const [row, sign] = DIFF_ROW[mark];
+        box.append(h('div', row, h('span', sign, mark.trim()),
+          h('span', 'min-w-0 flex-1 whitespace-pre-wrap break-words', ...(lines[i].length ? lines[i] : [' ']))));
+      });
+      code = [];
+    };
+    for (const l of text.split('\n')) {
+      if (l && DIFF_FILE.test(l)) {
         flush();
-        box.append(inline(h('div', 'pt-1 font-semibold text-zinc-50'), head[2]));
-      } else if (!l.trim()) {
+        const p = /^diff --git a\/.* b\/(.*)$/.exec(l) || /^\+\+\+ b\/(.*)$/.exec(l) || /^[AMD] (?:.* -> )?(\S.*)$/.exec(l);
+        if (p) cur = extLang(p[1]) || lang;
+        // A file starts at git's "diff --git" or Codex's "M path"; git's
+        // index and ---/+++ lines follow.
+        box.append(h('div', /^(?:diff --git |[AMD] )/.test(l) ? 'px-1.5 pt-1.5 font-semibold text-zinc-100 first:pt-0' : 'px-1.5 text-zinc-500', l));
+      } else if (l.startsWith('@@') || l.startsWith('\\')) {
         flush();
+        box.append(h('div', 'px-1.5 text-cyan-300/80', l));
       } else {
-        para.push(l);
+        const mark = l[0] === '+' || l[0] === '-' ? l[0] : ' ';
+        code.push([mark, l[0] === mark ? l.slice(1) : l]);
       }
     }
     flush();
     return box;
   }
 
-  function inline(el, text) {
-    const re = /`[^`\n]+`|\*\*[^*\n]+\*\*/g;
+  // copyRaw copies text. Plain HTTP has no Clipboard API: then a hidden
+  // textarea and the old copy command (in the dialog, which makes the rest
+  // of the page inert).
+  async function copyRaw(text, btn) {
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch (e) {
+      const ta = h('textarea', 'fixed left-0 top-0 size-px opacity-0');
+      ta.value = text;
+      ta.readOnly = true;
+      (btn.closest('dialog') || document.body).append(ta);
+      ta.select();
+      try {
+        ok = document.execCommand('copy');
+      } catch (e2) {
+        ok = false;
+      }
+      ta.remove();
+      btn.focus();
+    }
+    btn.textContent = ok ? 'Copied' : 'Copy failed';
+    setTimeout(() => {
+      btn.textContent = 'Copy';
+    }, 1500);
+  }
+
+  // ---- highlighting
+  //
+  // A tokenizer per language family (comments, strings, numbers, keywords,
+  // a few more), not a parser: enough to read code by.
+
+  const TOK = {
+    c: 'italic text-zinc-500', // comment
+    s: 'text-emerald-300', // string
+    n: 'text-amber-300', // number, constant
+    k: 'text-violet-300', // keyword
+    t: 'text-yellow-200', // type
+    f: 'text-sky-300', // function, command
+    p: 'text-rose-300', // key, property, tag, variable
+    m: 'text-cyan-300', // meta: decorator, flag, section, heading
+  };
+
+  const words = (s) => new Set(s.split(' '));
+
+  // Parts of the patterns. Every group is (?:…): hl numbers the parts.
+  const P = {
+    slash: String.raw`\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|(?![\s\S]))`,
+    hash: String.raw`(?:^|[ \t])#[^\n]*`,
+    dq: String.raw`"(?:[^"\\\n]|\\.)*"?`,
+    sq: String.raw`'(?:[^'\\\n]|\\.)*'?`,
+    bq: String.raw`\x60(?:[^\x60\\]|\\[\s\S])*\x60?`,
+    num: String.raw`\b(?:0[xX][\da-fA-F_]+|0[bBoO][\d_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?)[a-zA-Z]*\b`,
+    word: String.raw`[A-Za-z_$][\w$]*`,
+  };
+
+  const KW = {
+    js: words('as async await break case catch class const continue debugger default delete do else enum export extends finally for from function if implements import in instanceof interface let new of private protected public readonly return satisfies static super switch this throw try type typeof var void while with yield declare namespace abstract keyof infer'),
+    go: words('break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var'),
+    py: words('and as assert async await break class continue def del elif else except finally for from global if import in is lambda nonlocal not or pass raise return try while with yield match case'),
+    rust: words('as async await break const continue crate dyn else enum extern fn for if impl in let loop match mod move mut pub ref return static struct super trait type unsafe use where while'),
+    c: words('abstract break case catch class const continue default delete do else enum export extends extern final finally for fun func goto if implements import in inline interface internal let namespace new operator override package private protected public return sealed static struct super switch template throw throws try typedef typename union using val var virtual volatile when where while yield guard defer'),
+    sh: words('if then else elif fi for while until do done case esac function in select return export local readonly declare unset shift source exit break continue trap eval exec time'),
+    sql: words('select from where insert into values update set delete create table index view drop alter add column primary key foreign references join left right inner outer full cross on as and or not is in exists between like ilike group by order asc desc having limit offset distinct union all case when then else end begin commit rollback transaction returning with default unique check constraint if replace grant revoke cascade'),
+  };
+  const LIT = {
+    js: words('true false null undefined NaN Infinity'),
+    go: words('true false nil iota'),
+    py: words('True False None self cls'),
+    rust: words('true false self None Some Ok Err'),
+    c: words('true false null nullptr nil NULL None this self'),
+    json: words('true false null'),
+    yaml: words('true false null yes no on off True False Null TRUE FALSE NULL'),
+  };
+  const TYPES = {
+    js: words('string number boolean any unknown never object symbol bigint'),
+    go: words('bool byte complex64 complex128 error float32 float64 int int8 int16 int32 int64 rune string uint uint8 uint16 uint32 uint64 uintptr any comparable'),
+    py: words('int float str bool list dict set tuple bytes object type frozenset complex'),
+    rust: words('i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 bool char str Self String Vec Option Result Box'),
+    c: words('void int char float double long short unsigned signed bool boolean byte string auto size_t int8_t int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t'),
+    sql: words('int integer bigint smallint serial bigserial text varchar char boolean bool date time timestamp timestamptz uuid json jsonb real numeric decimal float double'),
+  };
+
+  // tokenizer builds one from [kind, pattern] parts, tried in order at
+  // each position. Kind w is a word (see wordKind), x a word after a lead
+  // (o.lead; the word is o.xkind, or a command), g an HTML tag.
+  function tokenizer(parts, o) {
+    return Object.assign({
+      re: new RegExp(parts.map((p) => '(' + p[1] + ')').join('|'), o && o.i ? 'gmi' : 'gm'),
+      kinds: parts.map((p) => p[0]),
+    }, o);
+  }
+
+  const PY_STR = String.raw`[rRbBfFuU]{0,2}(?:"""[\s\S]*?(?:"""|(?![\s\S]))|'''[\s\S]*?(?:'''|(?![\s\S]))|${P.dq}|${P.sq})`;
+
+  const LANGS = {
+    js: tokenizer([['c', P.slash], ['s', P.bq], ['s', P.dq], ['s', P.sq], ['m', '@[A-Za-z_][\\w.]*'], ['n', P.num], ['w', P.word]],
+      { kw: KW.js, lit: LIT.js, ty: TYPES.js, caps: true }),
+    go: tokenizer([['c', P.slash], ['s', P.bq], ['s', P.dq], ['s', P.sq], ['n', P.num], ['w', P.word]],
+      { kw: KW.go, lit: LIT.go, ty: TYPES.go, caps: true }),
+    rust: tokenizer([['c', P.slash], ['s', P.dq], ['s', String.raw`'(?:\\.|[^'\\\n])'`], ['m', String.raw`'[A-Za-z_]\w*|#!?\[[^\]\n]*\]`],
+      ['f', String.raw`[A-Za-z_]\w*!(?=[(\[{])`], ['n', P.num], ['w', P.word]],
+    { kw: KW.rust, lit: LIT.rust, ty: TYPES.rust, caps: true }),
+    c: tokenizer([['c', P.slash], ['s', P.dq], ['s', P.sq], ['m', String.raw`^[ \t]*#[ \t]*[a-z]+|@[A-Za-z_]\w*`], ['n', P.num], ['w', P.word]],
+      { kw: KW.c, lit: LIT.c, ty: TYPES.c, caps: true }),
+    py: tokenizer([['c', P.hash], ['s', PY_STR], ['m', String.raw`@[A-Za-z_][\w.]*`], ['n', P.num], ['w', P.word]],
+      { kw: KW.py, lit: LIT.py, ty: TYPES.py, caps: true }),
+    sh: tokenizer([['c', P.hash], ['s', String.raw`"(?:[^"\\]|\\[\s\S])*"?`], ['s', String.raw`'[^']*'?`],
+      ['p', String.raw`\$\{[^}\n]*\}|\$[A-Za-z_]\w*|\$[\d@#?$!*-]`],
+      ['x', String.raw`(?:^|&&|\|\||\$\(|[|;&({\x60])[ \t]*[A-Za-z_./~][\w./+~-]*(?![\w./+~=-])`],
+      ['m', String.raw`(?:^|[ \t])--?[A-Za-z][\w-]*`], ['n', P.num], ['w', String.raw`[A-Za-z_][\w-]*`]],
+    { kw: KW.sh, lead: /^(?:&&|\|\||\$\(|[|;&({`])?[ \t]*/ }),
+    json: tokenizer([['p', String.raw`"(?:[^"\\\n]|\\.)*"(?=\s*:)`], ['s', P.dq], ['n', String.raw`-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?`], ['w', P.word]],
+      { lit: LIT.json }),
+    yaml: tokenizer([['c', P.hash], ['m', String.raw`^(?:---|\.\.\.)[ \t]*$|[&*][\w-]+`],
+      ['x', String.raw`^[ \t]*(?:-[ \t]+)*[^\s#'"{}\[\],:&*!|>%@\x60-][^\n:#]*(?=:(?:[ \t]|$))`],
+      ['s', P.dq], ['s', P.sq], ['n', P.num], ['w', P.word]],
+    { lit: LIT.yaml, lead: /^[ \t]*(?:-[ \t]+)*/, xkind: 'p' }),
+    toml: tokenizer([['c', String.raw`(?:^|[ \t])[#;][^\n]*`], ['m', String.raw`^[ \t]*\[[^\n]*\]`], ['p', String.raw`[\w.-]+(?=[ \t]*=)`],
+      ['s', String.raw`"""[\s\S]*?(?:"""|(?![\s\S]))|'''[\s\S]*?(?:'''|(?![\s\S]))`], ['s', P.dq], ['s', P.sq], ['n', P.num], ['w', P.word]],
+    { lit: LIT.json }),
+    css: tokenizer([['c', String.raw`\/\*[\s\S]*?(?:\*\/|(?![\s\S]))`], ['s', P.dq], ['s', P.sq], ['k', String.raw`@[\w-]+|!important`],
+      ['n', String.raw`#[\da-fA-F]{3,8}(?![\w-])`], ['p', String.raw`-{0,2}[A-Za-z][\w-]*(?=[ \t]*:(?:[ \t]|[^\n{]*;))`],
+      ['n', String.raw`-?(?:\d+\.?\d*|\.\d+)(?:%|[A-Za-z]+)?`], ['w', String.raw`[A-Za-z_-][\w-]*`]], {}),
+    html: tokenizer([['c', String.raw`<!--[\s\S]*?(?:-->|(?![\s\S]))`], ['m', String.raw`<![A-Za-z][^>]*>?|<\?[\s\S]*?(?:\?>|(?![\s\S]))`],
+      ['g', String.raw`<\/?[A-Za-z][\w:.-]*(?:[^<>"']|"[^"]*"|'[^']*')*>?`], ['n', String.raw`&#?\w+;`]], {}),
+    sql: tokenizer([['c', String.raw`--[^\n]*|\/\*[\s\S]*?(?:\*\/|(?![\s\S]))`], ['s', P.sq], ['p', P.dq], ['n', P.num], ['w', P.word]],
+      { i: true, kw: KW.sql, lit: LIT.json, ty: TYPES.sql }),
+    md: tokenizer([['m', String.raw`^#{1,6}[ \t][^\n]*`], ['c', String.raw`^[ \t]*(?:\x60{3,}|~{3,})[^\n]*|^[ \t]*>[^\n]*`],
+      ['s', String.raw`\x60[^\x60\n]+\x60`], ['k', String.raw`\*\*[^*\n]+\*\*|__[^_\n]+__`], ['f', String.raw`!?\[[^\]\n]*\]\([^)\n]*\)`],
+      ['p', String.raw`^[ \t]*(?:[-*+]|\d+[.)])(?=[ \t])`]], {}),
+  };
+
+  // Names of languages (in fences, file extensions) for the tokenizers.
+  const LANG_NAMES = {
+    javascript: 'js', mjs: 'js', cjs: 'js', jsx: 'js', ts: 'js', tsx: 'js', mts: 'js', cts: 'js', typescript: 'js', json5: 'js',
+    golang: 'go',
+    python: 'py', python3: 'py', pyi: 'py', rb: 'py', ruby: 'py',
+    bash: 'sh', shell: 'sh', zsh: 'sh', ksh: 'sh', fish: 'sh', console: 'sh', shellscript: 'sh', dockerfile: 'sh', makefile: 'sh', make: 'sh', mk: 'sh', env: 'sh',
+    jsonl: 'json', jsonc: 'json', geojson: 'json',
+    yml: 'yaml',
+    ini: 'toml', cfg: 'toml', conf: 'toml', properties: 'toml',
+    rs: 'rust',
+    h: 'c', cc: 'c', cpp: 'c', cxx: 'c', hpp: 'c', 'c++': 'c', java: 'c', kt: 'c', kts: 'c', kotlin: 'c', cs: 'c', csharp: 'c', swift: 'c', scala: 'c',
+    dart: 'c', php: 'c', proto: 'c', groovy: 'c', gradle: 'c', m: 'c', mm: 'c', objc: 'c', zig: 'c', sol: 'c',
+    scss: 'css', less: 'css',
+    htm: 'html', xml: 'html', svg: 'html', xhtml: 'html', vue: 'html', svelte: 'html', plist: 'html',
+    psql: 'sql', pgsql: 'sql', mysql: 'sql', sqlite: 'sql', postgres: 'sql',
+    markdown: 'md', mdx: 'md',
+    patch: 'diff', diff: 'diff',
+  };
+
+  const langKey = (name) => {
+    const k = (name || '').toLowerCase();
+    return LANGS[k] ? k : LANG_NAMES[k] || '';
+  };
+
+  // extLang is the language of a file, by its name.
+  function extLang(path) {
+    const base = (path || '').split(/[\\/]/).pop().toLowerCase();
+    if (/^(?:makefile|gnumakefile|dockerfile|containerfile|\.(?:bash|zsh)rc|\.profile)$/.test(base)) return 'sh';
+    const dot = base.lastIndexOf('.');
+    return dot < 0 ? '' : langKey(base.slice(dot + 1));
+  }
+
+  // wordKind colours a word: a keyword, a constant, a call, a type.
+  function wordKind(L, w, text, at, end) {
+    let j = end;
+    while (text[j] === ' ') j++;
+    const call = text[j] === '(';
+    if (text[at - 1] === '.') return call ? 'f' : L.caps && /^[A-Z][a-z]/.test(w) ? 't' : '';
+    const k = L.i ? w.toLowerCase() : w;
+    if (L.kw && L.kw.has(k)) return 'k';
+    if (L.lit && L.lit.has(k)) return 'n';
+    if (call) return 'f';
+    if (L.ty && L.ty.has(k)) return 't';
+    if (L.caps && /^[A-Z]/.test(w)) return /[a-z]/.test(w) || w.length === 1 ? 't' : 'n';
+    return '';
+  }
+
+  // tokens splits text into [text, kind] for lang; kind '' is plain.
+  function tokens(text, name) {
+    const L = LANGS[name];
+    if (!L || text.length > 200000) return [[text, '']];
+    const out = [];
+    const re = L.re;
+    re.lastIndex = 0;
     let last = 0;
     let m;
     while ((m = re.exec(text))) {
-      if (m.index > last) el.append(text.slice(last, m.index));
+      const s = m[0];
+      if (!s) {
+        re.lastIndex++;
+        continue;
+      }
+      let g = 1;
+      while (m[g] === undefined) g++;
+      const kind = L.kinds[g - 1];
+      if (m.index > last) out.push([text.slice(last, m.index), '']);
+      last = m.index + s.length;
+      if (kind === 'x') {
+        const lead = L.lead.exec(s)[0];
+        const w = s.slice(lead.length);
+        if (lead) out.push([lead, '']);
+        out.push([w, L.xkind || (L.kw.has(w) ? 'k' : 'f')]);
+      } else if (kind === 'g') {
+        tagTokens(s, out);
+      } else {
+        out.push([s, kind === 'w' ? wordKind(L, s, text, m.index, last) : kind]);
+      }
+    }
+    if (last < text.length) out.push([text.slice(last), '']);
+    return out;
+  }
+
+  // tagTokens splits an HTML tag: its name, attributes and their values.
+  function tagTokens(s, out) {
+    const name = /^<\/?[\w:.-]*/.exec(s)[0];
+    out.push([name.slice(0, name[1] === '/' ? 2 : 1), ''], [name.slice(name[1] === '/' ? 2 : 1), 'p']);
+    const rest = s.slice(name.length);
+    const re = /"[^"]*"?|'[^']*'?|[^\s=>"'/]+/g;
+    let last = 0;
+    let m;
+    while ((m = re.exec(rest))) {
+      if (m.index > last) out.push([rest.slice(last, m.index), '']);
+      out.push([m[0], m[0][0] === '"' || m[0][0] === "'" ? 's' : 't']);
+      last = re.lastIndex;
+    }
+    if (last < rest.length) out.push([rest.slice(last), '']);
+  }
+
+  // hlInto appends text to el, highlighted as lang.
+  function hlInto(el, text, name) {
+    for (const [s, k] of tokens(text, name)) el.append(k ? h('span', TOK[k], s) : s);
+    return el;
+  }
+
+  // hlLines highlights text as lang, a list of nodes per line.
+  function hlLines(text, name) {
+    const lines = [[]];
+    for (const [s, k] of tokens(text, name)) {
+      s.split('\n').forEach((part, i) => {
+        if (i) lines.push([]);
+        if (part) lines[lines.length - 1].push(k ? h('span', TOK[k], part) : part);
+      });
+    }
+    return lines;
+  }
+
+  // ---- markdown
+
+  const MD_ITEM = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
+  const MD_TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
+  const MD_INDENT = ['', 'pl-5', 'pl-10', 'pl-14'];
+
+  // md renders the agent's markdown: headings, paragraphs, lists, quotes,
+  // tables, rules and fenced code (highlighted), with inline code, bold,
+  // italics and links. Nothing is parsed as HTML.
+  function md(text) {
+    const box = h('div', 'flex min-w-0 flex-col gap-2 text-[13.5px] leading-relaxed text-zinc-200');
+    const lines = text.split('\n');
+    let para = [];
+    let list = null;
+    const flush = () => {
+      if (para.length) box.append(inline(h('p', 'whitespace-pre-wrap break-words'), para.join('\n')));
+      para = [];
+    };
+    const end = () => {
+      flush();
+      list = null;
+    };
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      const fence = /^(\s*)(`{3,}|~{3,})\s*([^\s`]*)/.exec(l);
+      if (fence) {
+        end();
+        const close = new RegExp(`^\\s*${fence[2][0] === '`' ? '`' : '~'}{${fence[2].length},}\\s*$`);
+        const indent = new RegExp(`^ {0,${fence[1].length}}`);
+        const code = [];
+        for (i++; i < lines.length && !close.test(lines[i]); i++) code.push(lines[i].replace(indent, ''));
+        const src = code.join('\n');
+        const k = langKey(fence[3]) || (looksJSON(src) ? 'json' : '');
+        box.append(codeView({ text: src, lang: k, tag: fence[3] || 'text' }));
+        continue;
+      }
+      if (!l.trim()) {
+        end();
+        continue;
+      }
+      const head = /^\s{0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/.exec(l);
+      if (head) {
+        end();
+        box.append(inline(h('div', head[1].length <= 2 ? 'pt-1 text-[15px] font-semibold text-zinc-50' : 'pt-1 font-semibold text-zinc-50'), head[2]));
+        continue;
+      }
+      if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(l)) {
+        end();
+        box.append(h('hr', 'my-1 border-ink-700'));
+        continue;
+      }
+      if (l.includes('|') && i + 1 < lines.length && lines[i + 1].includes('|') && MD_TABLE_SEP.test(lines[i + 1])) {
+        end();
+        const sep = lines[i + 1];
+        const rows = [];
+        for (i += 2; i < lines.length && lines[i].includes('|') && lines[i].trim(); i++) rows.push(lines[i]);
+        i--;
+        box.append(mdTable(l, sep, rows));
+        continue;
+      }
+      if (/^\s{0,3}>/.test(l)) {
+        end();
+        const quote = [];
+        for (; i < lines.length && /^\s{0,3}>/.test(lines[i]); i++) quote.push(lines[i].replace(/^\s{0,3}>\s?/, ''));
+        i--;
+        box.append(h('blockquote', 'border-l-2 border-ink-600 pl-3 text-zinc-400', md(quote.join('\n'))));
+        continue;
+      }
+      const item = MD_ITEM.exec(l);
+      if (item) {
+        flush();
+        if (!list) {
+          list = h('ul', 'flex min-w-0 flex-col gap-1');
+          box.append(list);
+        }
+        list.append(mdItem(item));
+        continue;
+      }
+      if (list && /^\s{2,}\S/.test(l)) {
+        // More of the item above.
+        inline(list.lastElementChild.lastElementChild, '\n' + l.trim());
+        continue;
+      }
+      list = null;
+      para.push(l);
+    }
+    end();
+    return box;
+  }
+
+  function mdItem(m) {
+    const depth = Math.min(3, Math.floor(m[1].replace(/\t/g, '    ').length / 2));
+    const num = /\d/.test(m[2]);
+    let marker = num ? m[2] : depth ? '◦' : '•';
+    let text = m[3];
+    const task = /^\[([ xX])\]\s+/.exec(text);
+    if (task) {
+      marker = task[1] === ' ' ? '☐' : '☑';
+      text = text.slice(task[0].length);
+    }
+    return h('li', 'flex min-w-0 gap-2 ' + MD_INDENT[depth],
+      h('span', num && !task ? 'min-w-5 shrink-0 select-none text-right tabular-nums text-zinc-500' : 'shrink-0 select-none text-zinc-500', marker),
+      inline(h('span', 'min-w-0 flex-1 whitespace-pre-wrap break-words'), text));
+  }
+
+  // mdTable renders a table: its head row, the separator (which aligns
+  // the columns) and the body rows.
+  function mdTable(head, sep, rows) {
+    const align = splitRow(sep).map((c) => {
+      const s = c.trim();
+      return !s.endsWith(':') ? '' : s.startsWith(':') ? 'text-center' : 'text-right';
+    });
+    const th = splitRow(head).map((c, j) => inline(h('th', 'border-b border-ink-600 px-2.5 py-1.5 font-semibold text-zinc-100 ' + (align[j] || 'text-left')), c.trim()));
+    const trs = rows.map((r) => h('tr', 'border-t border-ink-700/70 first:border-t-0',
+      ...splitRow(r).map((c, j) => inline(h('td', 'px-2.5 py-1.5 align-top text-zinc-300 ' + (align[j] || '')), c.trim()))));
+    return h('div', 'min-w-0 overflow-x-auto rounded-md border border-ink-700',
+      h('table', 'w-full border-collapse text-[12.5px] leading-snug',
+        h('thead', 'bg-ink-850', h('tr', '', ...th)),
+        h('tbody', '', ...trs)));
+  }
+
+  // splitRow splits a table row into cells: on | outside `code`, not \|.
+  function splitRow(s) {
+    s = s.trim();
+    if (s.startsWith('|')) s = s.slice(1);
+    if (s.endsWith('|') && !s.endsWith('\\|')) s = s.slice(0, -1);
+    const cells = [];
+    let cell = '';
+    let code = false;
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (c === '\\' && s[i + 1] === '|') {
+        cell += '|';
+        i++;
+        continue;
+      }
+      if (c === '`') code = !code;
+      if (c === '|' && !code) {
+        cells.push(cell);
+        cell = '';
+        continue;
+      }
+      cell += c;
+    }
+    cells.push(cell);
+    return cells;
+  }
+
+  const INLINE = /`[^`\n]+`|\*\*(?=\S)[^*\n]*?\S\*\*|__(?=\S)[^_\n]*?\S__|~~(?=\S)[^~\n]*?\S~~|\[([^\]\n]+)\]\(((?:https?:\/\/|mailto:)[^\s)]+)\)|\*(?=[^\s*])[^*\n]*?[^\s*]\*|_(?=[^\s_])[^_\n]*?[^\s_]_|https?:\/\/[^\s<>()`]*[^\s<>()`.,;:!?'"*_\]]/g;
+
+  // inline renders inline markdown into el: `code`, **bold**, *italics*,
+  // ~~struck~~, [links](https://…) and bare links, which open in a new
+  // tab. Other link targets stay text.
+  function inline(el, text) {
+    let last = 0;
+    let m;
+    INLINE.lastIndex = 0;
+    while ((m = INLINE.exec(text))) {
       const t = m[0];
-      el.append(t[0] === '`'
-        ? h('code', 'rounded bg-ink-800 px-1 py-px font-mono text-[12px] text-emerald-200/90', t.slice(1, -1))
-        : h('strong', 'font-semibold text-zinc-50', t.slice(2, -2)));
+      // _ and * inside a word (snake_case, a*b) are no emphasis.
+      if ((t[0] === '_' || (t[0] === '*' && t[1] !== '*')) &&
+        (/\w/.test(text[m.index - 1] || '') || /\w/.test(text[m.index + t.length] || ''))) {
+        INLINE.lastIndex = m.index + 1;
+        continue;
+      }
+      if (m.index > last) el.append(text.slice(last, m.index));
       last = m.index + t.length;
+      el.append(inlineNode(m));
+      INLINE.lastIndex = last; // inlineNode used the pattern too
     }
     if (last < text.length) el.append(text.slice(last));
     return el;
+  }
+
+  function inlineNode(m) {
+    const t = m[0];
+    if (t[0] === '`') return h('code', 'rounded bg-ink-800 px-1 py-px font-mono text-[12px] text-emerald-200/90', t.slice(1, -1));
+    if (m[1] !== undefined) return link(m[2], m[1]);
+    if (t.startsWith('http')) return link(t, t);
+    if (t.startsWith('**') || t.startsWith('__')) return inline(h('strong', 'font-semibold text-zinc-50'), t.slice(2, -2));
+    if (t.startsWith('~~')) return inline(h('del', 'text-zinc-500'), t.slice(2, -2));
+    return inline(h('em', 'italic'), t.slice(1, -1));
+  }
+
+  function link(href, text) {
+    const a = h('a', 'break-all text-sky-300 underline decoration-sky-300/30 underline-offset-2 hover:decoration-sky-300', text);
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    return a;
   }
 
   function renderChatHead() {
@@ -2353,21 +3260,107 @@
 
   function renderChatStatus() {
     const st = $('chat-status');
-    if (chat.error) {
-      st.className = 'mt-1 min-h-4 truncate text-[11px] text-rose-300';
-      st.textContent = chat.error;
+    if (chat.feed.error) {
+      st.className = 'min-h-4 min-w-0 flex-1 truncate text-[11px] text-rose-300';
+      st.textContent = chat.feed.error;
       return;
     }
     if (chat.held && chatLive()) {
-      st.className = 'mt-1 min-h-4 truncate text-[11px] text-amber-300';
+      st.className = 'min-h-4 min-w-0 flex-1 truncate text-[11px] text-amber-300';
       st.textContent = 'The agent shows a dialog: your text was typed, but Enter was not pressed. Answer with the keys.';
       return;
     }
-    st.className = 'mt-1 min-h-4 truncate text-[11px] text-zinc-500';
+    st.className = 'min-h-4 min-w-0 flex-1 truncate text-[11px] text-zinc-500';
     const a = chat.agent;
     st.textContent = !a ? '' : !chatLive() ? 'the session has ended'
+      : chat.switching ? 'switching the model…'
       : chatDialog() ? 'in a dialog, Send types your text without pressing Enter: Enter picks the highlighted option'
       : a.state === 'working' ? 'working… new messages appear as the agent writes them' : '';
+  }
+
+  // ---------------------------------------------------------------- model
+  //
+  // The model and effort the session runs at (each chat reply has them),
+  // and a switch to others, for this session only (POST .../model).
+
+  function opt(value, label, disabled) {
+    const o = h('option', '', label);
+    o.value = value;
+    o.disabled = !!disabled;
+    return o;
+  }
+
+  // chatModel takes the model of a chat reply. Replies read while a
+  // switch went on, or just before it ended, would undo it on the page.
+  function chatModel(m) {
+    if (chat.switching || Date.now() - chat.switchedAt < 2000) return;
+    chat.model = m || null;
+    renderChatModel();
+  }
+
+  // renderChatModel shows the model and effort in two pickers; the efforts
+  // are those of the session's model. A value the page cannot pick (none
+  // known yet, a model not on the list) shows as a disabled option.
+  function renderChatModel() {
+    const m = chat.model;
+    $('chat-model').hidden = !m;
+    if (!m) return;
+    const msel = $('chat-model-sel');
+    const esel = $('chat-effort-sel');
+    const cur = m.models.find((x) => x.id === m.model);
+    const mopts = m.models.map((x) => opt(x.id, x.label));
+    if (!cur) mopts.unshift(opt('', m.name || 'default model', true));
+    msel.replaceChildren(...mopts);
+    msel.value = cur ? cur.id : '';
+    const efforts = cur ? m.efforts.filter((e) => cur.efforts.includes(e.id)) : m.efforts;
+    const ecur = efforts.find((e) => e.id === m.effort);
+    const eopts = efforts.map((e) => opt(e.id, e.label));
+    if (!ecur) eopts.unshift(opt('', cur && !efforts.length ? 'no effort' : m.effort || 'default effort', true));
+    esel.replaceChildren(...eopts);
+    esel.value = ecur ? ecur.id : '';
+    const live = chatLive();
+    const can = m.switch && live && !chat.switching;
+    msel.disabled = !can;
+    esel.disabled = !can || !efforts.length;
+    const why = !live ? 'the session has ended'
+      : !m.switch ? 'this agent cannot switch a running session: choose when starting one'
+      : 'a switch holds for this session only';
+    msel.title = `Model${m.name ? ': ' + m.name : ''} · ${why}`;
+    esel.title = `Effort${m.effort ? ': ' + m.effort : ''} · ${why}`;
+  }
+
+  // switchChatModel switches to what the pickers show. A new model keeps
+  // the effort shown if it runs at it.
+  async function switchChatModel() {
+    const m = chat.model;
+    if (!m || chat.switching || !chatLive()) return;
+    const model = $('chat-model-sel').value;
+    const effort = $('chat-effort-sel').value;
+    const body = { model: model && model !== m.model ? model : '', effort: '' };
+    const to = m.models.find((x) => x.id === (body.model || m.model));
+    if (body.model) body.effort = to && to.efforts.includes(effort) ? effort : '';
+    else if (effort && effort !== m.effort) body.effort = effort;
+    if (!body.model && !body.effort) return;
+    const label = [to ? to.label : m.name, (m.efforts.find((e) => e.id === (body.effort || m.effort)) || {}).label]
+      .filter(Boolean).join(' · ');
+    const seq = chat.seq;
+    chat.switching = true;
+    renderChatModel();
+    renderChatStatus();
+    try {
+      const r = await api('POST', chatAPI('model'), body);
+      if (seq !== chat.seq) return;
+      chat.model = (r && r.model) || m;
+      toast(`${label || 'switched'} for this session`);
+    } catch (e) {
+      if (seq !== chat.seq) return;
+      toast(`could not switch: ${e.message}`, 'error');
+    }
+    chat.switching = false;
+    chat.switchedAt = Date.now();
+    renderChatModel();
+    renderChatStatus();
+    if (chat.screenOpen) setTimeout(refreshScreen, 150);
   }
 
   // Keys for the agent's own dialogs (permissions, trust, menus).
@@ -2384,6 +3377,7 @@
       : chatDialog() ? 'Type into the dialog (Enter is not pressed)'
       : touch() ? 'Message the agent' : 'Message the agent · Enter sends, Shift+Enter for a new line';
     $('chat-send').disabled = !live || chat.sending;
+    renderChatModel();
     const keys = $('chat-keys');
     keys.hidden = !live;
     if (live && !keys.childElementCount) {
@@ -2456,15 +3450,16 @@
 
   function renderChatScreen() {
     // Without a chat (a shell, or before the first message) the screen
-    // takes the room of the empty log.
-    const big = chat.screenOpen && !chat.file;
-    $('chat-screen').hidden = !chat.screenOpen;
+    // takes the room of the empty log. It shows with the chat only.
+    const shown = chat.screenOpen && chat.view === 'chat';
+    const big = chat.screenOpen && !chat.feed.file;
+    $('chat-screen').hidden = !shown;
     $('chat-screen').classList.toggle('max-h-[45%]', !big);
     $('chat-screen').classList.toggle('flex-1', big);
     $('chat-scroll').classList.toggle('flex-1', !big);
     $('chat-scroll').classList.toggle('flex-none', big);
-    $('chat-screen-toggle').setAttribute('aria-pressed', String(chat.screenOpen));
-    if (chat.screenOpen) refreshScreen();
+    $('chat-screen-toggle').setAttribute('aria-pressed', String(shown));
+    if (shown) refreshScreen();
     else clearTimeout(chat.screenTimer);
   }
 
@@ -2472,7 +3467,7 @@
 
   async function refreshScreen() {
     clearTimeout(chat.screenTimer);
-    if (!chat.open || !chat.screenOpen) return;
+    if (!chat.open || !chat.screenOpen || chat.view !== 'chat') return;
     const seq = chat.seq;
     const pre = $('chat-screen-pre');
     if (chatLive()) {
@@ -2495,6 +3490,40 @@
     if (seq === chat.seq && chat.screenOpen) chat.screenTimer = setTimeout(refreshScreen, SCREEN_POLL_MS);
   }
 
+  // setView switches the dialog to the chat, the workflow runs ('wf';
+  // unfolding and showing run, if given) or a workflow agent ('sub', see
+  // openSub). Leaving 'sub' stops following that agent.
+  function setView(view, run) {
+    if (view === 'sub' && !wf.sub) view = 'wf';
+    if (view !== 'sub' && wf.sub) {
+      stopFeed(wf.feed);
+      wf.sub = null;
+    }
+    chat.view = view;
+    if (run) wf.shown.add(run);
+    renderChatView();
+    if (view === 'wf') {
+      renderWorkflows();
+      const card = run && $('wf-list').querySelector(`[data-run="${CSS.escape(run)}"]`);
+      if (card) card.scrollIntoView({ block: 'start' });
+    } else if (view === 'chat') {
+      // Hidden, the log kept growing but lost its scroll position.
+      const sc = $('chat-scroll');
+      sc.scrollTop = sc.scrollHeight;
+    }
+  }
+
+  // renderChatView shows the parts of the dialog the view has.
+  function renderChatView() {
+    const v = chat.view;
+    $('chat-scroll').hidden = v !== 'chat';
+    $('chat-foot').hidden = v !== 'chat';
+    $('wf-view').hidden = v !== 'wf';
+    $('sub-view').hidden = v !== 'sub';
+    renderChatScreen();
+    renderTabs();
+  }
+
   function wireChat() {
     const dlg = $('chat');
     $('chat-close').addEventListener('click', closeChat);
@@ -2511,18 +3540,562 @@
       const b = ev.target.closest('button[data-key]');
       if (b) sendKey(b.dataset.key);
     });
+    $('chat-model-sel').addEventListener('change', switchChatModel);
+    $('chat-effort-sel').addEventListener('change', switchChatModel);
     $('chat-screen-toggle').addEventListener('click', () => {
-      chat.screenOpen = !chat.screenOpen;
       chat.screenAuto = false;
+      if (chat.view !== 'chat') {
+        chat.screenOpen = true;
+        setView('chat');
+        return;
+      }
+      chat.screenOpen = !chat.screenOpen;
       renderChatScreen();
+    });
+    $('chat-tab-chat').addEventListener('click', () => setView('chat'));
+    $('chat-tab-wf').addEventListener('click', () => setView('wf'));
+    $('chat-tabs').addEventListener('keydown', (ev) => {
+      if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+      const to = chat.view === 'chat' ? 'wf' : 'chat';
+      setView(to);
+      $(to === 'chat' ? 'chat-tab-chat' : 'chat-tab-wf').focus();
+    });
+    $('sub-back').addEventListener('click', () => setView('wf'));
+    // Esc steps back from a workflow agent before it closes the dialog.
+    dlg.addEventListener('cancel', (ev) => {
+      if (chat.view === 'sub') {
+        ev.preventDefault();
+        setView('wf');
+      }
     });
     dlg.addEventListener('close', () => {
       chat.open = false;
       chat.seq++;
       clearTimeout(chat.screenTimer);
-      chat.tools.clear();
-      chat.orphans.clear();
+      stopFeed(chat.feed);
+      stopFeed(wf.feed);
+      wf.sub = null;
+      wf.cards.clear();
     });
+    chat.feed = newFeed({
+      scroller: $('chat-scroll'),
+      log: $('chat-log'),
+      url: (q) => chatAPI('chat?' + q),
+      live: chatLive,
+      working: () => !!chat.agent && chat.agent.state === 'working',
+      empty: chatEmpty,
+      onReply: (r) => {
+        if (r.agent) chatAgent(chat.host, r.agent);
+        chatModel(r.model);
+      },
+      onStatus: renderChatStatus,
+      onFile: renderChatScreen,
+    });
+    wf.feed = newFeed({
+      scroller: $('sub-scroll'),
+      log: $('sub-log'),
+      url: (q) => chatAPI(`workflows/${encodeURIComponent(wf.sub.run)}/agents/${encodeURIComponent(wf.sub.id)}/chat?` + q),
+      live: subLive,
+      working: subLive,
+      empty: () => 'This agent has written nothing yet.',
+      onReply: (r) => {
+        if (r.agent) chatAgent(chat.host, r.agent);
+      },
+      onStatus: renderSubHead,
+    });
+  }
+
+  // -------------------------------------------------------------- workflows
+  //
+  // A workflow is a script a Claude Code session runs in the background: it
+  // starts many subagents, in phases, and returns a result. The agent list
+  // shows the runs going on (GET /api/workflows, here and on every joined
+  // fleet); a session's Workflows tab shows all of its runs, long-polled,
+  // and each of their agents' conversations.
+
+  const wf = {
+    runs: [], // the open session's runs, oldest first
+    v: '', // their version, for the next long poll
+    loaded: false,
+    hint: 0, // runs the agent list knew of when the dialog opened
+    shown: new Set(), // run ids unfolded
+    known: new Set(), // run ids seen: a new one unfolds by itself
+    cards: new Map(), // run id -> {sig, el}: cards only change with their run
+    sub: null, // {run, id}: the workflow agent in the 'sub' view
+    feed: null, // its conversation
+  };
+
+  const WF = {
+    running: {
+      label: 'running',
+      badge: 'inline-flex items-center gap-1.5 rounded-full bg-sky-400/10 px-2 py-0.5 text-[11px] font-semibold text-sky-300 ring-1 ring-inset ring-sky-400/30',
+      dot: 'size-2.5 shrink-0 rounded-full border-[1.5px] border-sky-400 border-t-transparent animate-spin motion-reduce:animate-none',
+      bar: 'bg-sky-400 animate-pulse motion-reduce:animate-none',
+    },
+    completed: {
+      label: 'completed',
+      badge: 'inline-flex items-center gap-1.5 rounded-full bg-emerald-400/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-300/90 ring-1 ring-inset ring-emerald-400/25',
+      dot: 'size-1.5 shrink-0 rounded-full bg-emerald-400',
+      bar: 'bg-emerald-400/80',
+    },
+    done: {
+      label: 'done',
+      badge: 'inline-flex items-center gap-1.5 rounded-full bg-emerald-400/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-300/90 ring-1 ring-inset ring-emerald-400/25',
+      dot: 'size-1.5 shrink-0 rounded-full bg-emerald-400',
+      bar: 'bg-emerald-400/80',
+    },
+    failed: {
+      label: 'failed',
+      badge: 'inline-flex items-center gap-1.5 rounded-full bg-rose-500/10 px-2 py-0.5 text-[11px] font-semibold text-rose-300 ring-1 ring-inset ring-rose-500/40',
+      dot: 'size-1.5 shrink-0 rounded-full bg-rose-500',
+      bar: 'bg-rose-500',
+    },
+    stopped: {
+      label: 'stopped',
+      badge: 'inline-flex items-center gap-1.5 rounded-full bg-zinc-400/5 px-2 py-0.5 text-[11px] font-semibold text-zinc-400 ring-1 ring-inset ring-zinc-500/25',
+      dot: 'size-1.5 shrink-0 rounded-full bg-zinc-500',
+      bar: 'bg-zinc-600',
+    },
+  };
+  const wfStatus = (s) => WF[s] || WF.stopped;
+
+  function wfBadge(status) {
+    const st = wfStatus(status);
+    return h('span', st.badge, h('span', st.dot), st.label);
+  }
+
+  // fmtTokens shortens a token count: 812, 9.4k, 748k, 1.2M.
+  function fmtTokens(n) {
+    n = n || 0;
+    if (n < 1000) return String(n);
+    if (n < 1e6) return (n / 1000).toFixed(n < 1e4 ? 1 : 0) + 'k';
+    return (n / 1e6).toFixed(1) + 'M';
+  }
+
+  // elapsed shows how long from start to end; without end it keeps
+  // counting (the 1s ticker updates [data-since]).
+  function elapsed(start, end, cls) {
+    const el = h('span', cls || '', start ? dur((end || Date.now()) - start) : '–');
+    if (start && !end) el.dataset.since = String(start);
+    return el;
+  }
+
+  // agentBars draws one bar per agent status.
+  function agentBars(statuses, cls) {
+    const row = h('span', 'flex h-1.5 min-w-0 gap-0.5 ' + (cls || ''));
+    if (!statuses.length) row.append(h('span', 'flex-1 rounded-full bg-ink-700'));
+    for (const s of statuses) row.append(h('span', 'min-w-px flex-1 rounded-full ' + wfStatus(s).bar));
+    return row;
+  }
+
+  // phaseGroups puts a run's agents under its phases, in order; agents of
+  // no phase go last.
+  function phaseGroups(run) {
+    const groups = run.phases.map((p) => ({ title: p.title, detail: p.detail || '', agents: [] }));
+    for (const a of run.agents) {
+      let g = groups.find((x) => x.title === (a.phase || ''));
+      if (!g) {
+        g = { title: a.phase || '', detail: '', agents: [] };
+        groups.push(g);
+      }
+      g.agents.push(a);
+    }
+    return groups;
+  }
+
+  // ---- the agent list
+
+  const WF_POLL_MS = 3000;
+  let wfTimer = 0;
+  let wfBusy = false;
+
+  function scheduleWorkflows(delay) {
+    clearTimeout(wfTimer);
+    if (admin) wfTimer = setTimeout(pollWorkflows, delay);
+  }
+
+  // pollWorkflows asks this fleet and every joined one for the runs going
+  // on. The list keeps what it needs to draw them, so runs only redraw it
+  // when that changed.
+  async function pollWorkflows() {
+    if (!admin || wfBusy) return;
+    if (document.hidden) {
+      scheduleWorkflows(WF_POLL_MS);
+      return;
+    }
+    wfBusy = true;
+    const next = new Map();
+    const keep = (host) => {
+      for (const [k, v] of S.workflows) if (k.startsWith(host + '/') || (!host && !k.includes('/'))) next.set(k, v);
+    };
+    const hosts = ['', ...pickerHosts().filter((x) => x.id && picker.hosts.get(x.id) === 'joined').map((x) => x.id)];
+    await Promise.all(hosts.map(async (host) => {
+      let r;
+      try {
+        r = await api('GET', host ? `/api/hosts/${encodeURIComponent(host)}/workflows` : '/api/workflows');
+      } catch (e) {
+        if (e.status !== 404) keep(host); // 404: a fleet without workflows
+        return;
+      }
+      for (const { agent, run } of (r && r.workflows) || []) {
+        const k = agentKey(host, agent);
+        if (!next.has(k)) next.set(k, []);
+        next.get(k).push({
+          id: run.id, name: run.name, status: run.status, phase: run.phase,
+          phases: run.phases.map((p) => p.title), counts: run.counts,
+          bars: run.agents.map((a) => a.status), startedMs: run.startedMs, endedMs: run.endedMs,
+        });
+      }
+    }));
+    wfBusy = false;
+    if (!admin) return;
+    if (!same([...S.workflows], [...next])) {
+      S.workflows = next;
+      invalidate('agents');
+    }
+    scheduleWorkflows(WF_POLL_MS);
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) scheduleWorkflows(0);
+  });
+
+  // workflowLine sums up a run in its agent's row; it opens the run in the
+  // session's Workflows tab.
+  function workflowLine(host, a, run) {
+    const st = wfStatus(run.status);
+    const n = run.bars.length;
+    const done = run.counts.done + run.counts.failed + run.counts.stopped;
+    const b = h('button', 'touch:min-h-11 mt-2 flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-fuchsia-400/15 bg-fuchsia-400/5 px-2.5 py-1.5 text-left text-xs hover:border-fuchsia-400/30 hover:bg-fuchsia-400/10 focus-visible:outline-2 focus-visible:outline-fuchsia-400');
+    b.type = 'button';
+    b.addEventListener('click', () => openChat(host, a.id, a, { view: 'wf', run: run.id }));
+    const at = run.phases.indexOf(run.phase);
+    b.append(
+      h('span', 'flex min-w-0 items-center gap-2',
+        h('span', st.dot),
+        h('span', 'font-mono text-fuchsia-400/70', '⧉'),
+        h('span', 'truncate font-mono font-medium text-fuchsia-100', run.name)),
+      run.phase ? h('span', 'shrink-0 text-zinc-400', run.phase,
+        at >= 0 && run.phases.length > 1 ? h('span', 'text-zinc-600', ` ${at + 1}/${run.phases.length}`) : null) : null,
+      h('span', 'ml-auto flex min-w-0 items-center gap-3',
+        agentBars(run.bars, 'w-20 sm:w-32'),
+        h('span', 'shrink-0 font-mono tabular-nums text-zinc-500',
+          `${done}/${n} agents · `, elapsed(run.startedMs, run.status === 'running' ? 0 : run.endedMs))));
+    b.setAttribute('aria-label', `Workflow ${run.name}, ${st.label}${run.phase ? ', phase ' + run.phase : ''}, ${done} of ${n} agents finished. Open it`);
+    return b;
+  }
+
+  // ---- the Workflows tab
+
+  // wfLoop follows the session's runs while the dialog shows it; a
+  // finished session's runs no longer change.
+  async function wfLoop(seq) {
+    let failures = 0;
+    while (chat.open && seq === chat.seq) {
+      const q = new URLSearchParams();
+      if (wf.loaded) {
+        q.set('wait', '1');
+        q.set('v', wf.v);
+      }
+      let r;
+      try {
+        r = await api('GET', chatAPI('workflows?' + q));
+      } catch (e) {
+        if (seq !== chat.seq) return;
+        if (e.status === 404) return; // gone, or a fleet without workflows
+        await sleep(Math.min(15000, 1000 * 2 ** failures++));
+        continue;
+      }
+      if (seq !== chat.seq) return;
+      failures = 0;
+      const first = !wf.loaded;
+      wf.loaded = true;
+      wf.v = r.v || '';
+      if (r.agent) chatAgent(chat.host, r.agent);
+      applyWorkflows(r.runs || [], first);
+      if (!first && !chatLive()) return;
+    }
+  }
+
+  function applyWorkflows(runs, first) {
+    const was = subAgent();
+    wf.runs = runs;
+    for (const r of runs) {
+      // At first the runs going on and the latest unfold; later every new one.
+      if (!wf.known.has(r.id) && (!first || r.status === 'running')) wf.shown.add(r.id);
+      wf.known.add(r.id);
+    }
+    if (first && runs.length) wf.shown.add(runs[runs.length - 1].id);
+    renderTabs();
+    for (const f of [chat.feed, wf.feed]) for (const paint of f.watch) paint();
+    if (chat.view === 'wf') renderWorkflows();
+    if (chat.view === 'sub') {
+      const now = subAgent();
+      if (was && now && was.status !== now.status) paintPending(wf.feed);
+      renderSubHead();
+    }
+  }
+
+  function renderTabs() {
+    const n = wf.runs.length || wf.hint;
+    $('chat-tabs').hidden = !n && chat.view === 'chat';
+    $('chat-tab-chat').setAttribute('aria-selected', String(chat.view === 'chat'));
+    $('chat-tab-wf').setAttribute('aria-selected', String(chat.view !== 'chat'));
+    $('chat-tab-chat').tabIndex = chat.view === 'chat' ? 0 : -1;
+    $('chat-tab-wf').tabIndex = chat.view === 'chat' ? -1 : 0;
+    const count = $('chat-tab-wf-n');
+    count.replaceChildren(String(wf.runs.length));
+    if (wf.runs.some((r) => r.status === 'running')) count.prepend(h('span', WF.running.dot));
+    count.hidden = !wf.runs.length;
+  }
+
+  // renderWorkflows draws the run cards, newest first. A card is drawn
+  // anew only when its run changed, so reading a finished run's result is
+  // not disturbed by a run going on.
+  function renderWorkflows() {
+    const box = $('wf-list');
+    if (!chat.open) return;
+    if (!wf.loaded || !wf.runs.length) {
+      wf.cards.clear();
+      box.replaceChildren(h('div', 'py-10 text-center font-mono text-xs text-zinc-600',
+        !wf.loaded ? '// loading…' : '// This session has run no workflows.'));
+      return;
+    }
+    const focus = box.contains(document.activeElement) ? document.activeElement.dataset.key : '';
+    const cards = [];
+    for (const run of [...wf.runs].reverse()) {
+      const sig = JSON.stringify(run) + wf.shown.has(run.id);
+      let c = wf.cards.get(run.id);
+      if (!c || c.sig !== sig) {
+        c = { sig, el: runCard(run) };
+        wf.cards.set(run.id, c);
+      }
+      cards.push(c.el);
+    }
+    for (const id of wf.cards.keys()) if (!wf.runs.some((r) => r.id === id)) wf.cards.delete(id);
+    // Drop what is not shown anymore, then put new cards in place: the
+    // others stay where they are (a moved element loses its scroll
+    // position).
+    for (const el of [...box.children]) if (!cards.includes(el)) el.remove();
+    cards.forEach((el, i) => {
+      if (box.children[i] !== el) box.insertBefore(el, box.children[i] || null);
+    });
+    if (focus && !box.contains(document.activeElement)) box.querySelector(`[data-key="${CSS.escape(focus)}"]`)?.focus();
+  }
+
+  function runCard(run) {
+    const open = wf.shown.has(run.id);
+    const card = h('section', 'min-w-0 rounded-lg border border-ink-700 bg-ink-850/40');
+    card.dataset.run = run.id;
+    const head = h('button', 'touch:min-h-11 flex w-full min-w-0 items-start gap-2.5 rounded-t-lg px-3.5 pb-2.5 pt-3 text-left hover:bg-ink-800/40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-fuchsia-400');
+    head.type = 'button';
+    head.dataset.key = 'run:' + run.id;
+    head.setAttribute('aria-expanded', String(open));
+    head.addEventListener('click', () => {
+      if (open) wf.shown.delete(run.id);
+      else wf.shown.add(run.id);
+      renderWorkflows();
+    });
+    const n = run.agents.length;
+    const stats = [`${n} agent${n === 1 ? '' : 's'}`, `${run.toolUses} tool calls`, `${fmtTokens(run.tokens)} tokens`];
+    if (run.startedMs) stats.push('started ' + new Date(run.startedMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    head.append(
+      h('span', open ? 'mt-0.5 inline-block rotate-90 text-zinc-500 transition-transform motion-reduce:transition-none' : 'mt-0.5 inline-block text-zinc-500 transition-transform motion-reduce:transition-none', '▸'),
+      h('div', 'min-w-0 flex-1',
+        h('div', 'flex flex-wrap items-center gap-x-2 gap-y-1',
+          h('span', 'font-mono text-fuchsia-400/70', '⧉'),
+          h('span', 'min-w-0 truncate font-mono text-[13px] font-semibold text-zinc-100', run.name),
+          wfBadge(run.status)),
+        run.description ? h('p', open ? 'mt-1 text-xs leading-relaxed text-zinc-400' : 'mt-1 truncate text-xs text-zinc-500', run.description) : null,
+        h('div', 'mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[11px] tabular-nums text-zinc-500', ...stats.map((s) => h('span', '', s)))),
+      elapsed(run.startedMs, run.status === 'running' ? 0 : run.endedMs || run.updatedMs, 'shrink-0 pt-0.5 font-mono text-xs tabular-nums text-zinc-300'));
+    card.append(head, phaseStrip(run));
+    if (open) card.append(runBody(run));
+    return card;
+  }
+
+  // phaseStrip is a run at a glance: its phases side by side, an agent a
+  // bar.
+  function phaseStrip(run) {
+    const strip = h('div', 'flex min-w-0 gap-3 px-3.5 pb-3');
+    for (const g of phaseGroups(run)) {
+      const done = g.agents.filter((a) => a.status !== 'running').length;
+      const now = run.status === 'running' && g.title === run.phase;
+      strip.append(h('div', 'min-w-0 flex-1',
+        h('div', now
+          ? 'mb-1 flex items-baseline justify-between gap-2 text-[10px] font-semibold uppercase tracking-wider text-sky-200'
+          : 'mb-1 flex items-baseline justify-between gap-2 text-[10px] font-medium uppercase tracking-wider text-zinc-500',
+        h('span', 'truncate', g.title || 'agents'),
+        g.agents.length ? h('span', 'shrink-0 font-mono normal-case tabular-nums tracking-normal text-zinc-500', `${done}/${g.agents.length}`) : null),
+        agentBars(g.agents.map((a) => a.status))));
+    }
+    return strip;
+  }
+
+  function runBody(run) {
+    const body = h('div', 'flex min-w-0 flex-col gap-4 border-t border-ink-700 px-3.5 py-3');
+    if (run.status === 'failed' || (run.status === 'stopped' && run.summary)) {
+      body.append(h('div', 'rounded-md border border-rose-500/30 bg-rose-500/5 px-3 py-2',
+        h('div', 'mb-1 text-[10px] font-semibold uppercase tracking-wider text-rose-300/80', run.status === 'failed' ? 'Failed' : 'Stopped'),
+        h('pre', 'max-h-60 overflow-auto whitespace-pre-wrap break-words font-mono text-[11.5px] leading-snug text-rose-100/90', run.summary || 'no reason given')));
+    } else if (run.status === 'stopped') {
+      body.append(h('div', 'font-mono text-[11px] text-zinc-500', '// stopped: the session ended before the run did'));
+    }
+    for (const g of phaseGroups(run)) body.append(phaseSection(run, g));
+    if (run.logs && run.logs.length) {
+      body.append(h('div', 'min-w-0',
+        h('div', 'mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500', 'Log'),
+        h('pre', 'max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-ink-700 bg-ink-950 px-2.5 py-1.5 font-mono text-[11.5px] leading-snug text-zinc-400', run.logs.join('\n'))));
+    }
+    if (run.result) body.append(resultBox(run.result));
+    return body;
+  }
+
+  function phaseSection(run, g) {
+    const c = { running: 0, done: 0, failed: 0, stopped: 0 };
+    let from = 0;
+    let to = 0;
+    for (const a of g.agents) {
+      c[a.status in c ? a.status : 'stopped']++;
+      if (a.startedMs && (!from || a.startedMs < from)) from = a.startedMs;
+      to = Math.max(to, a.updatedMs || 0);
+    }
+    const status = !g.agents.length ? '' : c.running ? 'running' : c.failed ? 'failed' : c.stopped ? 'stopped' : 'done';
+    const icon = status ? h('span', wfStatus(status).dot) : h('span', 'size-1.5 shrink-0 rounded-full ring-1 ring-inset ring-zinc-600');
+    const counts = [];
+    if (g.agents.length) counts.push(`${c.done}/${g.agents.length} done`);
+    if (c.failed) counts.push(`${c.failed} failed`);
+    const head = h('div', 'flex min-w-0 items-center gap-2',
+      h('span', 'flex w-4 shrink-0 justify-center', icon),
+      h('span', status === 'running'
+        ? 'shrink-0 text-[11px] font-semibold uppercase tracking-wider text-sky-200'
+        : 'shrink-0 text-[11px] font-semibold uppercase tracking-wider text-zinc-300', g.title || 'Agents'),
+      g.detail ? h('span', 'min-w-0 truncate text-xs text-zinc-500', g.detail) : null,
+      h('span', 'ml-auto flex shrink-0 items-center gap-2 font-mono text-[11px] tabular-nums text-zinc-500',
+        counts.join(' · '), from ? elapsed(from, status === 'running' ? 0 : to, 'text-zinc-400') : null));
+    if (g.detail) head.title = g.detail;
+    const list = h('ul', 'mt-1 flex flex-col');
+    for (const a of g.agents) list.append(h('li', '', wfAgentRow(run, a)));
+    if (!g.agents.length) {
+      list.append(h('li', 'py-1 pl-6 font-mono text-[11px] text-zinc-600',
+        run.status === 'running' ? '// not started yet' : '// not reached'));
+    }
+    return h('div', 'min-w-0', head, list);
+  }
+
+  function wfAgentRow(run, a) {
+    const st = wfStatus(a.status);
+    const b = h('button', 'touch:min-h-11 group flex w-full min-w-0 items-start gap-2 rounded-md px-1 py-1.5 text-left hover:bg-ink-800/70 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-fuchsia-400');
+    b.type = 'button';
+    b.dataset.key = `agent:${run.id}/${a.id}`;
+    b.addEventListener('click', () => openSub(run.id, a.id));
+    const act = h('div', 'mt-0.5 truncate text-xs text-zinc-500');
+    if (a.tool) act.append(h('span', 'font-mono font-medium text-sky-300/80', a.tool), ' ');
+    act.append(a.activity || (a.status === 'running' ? 'starting…' : ''));
+    if (a.activity) act.title = a.activity;
+    b.append(
+      h('span', 'flex h-5 w-4 shrink-0 items-center justify-center', h('span', st.dot)),
+      h('div', 'min-w-0 flex-1',
+        h('div', 'flex min-w-0 items-baseline gap-2',
+          h('span', 'min-w-0 truncate font-mono text-[12.5px] text-zinc-100', a.label || a.id),
+          h('span', 'ml-auto flex shrink-0 items-baseline gap-2.5 font-mono text-[11px] tabular-nums text-zinc-500',
+            h('span', 'max-sm:hidden', `${a.toolUses} tool${a.toolUses === 1 ? '' : 's'}`),
+            h('span', 'max-sm:hidden', fmtTokens(a.tokens) + ' tok'),
+            elapsed(a.startedMs, a.status === 'running' ? 0 : a.updatedMs, 'text-zinc-400'))),
+        act),
+      h('span', 'self-center pl-1 text-zinc-600 group-hover:text-zinc-300', '›'));
+    b.setAttribute('aria-label', `${a.label || a.id}, ${st.label}. Open its conversation`);
+    return b;
+  }
+
+  // resultBox shows what a run returned.
+  function resultBox(result) {
+    return h('div', 'min-w-0 rounded-md border border-emerald-400/20 bg-emerald-400/[0.03]',
+      h('div', 'border-b border-emerald-400/15 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-300/80', 'Result'),
+      h('div', 'max-h-[32rem] min-w-0 overflow-y-auto px-3 py-2.5', resultNode(result)));
+  }
+
+  // resultNode draws a run's result: JSON (mostly objects and lists of
+  // them, with markdown text) as labelled parts, text as markdown, and
+  // JSON cut short as JSON.
+  function resultNode(text) {
+    try {
+      return resultValue(JSON.parse(text), 0);
+    } catch {
+      return looksJSON(text) ? codeView({ text, lang: 'json', tag: 'json', wrap: true }) : md(text);
+    }
+  }
+
+  // resultValue draws a JSON value: text as markdown, objects and lists as
+  // labelled parts (a list item by its title, name, id or number), deeper
+  // ones as JSON.
+  function resultValue(x, depth) {
+    if (typeof x === 'string') return md(x);
+    if (x === null || typeof x !== 'object') return h('div', 'font-mono text-[12px] text-zinc-300', String(x));
+    if (depth > 2) return codeView({ text: JSON.stringify(x, null, 2), lang: 'json', tag: 'json', wrap: true });
+    const box = h('div', depth ? 'flex min-w-0 flex-col gap-2.5 border-l border-ink-700 pl-3' : 'flex min-w-0 flex-col gap-3');
+    const label = (v, i) => {
+      const t = v && typeof v === 'object' && !Array.isArray(v) && [v.title, v.name, v.id, v.page, v.key].find((s) => typeof s === 'string' && s);
+      return t || String(i + 1);
+    };
+    const parts = Array.isArray(x) ? x.map((v, i) => [label(v, i), v]) : Object.entries(x);
+    if (!parts.length) box.append(h('div', 'font-mono text-[11px] text-zinc-600', Array.isArray(x) ? '// empty list' : '// empty'));
+    for (const [k, v] of parts) {
+      box.append(h('div', 'min-w-0',
+        h('div', 'mb-1 font-mono text-[11px] font-semibold text-emerald-300/70', k),
+        resultValue(v, depth + 1)));
+    }
+    return box;
+  }
+
+  // ---- one workflow agent
+
+  function subRun() {
+    return wf.sub && wf.runs.find((r) => r.id === wf.sub.run);
+  }
+
+  function subAgent() {
+    const run = subRun();
+    return run && run.agents.find((a) => a.id === wf.sub.id);
+  }
+
+  // subLive: the agent may write more (also while not known yet).
+  function subLive() {
+    const a = subAgent();
+    return !a || a.status === 'running';
+  }
+
+  function openSub(run, id) {
+    wf.sub = { run, id };
+    chat.view = 'sub';
+    renderChatView();
+    renderSubHead();
+    startFeed(wf.feed);
+    $('sub-back').focus();
+  }
+
+  function renderSubHead() {
+    if (!wf.sub) return;
+    const run = subRun();
+    const a = subAgent() || { id: wf.sub.id, status: 'running' };
+    $('sub-back-name').textContent = run ? run.name : 'workflow';
+    $('sub-title').textContent = a.label || a.id;
+    const badges = [wfBadge(a.status)];
+    if (a.phase) badges.push(chip(a.phase));
+    if (a.model) badges.push(chip(a.model.replace(/^claude-/, '')));
+    $('sub-badges').replaceChildren(...badges);
+    const meta = $('sub-meta');
+    if (wf.feed.error) {
+      meta.className = 'mt-0.5 truncate text-[11px] text-rose-300';
+      meta.textContent = wf.feed.error;
+      return;
+    }
+    meta.className = 'mt-0.5 flex flex-wrap gap-x-3 font-mono text-[11px] tabular-nums text-zinc-500';
+    meta.replaceChildren(
+      h('span', '', `${a.toolUses || 0} tool calls`),
+      h('span', '', `${fmtTokens(a.tokens)} tokens`),
+      elapsed(a.startedMs, a.status === 'running' ? 0 : a.updatedMs),
+      h('span', 'text-zinc-600', 'read-only: workflow agents take no input'));
   }
 
   // -------------------------------------------------------------- websocket

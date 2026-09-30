@@ -34,16 +34,21 @@ const (
 	// Note is anything else worth showing: a slash command, an interrupted
 	// turn, a compacted conversation, an API error.
 	Note = "note"
+	// Task is a background task that ended (a workflow, a background
+	// command or agent): Text sums it up, ID is the Tool entry that
+	// started it, Name how it ended (completed, failed, killed), Output
+	// what it returned, and Error marks one that failed.
+	Task = "task"
 )
 
 // Entry is one item of a chat.
 type Entry struct {
 	Kind string `json:"kind"`
-	// ID links a Result to its Tool. It is set only on Tool entries whose
-	// output comes later, in a Result: a Tool with an ID and no Result yet
-	// is still running.
+	// ID links a Result or a Task to its Tool. It is set only on Tool
+	// entries whose output comes later, in a Result: a Tool with an ID and
+	// no Result yet is still running.
 	ID string `json:"id,omitempty"`
-	// Name is the tool's name.
+	// Name is the tool's name; for a Task, how it ended.
 	Name string `json:"name,omitempty"`
 	// Text is the message, the one-line summary of a tool call, or the note.
 	Text string `json:"text,omitempty"`

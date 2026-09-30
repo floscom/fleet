@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"fleet/internal/tmux"
 	"fleet/internal/transcript"
 	"fleet/internal/wire"
+	"fleet/internal/workflow"
 )
 
 // testAdapter runs `sh -c <extra args joined>` (default: sleep 60), with
@@ -81,6 +83,20 @@ func (testAdapter) FindTranscript(dir, sessionID string) (string, bool) {
 // ParseTranscript makes each line a note.
 func (testAdapter) ParseTranscript(line []byte) []transcript.Entry {
 	return []transcript.Entry{{Kind: transcript.Note, Text: string(line)}}
+}
+
+// Workflows reads the runs from <transcript without .jsonl>.runs (JSON).
+func (testAdapter) Workflows(path string) []workflow.Run {
+	var runs []workflow.Run
+	data, _ := os.ReadFile(strings.TrimSuffix(path, ".jsonl") + ".runs")
+	_ = json.Unmarshal(data, &runs)
+	return runs
+}
+
+// WorkflowTranscript is <transcript without .jsonl>.<run>.<agent>.jsonl,
+// unchecked: the daemon must keep it in the transcript dir.
+func (testAdapter) WorkflowTranscript(path, run, agent string) (string, transcript.Parser, bool) {
+	return strings.TrimSuffix(path, ".jsonl") + "." + run + "." + agent + ".jsonl", testAdapter{}.ParseTranscript, true
 }
 
 func (testAdapter) HandleHook(ev adapter.HookEvent) (adapter.StateUpdate, bool) {
@@ -187,7 +203,7 @@ func (e *env) start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel, e.done = cancel, make(chan error, 1)
 	opts := Options{
-		Adapters:    adapter.NewRegistry(testAdapter{}, unavailableAdapter{}),
+		Adapters:    adapter.NewRegistry(testAdapter{}, unavailableAdapter{}, modelAdapter{}),
 		Version:     "test",
 		FleetBinary: "/bin/true",
 		Listen:      e.listen,

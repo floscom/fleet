@@ -249,6 +249,26 @@ message AdapterInfo {
   // Human-readable reason when unavailable.
   string unavailable_reason = 6;
   AdapterCapabilities capabilities = 7;
+  // Models the agent can run, for RunAgentRequest.model; empty when the
+  // adapter offers no choice.
+  repeated ModelChoice models = 8;
+  // Reasoning effort levels, least first, for RunAgentRequest.effort.
+  repeated EffortChoice efforts = 9;
+}
+
+message ModelChoice {
+  // Passed as RunAgentRequest.model, e.g. "opus".
+  string id = 1;
+  string label = 2;
+  // Ids of the efforts (AdapterInfo.efforts) it runs at; empty when it has
+  // no effort levels.
+  repeated string efforts = 3;
+}
+
+message EffortChoice {
+  // Passed as RunAgentRequest.effort, e.g. "high".
+  string id = 1;
+  string label = 2;
 }
 
 message AdapterCapabilities {
@@ -440,6 +460,11 @@ message RunAgentRequest {
   // "owner/repo" as a shorthand for https://github.com/owner/repo.git. The
   // daemon clones with its own git credentials.
   string clone_url = 13;
+  // Optional model and reasoning effort, from AdapterInfo.models and
+  // .efforts (model may also be any name the agent's CLI takes). Empty
+  // leaves them to the CLI's defaults; adapters without models reject them.
+  string model = 14;
+  string effort = 15;
 }
 message RunAgentResponse {
   Agent agent = 1;

@@ -113,8 +113,8 @@ func parseRunPath(p string) (root, rel, abs string, err error) {
 
 func newRunCmd() *cobra.Command {
 	var (
-		name, branch, prompt, clone, sandbox string
-		pinned, worktree, attachTo, docker   bool
+		name, branch, prompt, clone, sandbox, model, effort string
+		pinned, worktree, attachTo, docker                  bool
 	)
 	cmd := &cobra.Command{
 		Use:   "run <adapter> [path] [-- extra args]",
@@ -134,7 +134,7 @@ Arguments after "--" are passed to the agent CLI.`,
   fleet run claude ~/code/web --pinned --attach
   fleet run claude code:api --docker
   fleet run claude --clone owner/repo --docker --prompt "fix issue 42"
-  fleet run claude . -- --model opus`,
+  fleet run claude . --model fable --effort high`,
 		Args: cobra.ArbitraryArgs, // validated below; args after "--" are the agent's
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var extra []string
@@ -149,6 +149,7 @@ Arguments after "--" are passed to the agent CLI.`,
 			}
 			req := &fleetv1.RunAgentRequest{
 				Adapter: args[0], Name: name, Branch: branch, Prompt: prompt, ExtraArgs: extra,
+				Model: model, Effort: effort,
 			}
 			if clone != "" {
 				if len(args) == 2 || pinned || worktree {
@@ -223,6 +224,8 @@ Arguments after "--" are passed to the agent CLI.`,
 	f.BoolVar(&docker, "docker", false, "run in a Docker sandbox (same as --sandbox docker)")
 	f.StringVar(&sandbox, "sandbox", "", `"docker" or "none" (default: the server's [sandbox] default)`)
 	f.StringVar(&prompt, "prompt", "", "initial prompt, if the adapter supports it")
+	f.StringVar(&model, "model", "", `model, e.g. "opus" (see "fleet adapters"; default: the CLI's own)`)
+	f.StringVar(&effort, "effort", "", `reasoning effort, e.g. "high" (default: the CLI's own)`)
 	f.BoolVar(&attachTo, "attach", false, "attach to the agent's terminal right away")
 	return cmd
 }

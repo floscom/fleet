@@ -38,6 +38,7 @@ import (
 
 	fleetv1 "fleet/gen/fleetv1"
 	"fleet/internal/discovery"
+	"fleet/internal/workflow"
 )
 
 const (
@@ -90,6 +91,14 @@ type Source interface {
 	Screen(ctx context.Context, agent string) (string, error)
 	// Chat finds an agent's transcript.
 	Chat(agent string) (Chat, error)
+	// Workflows returns an agent and the workflow runs of its session.
+	Workflows(agent string) (*fleetv1.Agent, []workflow.Run, error)
+	// WorkflowChat finds the transcript of agent sub of an agent's
+	// workflow run run.
+	WorkflowChat(agent, run, sub string) (Chat, error)
+	// SwitchModel switches a live agent's session to another model and/or
+	// effort ("" keeps the current one), for that session only.
+	SwitchModel(ctx context.Context, agent, model, effort string) (*Model, error)
 }
 
 // BrowseFunc finds fleet daemons on the LAN (discovery.Browse).

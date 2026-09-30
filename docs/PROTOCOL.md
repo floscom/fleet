@@ -655,6 +655,13 @@ path and version, `unavailable_reason` when not found, and
 | `initial_prompt` (`RunAgentRequest.prompt` is used) | yes | yes | no |
 | `resume` | no | no | no |
 
+Adapters that offer a choice of model list `models` (`id`, `label`, and
+the `efforts` ids each runs at: none for a model without effort levels)
+and `efforts` (`id`, `label`, least first), for `RunAgentRequest.model`
+and `.effort`. Claude Code offers `opus`, `fable`, `sonnet` and `haiku` at
+`low` to `max` and `ultracode`; Codex the models of its own
+`models_cache.json`; the shell none.
+
 Detection results are cached by the daemon. No errors.
 
 **`ListRootsRequest` → `ListRootsResponse`**: configured roots, each with
@@ -763,6 +770,11 @@ Other fields:
   be unique among live agents (and not equal a live agent's id). Cleaned
   like device names (64 bytes max).
 - `prompt`: initial prompt, used when the adapter has `initial_prompt`.
+- `model`, `effort`: optional model and reasoning effort, ids from
+  `AdapterInfo.models` and `.efforts` (`model` may also be any name the
+  CLI takes, such as `claude-opus-5-5`). Empty leaves them to the CLI's own
+  settings. The adapter passes them on the command line (`--model` and
+  `--effort`, `-m` and `-c model_reasoning_effort=…`), after `extra_args`.
 - `extra_args`: appended to the agent CLI's command line, after the
   per-adapter `args` from `config.toml`.
 - `cols`, `rows`: initial terminal size, default 200x50, capped at 1000.
@@ -785,7 +797,8 @@ cannot mount `[sandbox] dir`; the clone failed); `INVALID_ARGUMENT` (no
 target, `clone_url` together with a folder or a non-`CLONE` isolation,
 unsupported `clone_url`, relative `absolute_path`, not a directory,
 `WORKTREE` outside a git repository, `CLONE` without `clone_url`, invalid
-name, unknown isolation or sandbox, worktree creation failed);
+name, unknown isolation or sandbox, worktree creation failed, a model or
+effort the adapter does not offer);
 `OUTSIDE_ROOTS`; `PERMISSION_DENIED` (adapter not allowed in that root);
 `ALREADY_EXISTS` (name taken);
 `INTERNAL` (tmux failed).
