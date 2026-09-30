@@ -32,8 +32,10 @@ signs every browser out.
 
 It also prints the command that joins other machines to this fleet
 (fleet start --join KEY): this dashboard can then add roots on them, and
-theirs on this one. The key stays in ~/.fleet/fleet-key; delete that file
-and run fleet web again for a new one (then join the other machines again).`,
+theirs on this one. Typed into "unlock" on any of their dashboards, the
+key gives that browser admin rights there, like the link. The key stays
+in ~/.fleet/fleet-key; delete that file and run fleet web again for a new
+one (then join the other machines again).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !client.IsLocal(host) {
@@ -101,6 +103,7 @@ func printWebLinks(out io.Writer, bind, port, tok string, rotated bool) {
 func printJoin(out io.Writer, key string) {
 	fmt.Fprintln(out, "\nTo manage other machines from this dashboard, start fleet on them with:")
 	fmt.Fprintf(out, "\n    %s\n", web.JoinCommand(key))
+	fmt.Fprintln(out, "\nThe key also unlocks the dashboard of every machine in the fleet (\"unlock\" in its header).")
 }
 
 // webHosts lists the hosts a browser can use to reach a dashboard bound to

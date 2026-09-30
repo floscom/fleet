@@ -12,7 +12,9 @@ package web
 // The token lives in a file (Options.TokenPath) and is read on every
 // admin request, so `fleet web --rotate` signs every browser out at once
 // without restarting the daemon. Other daemons holding the same fleet key
-// reach the same routes with signed requests (peers.go).
+// reach the same routes with signed requests (peers.go). Someone who knows
+// the token or the fleet key can also type it into the page, which trades
+// it for the token at POST /api/unlock.
 
 import (
 	"context"
@@ -138,10 +140,15 @@ func writeFileAtomic(path string, data []byte) error {
 // hasToken reports whether r carries the current admin token.
 func (s *Server) hasToken(r *http.Request) bool {
 	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if !ok || got == "" || s.opts.TokenPath == "" {
+	return ok && holds(s.opts.TokenPath, got)
+}
+
+// holds reports whether got is the non-empty secret stored at path.
+func holds(path, got string) bool {
+	if path == "" || got == "" {
 		return false
 	}
-	want, err := readToken(s.opts.TokenPath)
+	want, err := readToken(path)
 	if err != nil || want == "" {
 		return false
 	}
@@ -151,9 +158,9 @@ func (s *Server) hasToken(r *http.Request) bool {
 // ---------------------------------------------------------------------------
 // Routes
 
-// apiHandler routes /api/. /api/session and /api/nonce are open; the rest
-// needs the admin token, or a request signed with the fleet key (see
-// peers.go), which reaches this daemon's own routes only.
+// apiHandler routes /api/. /api/session, /api/nonce and /api/unlock are
+// open; the rest needs the admin token, or a request signed with the fleet
+// key (see peers.go), which reaches this daemon's own routes only.
 func (s *Server) apiHandler() http.Handler {
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /api/fs", s.apiListDir)
@@ -173,8 +180,12 @@ func (s *Server) apiHandler() http.Handler {
 	browser.Handle("/", admin)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if r.URL.Path == "/api/nonce" {
+		switch r.URL.Path {
+		case "/api/nonce":
 			s.apiNonce(w, r)
+			return
+		case "/api/unlock":
+			s.apiUnlock(w, r)
 			return
 		}
 		token := s.hasToken(r)
@@ -200,6 +211,39 @@ func (s *Server) apiHandler() http.Handler {
 			writeError(w, http.StatusUnauthorized, "admin token required: run `fleet web` on the server")
 		}
 	})
+}
+
+// apiUnlock trades a secret typed into the page for the admin token: the
+// token itself, or the fleet key. The fleet key is worth admin rights here
+// anyway, since it signs requests to this daemon (peers.go). Both are 256
+// random bits, so guessing through this open route is hopeless.
+func (s *Server) apiUnlock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if s.opts.TokenPath == "" {
+		writeError(w, http.StatusNotFound, "this fleet has no admin access")
+		return
+	}
+	var req struct {
+		Key string `json:"key"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	key := strings.TrimSpace(req.Key)
+	if !holds(s.opts.TokenPath, key) && !holds(s.opts.KeyPath, key) {
+		writeError(w, http.StatusForbidden, "that is neither this fleet's key nor its admin token")
+		return
+	}
+	tok, err := LoadOrCreateToken(s.opts.TokenPath)
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": tok})
 }
 
 func (s *Server) apiRoots(w http.ResponseWriter, r *http.Request) {

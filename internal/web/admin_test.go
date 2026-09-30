@@ -117,6 +117,60 @@ func TestAdminAuth(t *testing.T) {
 	}
 }
 
+func TestUnlock(t *testing.T) {
+	dir := t.TempDir()
+	tokPath, keyPath := filepath.Join(dir, "web-token"), filepath.Join(dir, "fleet-key")
+	ts := startServerOpts(t, Options{Source: newFakeSource(), TokenPath: tokPath, KeyPath: keyPath})
+	unlock := func(body string) (int, string) {
+		t.Helper()
+		var v struct{ Token, Error string }
+		code := api(t, ts, "POST", "/api/unlock", "", body, &v)
+		return code, v.Token
+	}
+
+	key := strings.Repeat("5b", 32)
+	// No key file yet: nothing unlocks.
+	if code, tok := unlock(`{"key":"` + key + `"}`); code != 403 || tok != "" {
+		t.Fatalf("unlock without key file: %d %q", code, tok)
+	}
+	must(t, SetToken(keyPath, key))
+
+	// The fleet key unlocks and creates the admin token.
+	code, tok := unlock(`{"key":" ` + key + `\n"}`)
+	if code != 200 || !ValidKey(tok) || tok == key {
+		t.Fatalf("unlock with fleet key: %d %q", code, tok)
+	}
+	if want, _ := readToken(tokPath); want != tok {
+		t.Fatalf("unlock gave %q, token file holds %q", tok, want)
+	}
+	var sess struct{ Admin bool }
+	if api(t, ts, "GET", "/api/session", tok, "", &sess); !sess.Admin {
+		t.Fatal("token from unlock is not admin")
+	}
+	// So does the admin token itself.
+	if code, again := unlock(`{"key":"` + tok + `"}`); code != 200 || again != tok {
+		t.Fatalf("unlock with admin token: %d %q", code, again)
+	}
+
+	for _, bad := range []string{`{"key":""}`, `{"key":"` + key[:63] + `"}`, `{"key":"` + strings.ToUpper(key) + `"}`, `{}`} {
+		if code, tok := unlock(bad); code != 403 || tok != "" {
+			t.Fatalf("unlock %s: %d %q", bad, code, tok)
+		}
+	}
+	if code, _ := unlock(`not json`); code != 400 {
+		t.Fatalf("unlock with bad JSON: %d", code)
+	}
+	if code := api(t, ts, "GET", "/api/unlock", "", "", nil); code != 405 {
+		t.Fatalf("GET /api/unlock: %d", code)
+	}
+
+	// A daemon without admin access has nothing to unlock.
+	off := startServerOpts(t, Options{Source: newFakeSource(), KeyPath: keyPath})
+	if code := api(t, off, "POST", "/api/unlock", "", `{"key":"`+key+`"}`, nil); code != 404 {
+		t.Fatalf("unlock without TokenPath: %d", code)
+	}
+}
+
 func TestAdminRoots(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "web-token")
 	tok, _ := LoadOrCreateToken(path)

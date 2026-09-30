@@ -1,8 +1,9 @@
 // fleet dashboard: live view fed by the daemon's /ws endpoint, plus root
 // management (a folder picker over /api/) and sessions (start an agent,
 // follow its chat, answer it, stop it) once this browser holds the admin
-// token that `fleet web` prints. With the token, agents of the other fleets
-// that share this fleet's key are listed and driven too (/api/hosts/).
+// token that `fleet web` prints (or was unlocked with the fleet key). With
+// the token, agents of the other fleets that share this fleet's key are
+// listed and driven too (/api/hosts/).
 //
 // Vanilla ES2020, no framework, no build step. The server only ever sends
 // on the socket; we never write to it. DOM is built with
@@ -700,10 +701,10 @@
   // ------------------------------------------------------------------ admin
   //
   // Changing the fleet needs the admin token that `fleet web` prints as a
-  // link (http://host:7421/#token=...). It is kept in localStorage, which is
-  // per origin (port included, unlike cookies), and sent as a Bearer header.
-  // The fragment never reaches the server and is removed from the address
-  // bar right away.
+  // link (http://host:7421/#token=...), or that the unlock dialog gets for
+  // the fleet key. It is kept in localStorage, which is per origin (port
+  // included, unlike cookies), and sent as a Bearer header. The fragment
+  // never reaches the server and is removed from the address bar right away.
 
   const TOKEN_KEY = 'fleet.adminToken';
   let memToken = ''; // fallback when storage is unavailable
@@ -785,6 +786,8 @@
       closeLaunch();
       closeChat();
       S.remote.clear();
+    } else {
+      closeUnlock();
     }
     renderAccess();
     invalidate('roots', 'agents');
@@ -796,7 +799,7 @@
     const had = admin;
     setToken('');
     setAdmin(false);
-    if (had) toast('admin access ended: run `fleet web` on the server for a new link', 'warn');
+    if (had) toast('admin access ended: unlock again with the fleet key, or run `fleet web` on the server', 'warn');
   }
 
   // checkSession asks whether our token is (still) valid. fromLink is set
@@ -821,7 +824,7 @@
     setAdmin(false);
     toast(fromLink
       ? 'this admin link is no longer valid: run `fleet web` again'
-      : 'the saved admin token is no longer valid: run `fleet web` for a new link', 'warn');
+      : 'the saved admin token is no longer valid: unlock again with the fleet key', 'warn');
   }
 
   function signOut() {
@@ -840,13 +843,93 @@
     } else {
       pill.className = 'inline-flex items-center gap-1.5 rounded-full border border-ink-600 bg-ink-850 px-2.5 py-1 text-xs font-medium text-zinc-500';
       pill.textContent = 'read-only';
-      pill.title = `To manage this fleet here, run "fleet web" on ${where} and open the link it prints.`;
+      pill.title = `To manage this fleet here, unlock it with the fleet key, or run "fleet web" on ${where} and open the link it prints.`;
     }
+    $('unlock-host').textContent = where;
+    $('unlock-open').hidden = admin;
     $('signout').hidden = !admin;
     $('roots-add').hidden = !admin;
     $('agents-new').hidden = !admin;
     $('roots-hint').hidden = admin;
     $('footer-mode').textContent = admin ? 'admin' : 'read-only view';
+  }
+
+  // ----------------------------------------------------------------- unlock
+  //
+  // Someone who knows the fleet key (or this machine's admin token) types
+  // it in instead of opening a `fleet web` link: POST /api/unlock trades
+  // either for the admin token, which is then kept like one from a link.
+
+  let unlockBusy = false;
+
+  function openUnlock() {
+    if (admin) return;
+    unlockBusy = false;
+    $('unlock-key').value = '';
+    renderUnlock('');
+    $('unlock').showModal();
+    if (!touch()) $('unlock-key').focus();
+  }
+
+  function closeUnlock() {
+    const d = $('unlock');
+    if (d.open) d.close();
+  }
+
+  function renderUnlock(error) {
+    const st = $('unlock-status');
+    st.className = error ? 'min-h-5 text-xs text-rose-300' : 'min-h-5 text-xs text-zinc-500';
+    st.textContent = error || (unlockBusy ? 'checking…' : '');
+    $('unlock-submit').disabled = unlockBusy;
+  }
+
+  async function submitUnlock(ev) {
+    ev.preventDefault();
+    if (unlockBusy) return;
+    // The bare key, also out of a pasted `fleet web` link or join command.
+    const m = /[0-9a-f]{64}/i.exec($('unlock-key').value);
+    if (!m) {
+      renderUnlock('a key is 64 hex digits, as printed by `fleet web`');
+      return;
+    }
+    unlockBusy = true;
+    renderUnlock('');
+    let r;
+    try {
+      r = await api('POST', '/api/unlock', { key: m[0].toLowerCase() });
+    } catch (e) {
+      unlockBusy = false;
+      renderUnlock(e.message);
+      return;
+    }
+    unlockBusy = false;
+    if (!r || !r.token) {
+      renderUnlock('the daemon sent no token');
+      return;
+    }
+    setToken(r.token);
+    setAdmin(true);
+    toast('this browser can now manage the fleet');
+  }
+
+  function wireUnlock() {
+    const dlg = $('unlock');
+    $('unlock-open').addEventListener('click', openUnlock);
+    $('roots-unlock').addEventListener('click', openUnlock);
+    $('unlock-form').addEventListener('submit', submitUnlock);
+    $('unlock-close').addEventListener('click', closeUnlock);
+    $('unlock-cancel').addEventListener('click', closeUnlock);
+    // The field holds a secret: gone once the dialog closes.
+    dlg.addEventListener('close', () => {
+      $('unlock-key').value = '';
+    });
+    let downOutside = false;
+    dlg.addEventListener('mousedown', (ev) => {
+      downOutside = ev.target === dlg;
+    });
+    dlg.addEventListener('click', (ev) => {
+      if (downOutside && ev.target === dlg && !unlockBusy) closeUnlock();
+    });
   }
 
   async function removeRoot(name) {
@@ -2505,6 +2588,7 @@
   // ------------------------------------------------------------------- boot
 
   linkToken = takeLinkToken();
+  wireUnlock();
   wirePicker();
   wireLaunch();
   wireChat();

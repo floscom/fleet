@@ -309,8 +309,11 @@ Admin links for the fleet dashboard on studio (open one once per browser):
     http://localhost:7421/#token=3f9c...
 ```
 
-Open one in the browser you manage the fleet from. That browser then
-shows **admin** in the header and can:
+Open one in the browser you manage the fleet from. Or click **unlock** in
+the dashboard's header and type (or paste) the fleet key from
+`fleet start --join KEY`, or the admin token from the link: the same key
+unlocks the dashboard of every machine in the fleet, no `fleet web` run
+there needed. That browser then shows **admin** in the header and can:
 
 - **Add folders as roots**: *Roots → Add folder* opens a folder picker
   over the server's file system. Walk into folders (click, or type to
@@ -328,8 +331,8 @@ shows **admin** in the header and can:
   dashboard. Pick one to browse its folders and add a root there (see
   [Several machines](#several-machines-one-dashboard)).
 - **Jump to other fleets**: every daemon under *Fleet on the network*
-  links to its own dashboard. Each fleet has its own admin token: run
-  `fleet web` there once as well.
+  links to its own dashboard. Each fleet has its own admin token: unlock
+  it there with the fleet key, or run `fleet web` there once as well.
 
 Changes apply at once, rewrite `config.toml` and show up in the CLI
 (`fleet roots`) and in every open dashboard.
@@ -341,7 +344,9 @@ Changes apply at once, rewrite `config.toml` and show up in the CLI
   so other sites cannot make your browser act for them.
   `fleet web --rotate` replaces it and every browser loses admin rights on
   its next request (no restart needed). *sign out* forgets it in one
-  browser.
+  browser. *unlock* sends the key typed into it to `POST /api/unlock`,
+  which answers with the admin token (creating it if `fleet web` never
+  ran) when the key is this machine's fleet key or admin token.
 - **Plain HTTP.** The token crosses the network in the clear on each admin
   request. Use it on a network you trust, over Tailscale/WireGuard, or keep
   the dashboard on the server (`web = "127.0.0.1:7421"`) and forward it:
@@ -508,7 +513,8 @@ What protects the daemon:
   same Unix user has full access without pairing.
 - **Web dashboard.** Anyone who can reach its port sees agents, paths,
   roots and devices. Everything else needs the admin token from `fleet
-  web` (see [Web dashboard](#web-dashboard)): changing roots, listing
+  web`, which *unlock* also hands out for the fleet key (see
+  [Web dashboard](#web-dashboard)): changing roots, listing
   folders, reading conversations and terminal screens, and starting,
   typing into and stopping agents. Like a paired device, the admin token
   is a shell on the server. Machines holding the same fleet key accept
@@ -558,7 +564,11 @@ Honest limits:
   anything the daemon's user can: start a shell agent, read conversations,
   add roots (with trust) and list every folder.
   Rotate it with `fleet web --rotate`, and bind the dashboard to
-  `127.0.0.1` on networks you do not trust. With a fleet key, that token
+  `127.0.0.1` on networks you do not trust. Unlocking a dashboard sends
+  the fleet key over the wire in the clear, once; unlike the token, a
+  captured fleet key can only be replaced by joining every machine again
+  (delete `~/.fleet/fleet-key`, `fleet web`, `fleet start --join` on the
+  others). With a fleet key, that token
   reaches every machine in the fleet through this dashboard. The requests
   between daemons are signed but also plain HTTP, so folder listings,
   conversations and what you type can be read on the wire.
