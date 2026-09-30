@@ -39,6 +39,5 @@ const (
 	codeDenied      = fleetv1.ErrorCode_ERROR_CODE_PERMISSION_DENIED
 	codeOutside     = fleetv1.ErrorCode_ERROR_CODE_OUTSIDE_ROOTS
 	codeUnavailable = fleetv1.ErrorCode_ERROR_CODE_ADAPTER_UNAVAILABLE
-	codeBusy        = fleetv1.ErrorCode_ERROR_CODE_DIRECTORY_BUSY
 	codePairing     = fleetv1.ErrorCode_ERROR_CODE_PAIRING_FAILED
 )

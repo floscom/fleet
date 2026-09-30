@@ -106,8 +106,6 @@ func webError(err error) error {
 		return &web.Error{Status: http.StatusBadRequest, Msg: msg}
 	case codeDenied:
 		return &web.Error{Status: http.StatusForbidden, Msg: msg}
-	case codeBusy:
-		return &web.Error{Status: http.StatusConflict, Msg: msg}
 	case codeUnavailable:
 		return &web.Error{Status: http.StatusServiceUnavailable, Msg: msg}
 	}

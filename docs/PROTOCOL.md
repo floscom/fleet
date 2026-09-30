@@ -626,7 +626,7 @@ Errors marked *(any)* can come from almost every request:
 | `PERMISSION_DENIED` (6) | adapter not allowed in that root; input to a read-only terminal (not reported, see section 10) |
 | `OUTSIDE_ROOTS` (7) | path outside every root, or escaping its root (`..`, symlinks) |
 | `ADAPTER_UNAVAILABLE` (8) | the agent CLI is not installed, or the adapter could not build its command |
-| `DIRECTORY_BUSY` (9) | another live pinned agent runs in that directory |
+| `DIRECTORY_BUSY` (9) | reserved; no longer sent (several agents may be pinned to one directory) |
 | `PAIRING_FAILED` (10) | pairing code wrong, expired or used up |
 | `UNSUPPORTED_PROTOCOL` (11) | reserved; not sent by v1 daemons |
 
@@ -724,8 +724,8 @@ Isolation:
 - `ISOLATION_UNSPECIFIED`: `WORKTREE` if the directory is inside a git
   repository and `default_isolation` in `config.toml` is not `"pinned"`,
   otherwise `PINNED`.
-- `ISOLATION_PINNED`: run directly in the directory. Only one live pinned
-  agent per directory.
+- `ISOLATION_PINNED`: run directly in the directory. Several agents may be
+  pinned to the same directory; they share its files.
 - `ISOLATION_WORKTREE`: the daemon creates a git worktree of the repository
   under `$FLEET_HOME/worktrees/<repo>-<hash>/<name>` on a new branch
   (`branch`, default `fleet/<name>`) and runs the agent in the same
@@ -787,7 +787,7 @@ unsupported `clone_url`, relative `absolute_path`, not a directory,
 `WORKTREE` outside a git repository, `CLONE` without `clone_url`, invalid
 name, unknown isolation or sandbox, worktree creation failed);
 `OUTSIDE_ROOTS`; `PERMISSION_DENIED` (adapter not allowed in that root);
-`ALREADY_EXISTS` (name taken); `DIRECTORY_BUSY` (another pinned agent);
+`ALREADY_EXISTS` (name taken);
 `INTERNAL` (tmux failed).
 
 **`KillAgentRequest{agent, remove_worktree, force, forget}` → `KillAgentResponse{agent, worktree_kept, worktree_kept_reason}`**

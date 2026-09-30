@@ -140,7 +140,8 @@ Inside a git repository an agent gets its own **worktree** by default: a
 new branch `fleet/<name>` checked out under
 `~/.fleet/worktrees/<repo>-<hash>/<name>`, so several agents can work on
 the same repo without stepping on each other. `--pinned` runs the agent
-directly in the folder instead; only one pinned agent may run per folder.
+directly in the folder instead; several pinned agents may share a folder
+(and its files).
 Outside git, agents are always pinned. `fleet kill --rm-worktree` removes
 the worktree (the branch is kept) unless it has uncommitted changes.
 

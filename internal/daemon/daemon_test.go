@@ -114,11 +114,17 @@ func TestRunValidation(t *testing.T) {
 	}
 }
 
-func TestPinnedBusyAndKill(t *testing.T) {
+func TestPinnedSharedAndKill(t *testing.T) {
 	e := newEnv(t)
 	c := e.dialUnix()
 	a := c.run(&fleetv1.RunAgentRequest{Root: "code", Name: "api-fix"})
-	c.fails(runReq(&fleetv1.RunAgentRequest{AbsolutePath: e.root}), codeBusy)
+	// Several agents may be pinned to one folder.
+	shared := c.run(&fleetv1.RunAgentRequest{AbsolutePath: e.root})
+	if shared.GetIsolation() != isoPinned || a.GetIsolation() != isoPinned ||
+		shared.GetCwd() != a.GetCwd() || shared.GetName() == a.GetName() {
+		t.Fatalf("second pinned agent: %v, first: %v", shared, a)
+	}
+	c.ok(killReq(&fleetv1.KillAgentRequest{Agent: shared.GetId(), Forget: true}))
 	e.mkdir("other")
 	c.fails(runReq(&fleetv1.RunAgentRequest{Root: "code", Path: "other", Name: "api-fix"}), codeExists)
 
@@ -145,7 +151,7 @@ func TestPinnedBusyAndKill(t *testing.T) {
 	}
 	c.fails(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_SendText{SendText: &fleetv1.SendTextRequest{Agent: a.GetId(), Text: "x"}}}, codeInvalid)
 
-	// The directory is free again; the old agent stays in history until forgotten.
+	// The name is free again; the old agent stays in history until forgotten.
 	b := c.run(&fleetv1.RunAgentRequest{Root: "code", Name: "api-fix"})
 	c.ok(killReq(&fleetv1.KillAgentRequest{Agent: b.GetId(), Forget: true}))
 	if c.agent(b.GetId()) != nil {

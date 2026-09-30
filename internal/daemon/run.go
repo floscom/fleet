@@ -146,10 +146,6 @@ func (m *manager) run(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleet
 			m.mu.Unlock()
 			return nil, errf(codeExists, "an agent named %q is already running", name)
 		}
-		if iso == isoPinned && o.Isolation == isoPinned && o.Cwd == dir {
-			m.mu.Unlock()
-			return nil, errf(codeBusy, "agent %q is already pinned to %s", o.Name, dir)
-		}
 	}
 	if name == "" {
 		base := dir

@@ -104,7 +104,7 @@ const (
 	ErrorCode_ERROR_CODE_OUTSIDE_ROOTS ErrorCode = 7
 	// The adapter's CLI is not installed / not found.
 	ErrorCode_ERROR_CODE_ADAPTER_UNAVAILABLE ErrorCode = 8
-	// Another agent is pinned to that directory.
+	// Reserved; no longer sent (several agents may be pinned to one directory).
 	ErrorCode_ERROR_CODE_DIRECTORY_BUSY ErrorCode = 9
 	// Pairing code wrong, expired or exhausted.
 	ErrorCode_ERROR_CODE_PAIRING_FAILED       ErrorCode = 10
@@ -247,8 +247,8 @@ const (
 	// Daemon default: WORKTREE if the directory is inside a git repository,
 	// otherwise PINNED.
 	Isolation_ISOLATION_UNSPECIFIED Isolation = 0
-	// Agent runs directly in the directory. At most one live pinned agent per
-	// directory.
+	// Agent runs directly in the directory. Several agents may be pinned to the
+	// same directory; they share its files.
 	Isolation_ISOLATION_PINNED Isolation = 1
 	// Daemon creates a git worktree on a new branch and runs the agent there.
 	Isolation_ISOLATION_WORKTREE Isolation = 2
