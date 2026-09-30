@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -230,6 +232,49 @@ func TestStaticAndHeaders(t *testing.T) {
 	}
 	if code := rawGet(t, ts, "/app.css"); code != 200 {
 		t.Fatalf("app.css: %d, want 200", code)
+	}
+}
+
+// TestIcons checks that every icon the page and the manifest name is served
+// as an image.
+func TestIcons(t *testing.T) {
+	ts := startServer(t, newFakeSource())
+	get := func(path string) (*http.Response, []byte) {
+		t.Helper()
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil || resp.StatusCode != 200 {
+			t.Fatalf("%s: %d %v", path, resp.StatusCode, err)
+		}
+		return resp, body
+	}
+	_, index := get("/")
+	var paths []string
+	for _, m := range regexp.MustCompile(`<link rel="(?:icon|apple-touch-icon)" href="([^"]+)"`).FindAllSubmatch(index, -1) {
+		paths = append(paths, string(m[1]))
+	}
+	resp, body := get("/manifest.webmanifest")
+	if ct := resp.Header.Get("Content-Type"); ct != "application/manifest+json" {
+		t.Fatalf("manifest Content-Type = %q", ct)
+	}
+	var manifest struct{ Icons []struct{ Src string } }
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, icon := range manifest.Icons {
+		paths = append(paths, icon.Src)
+	}
+	if len(paths) < 6 {
+		t.Fatalf("icons: %v", paths)
+	}
+	for _, p := range paths {
+		if resp, _ := get(p); !strings.HasPrefix(resp.Header.Get("Content-Type"), "image/") {
+			t.Fatalf("%s: Content-Type %q", p, resp.Header.Get("Content-Type"))
+		}
 	}
 }
 

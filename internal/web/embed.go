@@ -3,7 +3,10 @@ package web
 import (
 	"embed"
 	"io/fs"
+	"mime"
 )
+
+//go:generate go run gen_icons.go
 
 //go:embed static
 var embedded embed.FS
@@ -15,6 +18,9 @@ var staticRoot, _ = fs.Sub(embedded, "static")
 // source). Hiding it at the fs level covers every spelling of the path,
 // since http.FileServer opens the cleaned name.
 var staticFS fs.FS = servedFS{staticRoot}
+
+// Not in Go's built-in table; system tables vary.
+func init() { mime.AddExtensionType(".webmanifest", "application/manifest+json") }
 
 type servedFS struct{ fs.FS }
 

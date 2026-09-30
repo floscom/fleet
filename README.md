@@ -364,6 +364,9 @@ Changes apply at once, rewrite `config.toml` and show up in the CLI
 - Everything is embedded in the binary. The compiled Tailwind CSS
   (`internal/web/static/app.css`) is committed, so `make build` needs no
   Tailwind; `make web` rebuilds it after UI changes.
+- The favicon and the home-screen / install icons (with a web app
+  manifest) are drawn from one pixel map in `internal/web/gen_icons.go`;
+  `make icons` redraws them, and the results are committed too.
 
 ### Sessions in the browser
 

@@ -6,7 +6,7 @@ BUF     := PATH=$(HOME)/go/bin:$$PATH buf
 
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
 
-.PHONY: all build test proto lint vet fmt cross clean tailwind web web-watch $(PLATFORMS)
+.PHONY: all build test proto lint vet fmt cross clean tailwind web web-watch icons $(PLATFORMS)
 
 # Tailwind v4 standalone CLI (no node_modules). app.css is committed, so
 # `make build` never needs it; run `make web` after editing the frontend.
@@ -59,6 +59,10 @@ web: $(TAILWIND)
 
 web-watch: $(TAILWIND)
 	$(TAILWIND) -i $(WEB_STATIC)/input.css -o $(WEB_STATIC)/app.css --minify --watch
+
+# Favicon and app icons, drawn by internal/web/gen_icons.go (committed).
+icons:
+	$(GO) generate ./internal/web
 
 clean:
 	rm -rf bin
