@@ -147,9 +147,16 @@ func TestUnlock(t *testing.T) {
 	if api(t, ts, "GET", "/api/session", tok, "", &sess); !sess.Admin {
 		t.Fatal("token from unlock is not admin")
 	}
-	// So does the admin token itself.
+	// So does the admin token itself, also one set by hand.
 	if code, again := unlock(`{"key":"` + tok + `"}`); code != 200 || again != tok {
 		t.Fatalf("unlock with admin token: %d %q", code, again)
+	}
+	must(t, os.WriteFile(tokPath, []byte("Ab3\n"), 0o600))
+	if code, again := unlock(`{"key":"Ab3"}`); code != 200 || again != "Ab3" {
+		t.Fatalf("unlock with a short admin token: %d %q", code, again)
+	}
+	if code, _ := unlock(`{"key":"ab3"}`); code != 403 {
+		t.Fatalf("unlock with a short token in the wrong case: %d", code)
 	}
 
 	for _, bad := range []string{`{"key":""}`, `{"key":"` + key[:63] + `"}`, `{"key":"` + strings.ToUpper(key) + `"}`, `{}`} {

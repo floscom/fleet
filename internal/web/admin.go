@@ -215,8 +215,8 @@ func (s *Server) apiHandler() http.Handler {
 
 // apiUnlock trades a secret typed into the page for the admin token: the
 // token itself, or the fleet key. The fleet key is worth admin rights here
-// anyway, since it signs requests to this daemon (peers.go). Both are 256
-// random bits, so guessing through this open route is hopeless.
+// anyway, since it signs requests to this daemon (peers.go). Guessing the
+// token here is no easier than with a Bearer header on /api/session.
 func (s *Server) apiUnlock(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")

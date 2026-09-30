@@ -883,20 +883,27 @@
     $('unlock-submit').disabled = unlockBusy;
   }
 
+  // unlockKey is the key in what was typed or pasted: bare, or out of a
+  // `fleet web` link (#token=...) or join command (--join ...). Any length:
+  // an admin token set by hand may be short.
+  function unlockKey(text) {
+    const m = /(?:#token=|--join\s+)([0-9A-Za-z]+)/.exec(text);
+    return m ? m[1] : text.trim();
+  }
+
   async function submitUnlock(ev) {
     ev.preventDefault();
     if (unlockBusy) return;
-    // The bare key, also out of a pasted `fleet web` link or join command.
-    const m = /[0-9a-f]{64}/i.exec($('unlock-key').value);
-    if (!m) {
-      renderUnlock('a key is 64 hex digits, as printed by `fleet web`');
+    const key = unlockKey($('unlock-key').value);
+    if (!key) {
+      renderUnlock('enter the fleet key or the admin token');
       return;
     }
     unlockBusy = true;
     renderUnlock('');
     let r;
     try {
-      r = await api('POST', '/api/unlock', { key: m[0].toLowerCase() });
+      r = await api('POST', '/api/unlock', { key });
     } catch (e) {
       unlockBusy = false;
       renderUnlock(e.message);
