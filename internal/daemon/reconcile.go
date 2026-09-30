@@ -26,6 +26,10 @@ const (
 	// promptWatch is how long after starting a RUNNING agent's screen is
 	// checked for dialogs no hook reports (adapter.PromptDetector).
 	promptWatch = 2 * time.Minute
+	// dialogGoneAfter is how many screens in a row must show no dialog
+	// before the dialogs hooks reported count as closed. One is not enough:
+	// a hook arrives just before its dialog is drawn.
+	dialogGoneAfter = 2
 )
 
 // loop reconciles the registry with tmux until ctx is cancelled.
@@ -221,10 +225,15 @@ func (m *manager) reconcile(ctx context.Context) {
 // showing such a dialog, until it goes away. While the adapter recognizes a
 // dialog the agent is NEEDS_INPUT; afterwards it is RUNNING until hooks
 // report more.
+//
+// It also checks that the dialogs hooks reported are still on screen: some
+// close without a hook (a refused permission fires none). Once the screen
+// shows no dialog dialogGoneAfter times in a row, they are dropped.
 func (m *manager) watchPrompts(ctx context.Context, bySession map[string]tmux.PaneStatus, snap uint64) {
 	type watch struct {
-		a   *agentRec
-		det adapter.PromptDetector
+		a      *agentRec
+		prompt adapter.PromptDetector // nil: no startup dialog to look for
+		dialog adapter.DialogDetector // nil: no hook dialogs to check
 	}
 	var ws []watch
 	now := time.Now()
@@ -233,16 +242,20 @@ func (m *manager) watchPrompts(ctx context.Context, bySession map[string]tmux.Pa
 		if !a.live() || a.busy || a.readyGen > snap {
 			continue
 		}
-		starting := a.State == stateRunning && now.Sub(time.UnixMilli(a.StartedAtMs)) < promptWatch
-		if !starting && !a.ScreenPrompt {
-			continue
-		}
 		if p, ok := bySession[a.TmuxSession]; !ok || p.Dead {
 			continue
 		}
 		ad, _ := m.d.opts.Adapters.Get(a.Adapter)
-		if det, ok := ad.(adapter.PromptDetector); ok {
-			ws = append(ws, watch{a, det})
+		w := watch{a: a}
+		starting := a.State == stateRunning && now.Sub(time.UnixMilli(a.StartedAtMs)) < promptWatch
+		if det, ok := ad.(adapter.PromptDetector); ok && (starting || a.ScreenPrompt) {
+			w.prompt = det
+		}
+		if det, ok := ad.(adapter.DialogDetector); ok && len(a.Dialogs) > 0 {
+			w.dialog = det
+		}
+		if w.prompt != nil || w.dialog != nil {
+			ws = append(ws, w)
 		}
 	}
 	m.mu.Unlock()
@@ -254,21 +267,51 @@ func (m *manager) watchPrompts(ctx context.Context, bySession map[string]tmux.Pa
 		if err != nil {
 			continue
 		}
-		detail, found := w.det.DetectPrompt(screen)
 		m.mu.Lock()
 		a := w.a
-		switch {
-		case !a.live() || a.busy:
-		case found && (a.State == stateRunning || a.ScreenPrompt):
-			if a.State != stateNeedsInput || a.StateDetail != detail || !a.ScreenPrompt {
-				a.State, a.StateDetail, a.ScreenPrompt = stateNeedsInput, detail, true
-				m.changedLocked(a)
+		if a.live() && !a.busy {
+			if w.prompt != nil {
+				m.screenPromptLocked(a, w.prompt, screen)
 			}
-		case !found && a.ScreenPrompt:
-			a.State, a.StateDetail, a.ScreenPrompt = stateRunning, "", false
-			m.changedLocked(a)
+			if w.dialog != nil {
+				m.dialogsOnScreenLocked(a, w.dialog.DialogOpen(screen))
+			}
 		}
 		m.mu.Unlock()
+	}
+}
+
+// screenPromptLocked applies a startup dialog seen, or no longer seen, on
+// the agent's screen.
+func (m *manager) screenPromptLocked(a *agentRec, det adapter.PromptDetector, screen string) {
+	detail, found := det.DetectPrompt(screen)
+	switch {
+	case found && (a.State == stateRunning || a.ScreenPrompt):
+		if a.State != stateNeedsInput || a.StateDetail != detail || !a.ScreenPrompt {
+			a.State, a.StateDetail, a.ScreenPrompt = stateNeedsInput, detail, true
+			m.changedLocked(a)
+		}
+	case !found && a.ScreenPrompt:
+		a.State, a.StateDetail, a.ScreenPrompt = stateRunning, "", false
+		m.changedLocked(a)
+	}
+}
+
+// dialogsOnScreenLocked drops the agent's hook dialogs once its screen has
+// shown no dialog dialogGoneAfter times in a row.
+func (m *manager) dialogsOnScreenLocked(a *agentRec, open bool) {
+	if open || len(a.Dialogs) == 0 {
+		a.dialogGone = 0
+		return
+	}
+	if a.dialogGone++; a.dialogGone < dialogGoneAfter {
+		return
+	}
+	a.Dialogs, a.dialogGone = nil, 0
+	if a.showDialogs() {
+		m.changedLocked(a)
+	} else {
+		m.saveLocked()
 	}
 }
 

@@ -19,6 +19,7 @@ var HookEvents = []string{
 	"Notification",       // permission / idle / question notifications
 	"Stop",               // turn finished
 	"StopFailure",        // turn ended by an API error
+	"SubagentStop",       // a subagent finished: its dialogs are gone
 }
 
 // hookTimeout (seconds) bounds a `fleet hook` run; the default is 60.

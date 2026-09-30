@@ -195,13 +195,17 @@ func TestHandleHook(t *testing.T) {
 		{"Notification", `{"session_id":"` + sid + `","hook_event_name":"Notification","message":"Claude is waiting for your input","notification_type":"idle_prompt"}`,
 			true, fleetv1.AgentState_AGENT_STATE_IDLE, "", sid},
 		{"Notification", `{"session_id":"` + sid + `","hook_event_name":"Notification","message":"Claude needs your permission to use Bash","notification_type":"permission_prompt"}`,
-			true, fleetv1.AgentState_AGENT_STATE_NEEDS_INPUT, "Claude needs your permission to use Bash", sid},
+			false, 0, "", ""},
+		{"Notification", `{"hook_event_name":"Notification","message":"Claude needs your permission to use Bash"}`,
+			true, fleetv1.AgentState_AGENT_STATE_NEEDS_INPUT, "Claude needs your permission to use Bash", ""},
 		{"Notification", `{"hook_event_name":"Notification","message":"Claude is waiting for your input"}`,
 			true, fleetv1.AgentState_AGENT_STATE_IDLE, "", ""},
 		{"Notification", `{"message":"Signed in","notification_type":"auth_success"}`, false, 0, "", ""},
 		{"Notification", `{"message":"done","notification_type":"elicitation_complete"}`, false, 0, "", ""},
 		{"PermissionRequest", `{"session_id":"` + sid + `","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"npm test","description":"Run tests"}}`,
 			true, fleetv1.AgentState_AGENT_STATE_NEEDS_INPUT, "Bash: npm test", sid},
+		{"PermissionRequest", `{"session_id":"` + sid + `","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which color do you prefer?","header":"Color","multiSelect":false,"options":[{"label":"Red"},{"label":"Blue"}]}]}}`,
+			true, fleetv1.AgentState_AGENT_STATE_NEEDS_INPUT, "Claude asks: Which color do you prefer?", sid},
 		{"PostToolUse", `{"session_id":"` + sid + `","tool_name":"Bash","tool_input":{},"tool_response":{}}`,
 			true, fleetv1.AgentState_AGENT_STATE_WORKING, "", sid},
 		{"PostToolUseFailure", `{"session_id":"` + sid + `","hook_event_name":"PostToolUseFailure","tool_name":"Bash","error":"Interrupted","is_interrupt":true}`,
@@ -217,6 +221,9 @@ func TestHandleHook(t *testing.T) {
 		{"StopFailure", `{"error":{"type":"overloaded"}}`,
 			true, fleetv1.AgentState_AGENT_STATE_IDLE, "turn ended with an API error", ""},
 		{"Stop", ``, true, fleetv1.AgentState_AGENT_STATE_IDLE, "", ""},
+		{"SubagentStop", `{"session_id":"` + sid + `","hook_event_name":"SubagentStop","agent_id":"a98756a7d8eaf74a5","agent_type":"general-purpose","stop_hook_active":false}`,
+			true, fleetv1.AgentState_AGENT_STATE_WORKING, "", sid},
+		{"SubagentStop", `{"session_id":"` + sid + `","hook_event_name":"SubagentStop"}`, false, 0, "", ""},
 		{"SessionEnd", `{}`, false, 0, "", ""},
 	}
 	a := New("", nil)
@@ -229,6 +236,162 @@ func TestHandleHook(t *testing.T) {
 		if ok && (u.State != tt.state || u.Detail != tt.detail || u.SessionID != tt.sid) {
 			t.Errorf("%s %s: %+v, want state %v detail %q sid %q", tt.event, tt.payload, u, tt.state, tt.detail, tt.sid)
 		}
+	}
+}
+
+func TestHandleHookSubagent(t *testing.T) {
+	a := New("", nil)
+	// Captured from a background general-purpose subagent (2.1.280).
+	for _, ev := range []string{"PreToolUse", "PostToolUse", "PermissionRequest", "SubagentStop"} {
+		u, ok := a.HandleHook(adapter.HookEvent{Event: ev, Payload: []byte(`{"session_id":"s","hook_event_name":"` + ev + `","agent_id":"a98756a7d8eaf74a5","agent_type":"general-purpose","tool_name":"Bash","tool_input":{"command":"ls /"}}`)})
+		if !ok || u.Subagent != "a98756a7d8eaf74a5" {
+			t.Errorf("%s: ok %v, Subagent %q", ev, ok, u.Subagent)
+		}
+	}
+	if u, _ := a.HandleHook(adapter.HookEvent{Event: "PostToolUse", Payload: []byte(`{"session_id":"s","tool_name":"Bash"}`)}); u.Subagent != "" {
+		t.Errorf("the agent itself: Subagent %q", u.Subagent)
+	}
+}
+
+func TestHandleHookCall(t *testing.T) {
+	a := New("", nil)
+	call := func(event, payload string) string {
+		t.Helper()
+		u, ok := a.HandleHook(adapter.HookEvent{Event: event, Payload: []byte(payload)})
+		if !ok {
+			t.Fatalf("%s ignored", event)
+		}
+		return u.Call
+	}
+	// Every event of a call names it alike, although PermissionRequest has
+	// no tool_use_id and PostToolUse adds the answers to AskUserQuestion.
+	const q = `"tool_name":"AskUserQuestion","tool_input":{"questions":[{"question":"Which color?","options":[{"label":"Red"}]}]`
+	ask := call("PermissionRequest", `{`+q+`}}`)
+	answered := call("PostToolUse", `{"tool_use_id":"toolu_1",`+q+`,"answers":{"Which color?":"Red"}}}`)
+	if ask != "Claude asks: Which color?" || answered != ask {
+		t.Errorf("AskUserQuestion: %q, then %q", ask, answered)
+	}
+	const bash = `"tool_name":"Bash","tool_input":{"command":"touch x","description":"Create x"}`
+	for _, ev := range []string{"PreToolUse", "PermissionRequest", "PostToolUse", "PostToolUseFailure", "PermissionDenied"} {
+		if got := call(ev, `{`+bash+`}`); got != "Bash: touch x" {
+			t.Errorf("%s: Call %q", ev, got)
+		}
+	}
+	// An interrupt ends the turn, not one call.
+	if got := call("PostToolUseFailure", `{`+bash+`,"is_interrupt":true}`); got != "" {
+		t.Errorf("interrupt: Call %q", got)
+	}
+	for _, ev := range []string{"UserPromptSubmit", "Stop", "SessionStart"} {
+		if got := call(ev, `{}`); got != "" {
+			t.Errorf("%s: Call %q", ev, got)
+		}
+	}
+}
+
+// Screens of Claude Code 2.1.280, as tmux captures them (rows trimmed).
+const (
+	questionScreen = `● 2 background agents launched (↓ to manage)
+   ├ Agent (Research InternetX AutoDNS JSON API)
+   └ Explore (Extract agent-first CLI conventions)
+────────────────────────────────────────────────
+←  ☒ Name  ☐ Scope  ☐ Creds  ✔ Submit  →
+
+Which API areas should v1 cover?
+
+❯ 1. [ ] Domains
+         list/search/info, availability check, create/renew/transfer/cancel
+  2. [ ] DNS zones
+         list/info, add/remove/replace records
+  5. [ ] Type something
+     Next
+────────────────────────────────────────────────
+  6. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+› Message from @a056a0c8c7f5dcc58 (ctrl+o to expand)
+› Message from @a36c4450424aa863f (ctrl+o to expand)
+`
+	permissionScreen = `❯ Run 'touch /tmp/hookexp/x.txt'.
+  Creating empty file x.txt
+  ⎿  $ touch /tmp/hookexp/x.txt
+────────────────────────────────────────────────
+ Bash command
+   touch /tmp/hookexp/x.txt
+   Create empty file x.txt
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to /tmp/hookexp from this project
+   3. No
+ Esc to cancel · Tab to amend
+`
+	promptScreen = `● Asked: "Press Esc to cancel · Enter to confirm"? Sure.
+  Ran 2 shell commands
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Cogitated for 5s · done 4:24 AM
+
+────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────
+  ⏸ manual mode on · ← for agents
+`
+	waitingScreen = `● Explaining the footer "Esc to cancel · Tab to amend".
+  line 1
+  line 2
+  line 3
+  line 4
+  line 5
+  line 6
+  line 7
+  line 8
+· Stewing… (esc to interrupt)
+────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────
+  Usage limit reached · continuing shortly · esc to cancel
+`
+)
+
+func TestDialogOpen(t *testing.T) {
+	a := New("", nil).(adapter.DialogDetector)
+	for name, tc := range map[string]struct {
+		screen string
+		want   bool
+	}{
+		"question":   {questionScreen, true},
+		"permission": {permissionScreen, true},
+		"prompt":     {promptScreen, false},
+		"working":    {waitingScreen, false},
+		"trust":      {"❯ 1. Yes, I trust this folder\n  2. No, exit\n\n Enter to confirm · Esc to cancel", true},
+		"empty":      {"", false},
+	} {
+		if got := a.DialogOpen(tc.screen); got != tc.want {
+			t.Errorf("%s: DialogOpen = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
+func TestHandleHookTranscript(t *testing.T) {
+	const path = "/home/u/.claude/projects/-work/3f1c2a4e-7b5d-4e8a-9c1f-2d3e4f5a6b7c.jsonl"
+	a := New("", nil)
+	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "PermissionRequest", "Notification", "Stop", "StopFailure"} {
+		u, ok := a.HandleHook(adapter.HookEvent{Event: ev, Payload: []byte(`{"session_id":"s","transcript_path":"` + path + `","tool_name":"Bash"}`)})
+		if !ok || u.Transcript != path {
+			t.Errorf("%s: ok %v, Transcript %q", ev, ok, u.Transcript)
+		}
+	}
+	if u, _ := a.HandleHook(adapter.HookEvent{Event: "Stop", Payload: []byte(`{"session_id":"s"}`)}); u.Transcript != "" {
+		t.Errorf("no transcript_path: Transcript %q", u.Transcript)
 	}
 }
 

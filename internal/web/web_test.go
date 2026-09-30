@@ -22,6 +22,8 @@ import (
 
 // fakeSource feeds the hub from a channel the test writes to.
 type fakeSource struct {
+	// id is the server id, default "self-id".
+	id     string
 	events chan *fleetv1.Event
 	mu     sync.Mutex
 	devs   []Device
@@ -29,6 +31,22 @@ type fakeSource struct {
 	// addErr and removeErr are returned by AddRoot and RemoveRoot.
 	addErr, removeErr error
 	removed           []string
+
+	// Agents: runs, stops and inputs received; chat is what Chat returns
+	// (Agent filled in from agent).
+	agent  *fleetv1.Agent
+	runs   []*fleetv1.RunAgentRequest
+	stops  []*fleetv1.KillAgentRequest
+	inputs []fakeInput
+	// dialog makes SendInput report Enter held back, as for an open dialog.
+	dialog bool
+	chat   Chat
+}
+
+type fakeInput struct {
+	agent, text string
+	submit      bool
+	keys        []string
 }
 
 func newFakeSource(agents ...*fleetv1.Agent) *fakeSource {
@@ -41,7 +59,11 @@ func newFakeSource(agents ...*fleetv1.Agent) *fakeSource {
 }
 
 func (s *fakeSource) Info() Info {
-	return Info{ID: "self-id", Name: "studio", Version: "v0.3.0", Hostname: "studio", OS: "linux", Arch: "amd64", Listen: "0.0.0.0:7420", MDNS: true}
+	id := s.id
+	if id == "" {
+		id = "self-id"
+	}
+	return Info{ID: id, Name: "studio", Version: "v0.3.0", Hostname: "studio", OS: "linux", Arch: "amd64", Listen: "0.0.0.0:7420", MDNS: true}
 }
 
 func (s *fakeSource) SubscribeAgents() (<-chan *fleetv1.Event, func()) {
@@ -79,6 +101,60 @@ func (s *fakeSource) Adapters(context.Context) []Adapter {
 	return []Adapter{{ID: "claude", Name: "Claude Code", Available: true}}
 }
 
+func (s *fakeSource) Agents() []*fleetv1.Agent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.agent == nil {
+		return nil
+	}
+	return []*fleetv1.Agent{s.agent}
+}
+
+func (s *fakeSource) RunAgent(_ context.Context, req *fleetv1.RunAgentRequest) (*fleetv1.Agent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if req.Root != "code" {
+		return nil, &Error{Status: 404, Msg: "unknown root " + req.Root}
+	}
+	s.runs = append(s.runs, req)
+	return &fleetv1.Agent{Id: "a1", Name: "claude-api-1", Adapter: req.Adapter, State: fleetv1.AgentState_AGENT_STATE_STARTING}, nil
+}
+
+func (s *fakeSource) StopAgent(_ context.Context, req *fleetv1.KillAgentRequest) (*fleetv1.KillAgentResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stops = append(s.stops, req)
+	return &fleetv1.KillAgentResponse{Agent: &fleetv1.Agent{Id: req.Agent, State: fleetv1.AgentState_AGENT_STATE_EXITED}}, nil
+}
+
+func (s *fakeSource) SendInput(_ context.Context, agent, text string, submit bool, keys []string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if agent != "a1" {
+		return false, &Error{Status: 404, Msg: "no agent " + agent}
+	}
+	s.inputs = append(s.inputs, fakeInput{agent, text, submit, keys})
+	return s.dialog && submit && text != "", nil
+}
+
+func (s *fakeSource) Screen(_ context.Context, agent string) (string, error) {
+	if agent != "a1" {
+		return "", &Error{Status: 404, Msg: "no agent " + agent}
+	}
+	return "> hello\n\n", nil
+}
+
+func (s *fakeSource) Chat(agent string) (Chat, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.agent == nil || agent != s.agent.Id {
+		return Chat{}, &Error{Status: 404, Msg: "no agent " + agent}
+	}
+	c := s.chat
+	c.Agent = s.agent
+	return c, nil
+}
+
 // startServer runs a Server on an httptest listener until the test ends.
 func startServer(t *testing.T, src Source) *httptest.Server {
 	return startServerToken(t, src, "")
@@ -87,8 +163,7 @@ func startServer(t *testing.T, src Source) *httptest.Server {
 // startServerToken is startServer with the admin token file at tokenPath.
 func startServerToken(t *testing.T, src Source, tokenPath string) *httptest.Server {
 	t.Helper()
-	s, err := New(Options{
-		Addr:      "127.0.0.1:0",
+	return startServerOpts(t, Options{
 		Source:    src,
 		TokenPath: tokenPath,
 		Browse: func(ctx context.Context, _ time.Duration) ([]discovery.Found, error) {
@@ -98,6 +173,13 @@ func startServerToken(t *testing.T, src Source, tokenPath string) *httptest.Serv
 			}, nil
 		},
 	})
+}
+
+// startServerOpts runs a Server with opts (Addr is filled in).
+func startServerOpts(t *testing.T, opts Options) *httptest.Server {
+	t.Helper()
+	opts.Addr = "127.0.0.1:0"
+	s, err := New(opts)
 	if err != nil {
 		t.Fatal(err)
 	}

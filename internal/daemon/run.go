@@ -490,18 +490,6 @@ func removeWorktree(ctx context.Context, path string, force bool) (kept bool, re
 
 // sendText types into a live agent's terminal.
 func (m *manager) sendText(ctx context.Context, req *fleetv1.SendTextRequest) error {
-	m.mu.Lock()
-	a, err := m.find(req.GetAgent())
-	var session string
-	if err == nil {
-		if !a.live() {
-			err = errf(codeInvalid, "agent %s is not running", a.ID)
-		}
-		session = a.TmuxSession
-	}
-	m.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	return m.d.tmux.SendText(ctx, session, req.GetText(), req.GetSubmit())
+	_, err := m.sendInput(ctx, req.GetAgent(), req.GetText(), req.GetSubmit(), false, nil)
+	return err
 }

@@ -25,6 +25,7 @@ import (
 	"fleet/internal/client"
 	"fleet/internal/config"
 	"fleet/internal/daemon"
+	"fleet/internal/web"
 )
 
 const (
@@ -39,6 +40,7 @@ type daemonFlags struct {
 	noMDNS bool
 	roots  []string
 	trust  bool
+	join   string
 }
 
 func (f *daemonFlags) register(cmd *cobra.Command) {
@@ -47,6 +49,30 @@ func (f *daemonFlags) register(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&f.noMDNS, "no-mdns", false, "do not advertise on the LAN")
 	cmd.Flags().StringArrayVar(&f.roots, "root", nil, "make `folder` a root unless it is one (\".\" = here; repeatable)")
 	cmd.Flags().BoolVar(&f.trust, "trust", false, "with --root: pre-answer the agent CLIs' folder trust prompt in new roots")
+	cmd.Flags().StringVar(&f.join, "join", "", "join the fleet of `key` (from fleet web): its dashboards can manage this machine")
+}
+
+// checkJoin validates --join before anything starts.
+func (f *daemonFlags) checkJoin() error {
+	f.join = strings.ToLower(strings.TrimSpace(f.join))
+	if f.join != "" && !web.ValidKey(f.join) {
+		return errors.New("--join: a fleet key is 64 hex digits, as printed by `fleet web`")
+	}
+	return nil
+}
+
+// applyJoin stores the --join key as this machine's fleet key. The web
+// dashboard reads it on every request, so a running daemon needs no
+// restart. It reports whether the key changed.
+func (f *daemonFlags) applyJoin() (bool, error) {
+	if f.join == "" {
+		return false, nil
+	}
+	path := config.Path("fleet-key")
+	if old, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(old)) == f.join {
+		return false, nil
+	}
+	return true, web.SetToken(path, f.join)
 }
 
 // rootPaths resolves --root against the cwd, symlink-resolved like stored
@@ -127,12 +153,20 @@ func newDaemonCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if err := f.checkJoin(); err != nil {
+				return err
+			}
 			roots := make([]config.Root, len(paths))
 			for i, p := range paths {
 				roots[i] = config.Root{Path: p, Trust: f.trust}
 			}
 			if _, err := config.EnsureHome(); err != nil {
 				return err
+			}
+			if changed, err := f.applyJoin(); err != nil {
+				return err
+			} else if changed {
+				slog.Info("joined the fleet of the given key")
 			}
 			cfg, err := config.Load()
 			if err != nil {
@@ -194,12 +228,20 @@ func newStartCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, ok := localAlive(ctx); ok {
-				fmt.Fprintf(out, "fleet daemon is already running%s\n", pidSuffix())
-				return addLocalRoots(ctx, out, roots, f.trust)
+			if err := f.checkJoin(); err != nil {
+				return err
 			}
 			if _, err := config.EnsureHome(); err != nil {
 				return err
+			}
+			if changed, err := f.applyJoin(); err != nil {
+				return err
+			} else if changed {
+				fmt.Fprintln(out, "joined the fleet: its dashboards can now manage this machine")
+			}
+			if _, ok := localAlive(ctx); ok {
+				fmt.Fprintf(out, "fleet daemon is already running%s\n", pidSuffix())
+				return addLocalRoots(ctx, out, roots, f.trust)
 			}
 			exe, err := executable()
 			if err != nil {

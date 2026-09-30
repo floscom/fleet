@@ -62,6 +62,36 @@ func (s *webSource) Adapters(ctx context.Context) []web.Adapter {
 	return out
 }
 
+func (s *webSource) Agents() []*fleetv1.Agent { return s.d.agents.list(true) }
+
+func (s *webSource) RunAgent(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleetv1.Agent, error) {
+	a, err := s.d.agents.run(ctx, req)
+	return a, webError(err)
+}
+
+func (s *webSource) StopAgent(ctx context.Context, req *fleetv1.KillAgentRequest) (*fleetv1.KillAgentResponse, error) {
+	r, err := s.d.agents.kill(ctx, req)
+	return r, webError(err)
+}
+
+func (s *webSource) SendInput(ctx context.Context, agent, text string, submit bool, keys []string) (bool, error) {
+	held, err := s.d.agents.sendInput(ctx, agent, text, submit, true, keys)
+	return held, webError(err)
+}
+
+func (s *webSource) Screen(ctx context.Context, agent string) (string, error) {
+	screen, err := s.d.agents.screen(ctx, agent)
+	return screen, webError(err)
+}
+
+func (s *webSource) Chat(agent string) (web.Chat, error) {
+	a, path, parse, err := s.d.agents.chat(agent)
+	if err != nil {
+		return web.Chat{}, webError(err)
+	}
+	return web.Chat{Agent: a, Path: path, Parse: parse}, nil
+}
+
 // webError turns a protocol error into a *web.Error the page may show;
 // anything else stays internal.
 func webError(err error) error {
@@ -76,6 +106,10 @@ func webError(err error) error {
 		return &web.Error{Status: http.StatusBadRequest, Msg: msg}
 	case codeDenied:
 		return &web.Error{Status: http.StatusForbidden, Msg: msg}
+	case codeBusy:
+		return &web.Error{Status: http.StatusConflict, Msg: msg}
+	case codeUnavailable:
+		return &web.Error{Status: http.StatusServiceUnavailable, Msg: msg}
 	}
 	return err
 }

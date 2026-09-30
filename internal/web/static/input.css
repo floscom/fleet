@@ -48,6 +48,17 @@
   }
 }
 
+/*
+ * touch: phones and touch screens (a coarse pointer, or a window as narrow
+ * as a phone). Controls there are at least 44px: touch:min-h-11, and
+ * touch:min-w-11 for the ones with a glyph for a label.
+ */
+@custom-variant touch {
+  @media (pointer: coarse), not all and (min-width: 40rem) {
+    @slot;
+  }
+}
+
 @layer base {
   html {
     color-scheme: dark;

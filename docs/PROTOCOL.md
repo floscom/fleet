@@ -1039,8 +1039,18 @@ final class AgentTerminalController: NSViewController, TerminalViewDelegate {
   - **claude**: `SessionStart` → IDLE; `UserPromptSubmit`, `PreToolUse`,
     `PostToolUse`, `PermissionDenied` → WORKING; `PermissionRequest` →
     NEEDS_INPUT; `Notification` → IDLE for the "waiting for your input"
-    notice, otherwise NEEDS_INPUT; `PostToolUseFailure` → IDLE if it was an
+    notice, ignored for permission prompts (`PermissionRequest` reports
+    them), otherwise NEEDS_INPUT; `PostToolUseFailure` → IDLE if it was an
     interrupt, else WORKING; `Stop`, `StopFailure` → IDLE.
+    NEEDS_INPUT opens a dialog for the tool call it asks about (and the
+    subagent asking, if any). Only later hooks of that call close it, or
+    the end of the turn or subagent: tool calls go on meanwhile, in
+    parallel or in background subagents. Subagents' hooks never set the
+    agent's own state. While several dialogs are open, `state_detail`
+    describes the oldest, which is the one on screen. Some dialogs close
+    without a hook (a refused permission fires none): the daemon drops
+    them once the agent's screen shows no dialog, and the agent returns to
+    the state its own hooks last reported.
   - **codex**: `SessionStart` → WORKING (IDLE after `/clear`);
     `UserPromptSubmit`, `PreToolUse`, `PostToolUse` → WORKING;
     `PermissionRequest` → NEEDS_INPUT; `Stop` → IDLE; legacy `notify`

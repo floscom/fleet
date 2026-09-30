@@ -1,8 +1,9 @@
 // Package web serves the daemon's dashboard: the embedded single page under
 // static/, a WebSocket (/ws) that streams this daemon's agents, paired
 // devices, roots and the fleet daemons seen on the LAN, and a small admin
-// API under /api/ (see admin.go) to browse this machine's folders and add
-// or remove roots.
+// API under /api/ (see admin.go) to browse this machine's folders, add or
+// remove roots, and start, follow, type into and stop agents (agents.go),
+// here or on other fleets holding the same fleet key (see peers.go).
 //
 // It serves plain HTTP. Viewing needs no auth; the admin API needs the
 // token `fleet web` prints. Requests must name this machine in their Host
@@ -72,6 +73,23 @@ type Source interface {
 	RemoveRoot(name string) error
 	// Adapters lists the agent adapters.
 	Adapters(ctx context.Context) []Adapter
+
+	// Agents lists every agent, finished ones included.
+	Agents() []*fleetv1.Agent
+	// RunAgent starts an agent. Errors meant for the user are *Error, here
+	// and below.
+	RunAgent(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleetv1.Agent, error)
+	// StopAgent kills an agent's session.
+	StopAgent(ctx context.Context, req *fleetv1.KillAgentRequest) (*fleetv1.KillAgentResponse, error)
+	// SendInput types text into a live agent's terminal, then Enter if
+	// submit, then presses keys (tmux key names). While the agent shows a
+	// dialog, Enter after text is held back (it would pick the dialog's
+	// highlighted option), which held reports.
+	SendInput(ctx context.Context, agent, text string, submit bool, keys []string) (held bool, err error)
+	// Screen is the visible terminal screen of a live agent.
+	Screen(ctx context.Context, agent string) (string, error)
+	// Chat finds an agent's transcript.
+	Chat(agent string) (Chat, error)
 }
 
 // BrowseFunc finds fleet daemons on the LAN (discovery.Browse).
@@ -85,7 +103,10 @@ type Options struct {
 	// TokenPath is the admin token file (see LoadOrCreateToken). Empty
 	// disables the admin API.
 	TokenPath string
-	Log       *slog.Logger
+	// KeyPath is the fleet key file: daemons holding the same key manage
+	// each other through their dashboards (see peers.go). Empty disables it.
+	KeyPath string
+	Log     *slog.Logger
 	// Browse defaults to discovery.Browse. Tests replace it.
 	Browse BrowseFunc
 }
@@ -100,6 +121,9 @@ type Server struct {
 	hostname string
 	hub      *hub
 	wg       sync.WaitGroup
+	// nonces and peerHTTP serve requests between daemons (peers.go).
+	nonces   nonces
+	peerHTTP *http.Client
 }
 
 // CheckAddr returns an error unless addr is host:port.
@@ -122,7 +146,7 @@ func New(opts Options) (*Server, error) {
 		opts.Browse = discovery.Browse
 	}
 	host, _, _ := net.SplitHostPort(opts.Addr)
-	s := &Server{opts: opts, host: strings.ToLower(host)}
+	s := &Server{opts: opts, host: strings.ToLower(host), peerHTTP: newPeerClient()}
 	if hn, err := os.Hostname(); err == nil {
 		s.hostname = firstLabel(hn)
 	}
@@ -672,6 +696,20 @@ func (h *hub) updatePeersLocked(found []discovery.Found) {
 			}
 		}
 	}
+}
+
+// peer returns the fleet daemon id seen on the LAN, never this one.
+func (h *hub) peer(id string) (Peer, bool) {
+	if id == "" || id == h.src.Info().ID {
+		return Peer{}, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	e, ok := h.peerSet[id]
+	if !ok {
+		return Peer{}, false
+	}
+	return e.peer, true
 }
 
 // peersMsgLocked is the "peers" message for the current peer list.

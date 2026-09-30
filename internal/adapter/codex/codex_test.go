@@ -167,6 +167,23 @@ func TestHandleHook(t *testing.T) {
 	}
 }
 
+func TestHandleHookTranscript(t *testing.T) {
+	const path = "/home/u/.codex/sessions/2026/09/15/rollout-2026-09-15T00-01-32-01a0cfb6-4234-72f2-8548-097d2eff3d39.jsonl"
+	a := New("", nil)
+	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolUse", "Stop"} {
+		u, ok := a.HandleHook(adapter.HookEvent{Event: ev, Payload: []byte(`{"session_id":"s","transcript_path":"` + path + `"}`)})
+		if !ok || u.Transcript != path {
+			t.Errorf("%s: ok %v, Transcript %q", ev, ok, u.Transcript)
+		}
+	}
+	for _, payload := range []string{`{"session_id":"s","transcript_path":null}`, `{"session_id":"s"}`} {
+		u, ok := a.HandleHook(adapter.HookEvent{Event: "SessionStart", Payload: []byte(payload)})
+		if !ok || u.SessionID != "s" || u.Transcript != "" {
+			t.Errorf("%s: ok %v, %+v", payload, ok, u)
+		}
+	}
+}
+
 func TestLaunchTrustDir(t *testing.T) {
 	bin := fakeCodex(t)
 	dir := `/work/odd "dir" \ name`

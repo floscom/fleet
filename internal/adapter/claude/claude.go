@@ -140,6 +140,36 @@ func (c *claude) DetectPrompt(screen string) (string, bool) {
 	return "", false
 }
 
+// dialogHint is one of the " · "-separated hints on the last line of every
+// Claude dialog: questions ("Enter to select · ↑/↓ to navigate · Esc to
+// cancel"), permissions ("Esc to cancel · Tab to amend"), menus and the
+// trust prompt. Status lines say "esc to cancel" and "esc to interrupt",
+// lower case.
+const dialogHint = "Esc to cancel"
+
+// footerLines is how many non-blank lines at the bottom of the screen may
+// hold a dialog's footer: below it come at most queued messages and the
+// status line.
+const footerLines = 8
+
+// DialogOpen reports whether a dialog's footer is at the bottom of the
+// screen: a line of hints, one of them dialogHint. Higher up, or amid
+// other words, the text is part of the conversation.
+func (c *claude) DialogOpen(screen string) bool {
+	lines := strings.Split(screen, "\n")
+	for i, n := len(lines)-1, 0; i >= 0 && n < footerLines; i-- {
+		l := strings.TrimSpace(lines[i])
+		if l == "" {
+			continue
+		}
+		if slices.Contains(strings.Split(l, " · "), dialogHint) {
+			return true
+		}
+		n++
+	}
+	return false
+}
+
 // resumes reports whether args ask claude to continue or resume a session.
 func resumes(args []string) bool {
 	for _, a := range args {

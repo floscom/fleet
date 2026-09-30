@@ -28,7 +28,12 @@ The link carries this machine's admin token. Open it once in each browser
 you manage the fleet from; the browser keeps it. Anyone holding it can
 change this fleet's roots and list its folders, and the dashboard is plain
 HTTP, so use it on networks you trust. --rotate replaces the token and
-signs every browser out.`,
+signs every browser out.
+
+It also prints the command that joins other machines to this fleet
+(fleet start --join KEY): this dashboard can then add roots on them, and
+theirs on this one. The key stays in ~/.fleet/fleet-key; delete that file
+and run fleet web again for a new one (then join the other machines again).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !client.IsLocal(host) {
@@ -60,7 +65,12 @@ signs every browser out.`,
 			if err != nil {
 				return err
 			}
+			key, err := web.LoadOrCreateToken(config.Path("fleet-key"))
+			if err != nil {
+				return err
+			}
 			printWebLinks(cmd.OutOrStdout(), bind, port, tok, rotate)
+			printJoin(cmd.OutOrStdout(), key)
 			return nil
 		},
 	}
@@ -86,6 +96,11 @@ func printWebLinks(out io.Writer, bind, port, tok string, rotated bool) {
 	if !rotated {
 		fmt.Fprintln(out, "fleet web --rotate signs every browser out.")
 	}
+}
+
+func printJoin(out io.Writer, key string) {
+	fmt.Fprintln(out, "\nTo manage other machines from this dashboard, start fleet on them with:")
+	fmt.Fprintf(out, "\n    %s\n", web.JoinCommand(key))
 }
 
 // webHosts lists the hosts a browser can use to reach a dashboard bound to

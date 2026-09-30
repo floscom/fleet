@@ -11,8 +11,11 @@ package tmux
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"sort"
@@ -223,11 +226,21 @@ func parseList(out string) ([]PaneStatus, error) {
 	return res, nil
 }
 
-// SendText types text literally into the session (send-keys -l), then Enter
-// if submit.
+// pasteOver is the text length from which SendText pastes instead of
+// typing: tmux caps the size of a command, and so of send-keys arguments.
+const pasteOver = 2048
+
+// SendText types text into the session, then Enter if submit. Text with a
+// newline, or long text, is pasted (see Paste) so that each newline does
+// not act as Enter; the rest is typed literally (send-keys -l).
 func (t *Tmux) SendText(ctx context.Context, session, text string, submit bool) error {
 	target := exact(session) + ":"
-	if text != "" {
+	switch {
+	case strings.Contains(text, "\n") || len(text) > pasteOver:
+		if err := t.Paste(ctx, session, text); err != nil {
+			return err
+		}
+	case text != "":
 		if _, err := t.run(ctx, "send-keys", "-l", "-t", target, "--", escapeArg(text)); err != nil {
 			return err
 		}
@@ -238,6 +251,41 @@ func (t *Tmux) SendText(ctx context.Context, session, text string, submit bool) 
 		}
 	}
 	return nil
+}
+
+// Paste pastes text into the session through a temporary buffer, as a
+// bracketed paste if the program in the pane asked for one (agent TUIs do):
+// the program sees one paste, not typed lines. The text goes to tmux on
+// stdin, so its size is not limited like a command argument.
+func (t *Tmux) Paste(ctx context.Context, session, text string) error {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return err
+	}
+	buf := "fleet-paste-" + hex.EncodeToString(b[:])
+	if _, err := t.runInput(ctx, strings.NewReader(text), "load-buffer", "-b", buf, "-"); err != nil {
+		return err
+	}
+	// -d deletes the buffer after pasting; -p brackets the paste.
+	if _, err := t.run(ctx, "paste-buffer", "-p", "-d", "-b", buf, "-t", exact(session)+":"); err != nil {
+		t.run(context.WithoutCancel(ctx), "delete-buffer", "-b", buf)
+		return err
+	}
+	return nil
+}
+
+// SendKeys presses keys in the session, given as tmux key names such as
+// Enter, Escape, Up or C-c.
+func (t *Tmux) SendKeys(ctx context.Context, session string, keys ...string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	args := []string{"send-keys", "-t", exact(session) + ":"}
+	for _, k := range keys {
+		args = append(args, escapeArg(k))
+	}
+	_, err := t.run(ctx, args...)
+	return err
 }
 
 // Screen returns the visible contents of the session's active pane, one line
@@ -278,8 +326,14 @@ func (t *Tmux) bin() string {
 // run executes `tmux -L socket args...` and returns stdout. Errors carry
 // tmux's stderr.
 func (t *Tmux) run(ctx context.Context, args ...string) (string, error) {
+	return t.runInput(ctx, nil, args...)
+}
+
+// runInput is run with stdin.
+func (t *Tmux) runInput(ctx context.Context, stdin io.Reader, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, t.bin(), append([]string{"-L", t.Socket}, args...)...)
 	cmd.Env = cleanEnv()
+	cmd.Stdin = stdin
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

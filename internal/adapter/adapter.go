@@ -13,6 +13,9 @@
 //   - startup dialogs no hook reports (folder trust): implement
 //     PromptDetector, and honour LaunchRequest.TrustDir to skip them.
 //   - sandboxes: honour LaunchRequest.Sandbox and LaunchRequest.Home.
+//   - chat view: implement Transcripter, and report the transcript file in
+//     StateUpdate.Transcript.
+//   - input from the dashboard into dialogs: implement DialogDetector.
 package adapter
 
 import (
@@ -21,6 +24,7 @@ import (
 	"sync"
 
 	fleetv1 "fleet/gen/fleetv1"
+	"fleet/internal/transcript"
 )
 
 // Adapter launches one kind of agent CLI.
@@ -50,6 +54,15 @@ type PromptDetector interface {
 	DetectPrompt(screen string) (detail string, ok bool)
 }
 
+// DialogDetector is implemented by adapters that can tell from the screen
+// whether the CLI shows a dialog (a question, a permission, a menu), where
+// Enter picks the highlighted option instead of sending what was typed.
+// The daemon does not press Enter after text typed into a dialog from the
+// dashboard, and notices dialogs that closed without a hook saying so.
+type DialogDetector interface {
+	DialogOpen(screen string) bool
+}
+
 // AuthProvider is implemented by adapters whose CLI keeps its login in a
 // file. With [sandbox] auth, the daemon keeps that file in sync between the
 // daemon user's home and the sandbox home, so sandboxed agents use the
@@ -61,6 +74,20 @@ type AuthProvider interface {
 	// LockAuth takes the lock the CLI holds while writing file, if it uses
 	// one, so a sync never interleaves with the CLI's own write.
 	LockAuth(ctx context.Context, file string) (unlock func(), err error)
+}
+
+// Transcripter is implemented by adapters whose CLI writes the conversation
+// to a transcript file (JSONL), which the dashboard shows as a chat.
+type Transcripter interface {
+	// TranscriptDir is the directory the CLI keeps its transcripts in, for
+	// the home directory home ("" means the daemon user's own, honouring the
+	// CLI's config dir variable). The daemon only reads transcripts inside it.
+	TranscriptDir(home string) string
+	// FindTranscript looks in dir (a TranscriptDir) for the transcript of
+	// session sessionID, for agents whose hooks never reported its path.
+	FindTranscript(dir, sessionID string) (path string, ok bool)
+	// ParseTranscript turns one line of a transcript into chat entries.
+	ParseTranscript(line []byte) []transcript.Entry
 }
 
 // Capabilities mirrors fleetv1.AdapterCapabilities.
@@ -149,6 +176,17 @@ type StateUpdate struct {
 	Detail string
 	// SessionID, if non-empty, records the adapter's session id.
 	SessionID string
+	// Transcript, if non-empty, is the session's transcript file as the CLI
+	// sees it (inside a sandbox: a path in the container). See Transcripter.
+	Transcript string
+	// Subagent names the subagent the event came from, "" for the agent
+	// itself, and Call the tool call it is about ("" if none, such as a
+	// turn ending), summarized the same way by every event of that call.
+	// Tool calls go on while a dialog waits for the user (in parallel, or
+	// in background subagents), so a NEEDS_INPUT update opens a dialog for
+	// its Subagent and Call, which only their own updates close.
+	Subagent string
+	Call     string
 }
 
 // Registry holds the adapters known to the daemon.

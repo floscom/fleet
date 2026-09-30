@@ -51,6 +51,13 @@ type agentRec struct {
 	// ScreenPrompt is set while NEEDS_INPUT comes from a dialog seen on the
 	// screen (adapter.PromptDetector) rather than from a hook.
 	ScreenPrompt bool `json:"screen_prompt,omitempty"`
+	// Dialogs are the dialogs hooks report open, oldest first (the CLI
+	// shows them one at a time, in that order). While any is open the agent
+	// is NEEDS_INPUT; then it returns to OwnState, the state its own hooks
+	// last reported. See agentRec.applyHook.
+	Dialogs   []dialog           `json:"dialogs,omitempty"`
+	OwnState  fleetv1.AgentState `json:"own_state,omitempty"`
+	OwnDetail string             `json:"own_detail,omitempty"`
 	// Sandbox is SANDBOX_DOCKER for containerized agents; records written
 	// before sandboxes existed have 0, meaning SANDBOX_NONE.
 	Sandbox fleetv1.Sandbox `json:"sandbox,omitempty"`
@@ -62,8 +69,14 @@ type agentRec struct {
 	// CloneURL is the repository cloned for CLONE isolation; the clone
 	// itself is in Worktree.
 	CloneURL string `json:"clone_url,omitempty"`
+	// Transcript is the agent's transcript file on this host, as reported
+	// by its hooks (see adapter.Transcripter).
+	Transcript string `json:"transcript,omitempty"`
 
 	attached int32
+	// dialogGone counts the screens in a row that showed none of Dialogs
+	// (see watchPrompts).
+	dialogGone int
 	// busy is set while RunAgent or KillAgent is working on the agent
 	// outside the lock; reconcile leaves busy agents alone.
 	busy bool

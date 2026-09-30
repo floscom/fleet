@@ -1,6 +1,7 @@
 package web
 
-// Admin API: the folder picker and root management behind /api/.
+// Admin API: the folder picker and root management behind /api/; the
+// routes for agents are in agents.go.
 //
 // Viewing the dashboard needs nothing; changing it needs the admin token
 // that `fleet web` prints as a link. The page keeps the token in
@@ -10,7 +11,8 @@ package web
 //
 // The token lives in a file (Options.TokenPath) and is read on every
 // admin request, so `fleet web --rotate` signs every browser out at once
-// without restarting the daemon.
+// without restarting the daemon. Other daemons holding the same fleet key
+// reach the same routes with signed requests (peers.go).
 
 import (
 	"context"
@@ -133,8 +135,8 @@ func writeFileAtomic(path string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 
-// isAdmin reports whether r carries the current admin token.
-func (s *Server) isAdmin(r *http.Request) bool {
+// hasToken reports whether r carries the current admin token.
+func (s *Server) hasToken(r *http.Request) bool {
 	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok || got == "" || s.opts.TokenPath == "" {
 		return false
@@ -149,29 +151,59 @@ func (s *Server) isAdmin(r *http.Request) bool {
 // ---------------------------------------------------------------------------
 // Routes
 
-// apiHandler routes /api/. Everything but /api/session needs the token.
+// apiHandler routes /api/. /api/session and /api/nonce are open; the rest
+// needs the admin token, or a request signed with the fleet key (see
+// peers.go), which reaches this daemon's own routes only.
 func (s *Server) apiHandler() http.Handler {
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /api/fs", s.apiListDir)
 	admin.HandleFunc("GET /api/adapters", s.apiAdapters)
+	admin.HandleFunc("GET /api/roots", s.apiRoots)
 	admin.HandleFunc("POST /api/roots", s.apiAddRoot)
 	admin.HandleFunc("DELETE /api/roots/{name}", s.apiRemoveRoot)
+	admin.HandleFunc("GET /api/agents", s.apiAgents)
+	admin.HandleFunc("POST /api/agents", s.apiRunAgent)
+	admin.HandleFunc("GET /api/agents/{id}/chat", s.apiChat)
+	admin.HandleFunc("GET /api/agents/{id}/screen", s.apiScreen)
+	admin.HandleFunc("POST /api/agents/{id}/input", s.apiInput)
+	admin.HandleFunc("POST /api/agents/{id}/stop", s.apiStopAgent)
+	browser := http.NewServeMux()
+	browser.HandleFunc("GET /api/join", s.apiJoin)
+	browser.HandleFunc("/api/hosts/{id}/{rest...}", s.apiHost)
+	browser.Handle("/", admin)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		if r.URL.Path == "/api/session" {
+		if r.URL.Path == "/api/nonce" {
+			s.apiNonce(w, r)
+			return
+		}
+		token := s.hasToken(r)
+		peer := false
+		if !token && isPeerRequest(r) {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+			peer = s.peerAuthed(r)
+		}
+		switch {
+		case r.URL.Path == "/api/session":
 			if r.Method != http.MethodGet {
 				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]bool{"admin": s.isAdmin(r)})
-			return
-		}
-		if !s.isAdmin(r) {
+			writeJSON(w, http.StatusOK, map[string]bool{"admin": token || peer})
+		case token:
+			browser.ServeHTTP(w, r)
+		case peer:
+			admin.ServeHTTP(w, r)
+		case isPeerRequest(r):
+			writeError(w, http.StatusUnauthorized, "not signed with this fleet's key")
+		default:
 			writeError(w, http.StatusUnauthorized, "admin token required: run `fleet web` on the server")
-			return
 		}
-		admin.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) apiRoots(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string][]Root{"roots": rootsOf(s.opts.Source.Roots())})
 }
 
 func (s *Server) apiListDir(w http.ResponseWriter, r *http.Request) {

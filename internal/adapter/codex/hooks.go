@@ -103,6 +103,8 @@ type payload struct {
 	Source    string          `json:"source"`
 	ToolName  string          `json:"tool_name"`
 	ToolInput json.RawMessage `json:"tool_input"`
+	// TranscriptPath may be null; it then stays empty.
+	TranscriptPath string `json:"transcript_path"`
 
 	// notify
 	Type     string `json:"type"`
@@ -119,12 +121,14 @@ type payload struct {
 //	Stop                           -> IDLE
 //	notify agent-turn-complete     -> IDLE
 //	notify approval-*              -> NEEDS_INPUT
+//
+// Hook updates record the session's transcript_path.
 func (c *codex) HandleHook(ev adapter.HookEvent) (adapter.StateUpdate, bool) {
 	var p payload
 	if len(ev.Payload) > 0 {
 		_ = json.Unmarshal(ev.Payload, &p)
 	}
-	u := adapter.StateUpdate{SessionID: p.SessionID}
+	u := adapter.StateUpdate{SessionID: p.SessionID, Transcript: p.TranscriptPath}
 	switch ev.Event {
 	case "SessionStart":
 		u.State = fleetv1.AgentState_AGENT_STATE_WORKING

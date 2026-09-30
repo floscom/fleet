@@ -97,6 +97,37 @@ func TestDaemonRootPaths(t *testing.T) {
 	}
 }
 
+func TestDaemonJoin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("FLEET_HOME", home)
+	key := strings.Repeat("0f", 32)
+	for _, bad := range []string{"nope", key[:63], key + "0"} {
+		if err := (&daemonFlags{join: bad}).checkJoin(); err == nil {
+			t.Errorf("--join %q accepted", bad)
+		}
+	}
+	f := daemonFlags{join: " " + strings.ToUpper(key) + "\n"}
+	if err := f.checkJoin(); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := (&daemonFlags{}).applyJoin(); changed || err != nil {
+		t.Fatalf("no --join: %v %v", changed, err)
+	}
+	if changed, err := f.applyJoin(); !changed || err != nil {
+		t.Fatalf("first join: %v %v", changed, err)
+	}
+	b, err := os.ReadFile(filepath.Join(home, "fleet-key"))
+	if err != nil || strings.TrimSpace(string(b)) != key {
+		t.Fatalf("fleet-key = %q, %v", b, err)
+	}
+	if fi, _ := os.Stat(filepath.Join(home, "fleet-key")); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("fleet-key mode %v", fi.Mode())
+	}
+	if changed, err := f.applyJoin(); changed || err != nil {
+		t.Fatalf("same key again: %v %v", changed, err)
+	}
+}
+
 func TestParseHookArgs(t *testing.T) {
 	tests := []struct {
 		args                  []string
@@ -305,8 +336,21 @@ func TestWebCmd(t *testing.T) {
 	if again := tokenIn(run("web")); again != tok {
 		t.Fatal("token changed without --rotate")
 	}
-	if rotated := tokenIn(run("web", "--rotate")); rotated == tok {
+	joinIn := func(out string) string {
+		t.Helper()
+		_, rest, ok := strings.Cut(out, "fleet start --join ")
+		if !ok {
+			t.Fatalf("no join command in:\n%s", out)
+		}
+		return strings.Fields(rest)[0]
+	}
+	key := joinIn(out)
+	rotatedOut := run("web", "--rotate")
+	if rotated := tokenIn(rotatedOut); rotated == tok {
 		t.Fatal("--rotate kept the token")
+	}
+	if joinIn(rotatedOut) != key {
+		t.Fatal("--rotate changed the fleet key")
 	}
 
 	must(os.WriteFile(filepath.Join(home, "config.toml"), []byte("web = \"off\"\n"), 0o600))

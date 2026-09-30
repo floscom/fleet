@@ -57,7 +57,7 @@ fleet roots add ~/code --trust  # allow agents in ~/code (root name "code"), ski
 fleet adapters                  # which agent CLIs were found
 fleet run claude code:api --attach   # try it locally; detach with Ctrl-\
 fleet pair                      # one-time code + server fingerprint for a new device
-fleet web                       # admin link for the web dashboard: browse folders, add roots
+fleet web                       # admin link for the web dashboard: sessions, folders, roots
 ```
 
 Or, from inside a project folder, start the daemon and make that folder a
@@ -82,8 +82,8 @@ address. Without it, commands talk to the local daemon.
 
 | Command | What it does |
 |---------|--------------|
-| `fleet daemon [--listen ADDR\|off] [--web ADDR\|off] [--no-mdns] [--root DIR]... [--trust]` | Run the daemon in the foreground (logs to stderr). `--root`: see [Starting in a folder](#starting-in-a-folder). |
-| `fleet start [--listen ...] [--web ...] [--no-mdns] [--root DIR]... [--trust]` | Start the daemon in the background. If it already runs, only adds the `--root` folders. |
+| `fleet daemon [--listen ADDR\|off] [--web ADDR\|off] [--no-mdns] [--root DIR]... [--trust] [--join KEY]` | Run the daemon in the foreground (logs to stderr). `--root`: see [Starting in a folder](#starting-in-a-folder). `--join`: see [Several machines](#several-machines-one-dashboard). |
+| `fleet start [--listen ...] [--web ...] [--no-mdns] [--root DIR]... [--trust] [--join KEY]` | Start the daemon in the background. If it already runs, only adds the `--root` folders and stores the `--join` key. |
 | `fleet stop [--force]` | Stop the daemon. Agents keep running in tmux. |
 | `fleet status` | Daemon version, uptime, server id, agent, root and device counts. |
 | `fleet version` | Print the version. |
@@ -102,7 +102,7 @@ address. Without it, commands talk to the local daemon.
 | `fleet discover [--timeout 2s]` | List daemons on the LAN. |
 | `fleet servers` / `servers rm <name\|id>` | Daemons this machine is paired with. |
 | `fleet devices` / `devices revoke <id\|name>` | Devices paired with the daemon. |
-| `fleet web [--rotate]` | Print admin links for this machine's [web dashboard](#web-dashboard); `--rotate` signs every browser out. Run it on the server. |
+| `fleet web [--rotate]` | Print admin links for this machine's [web dashboard](#web-dashboard) and the `fleet start --join` command for other machines; `--rotate` signs every browser out. Run it on the server. |
 | `fleet hook ...` | Internal: called by agent hooks. |
 
 Agents are referred to by id (`a1b2c3`) or name (`claude-api-1`, or the
@@ -231,6 +231,7 @@ Everything lives in `FLEET_HOME` (default `~/.fleet`, mode 0700):
 | `identity/` | server TLS key and certificate, this machine's device key (0600) |
 | `devices.json` | devices paired with this daemon |
 | `web-token` | the web dashboard's admin token (0600), created by `fleet web` |
+| `fleet-key` | the key shared by machines that manage each other (0600), from `fleet web` or `--join` |
 | `servers.json` | daemons this machine has paired with |
 | `agents.json`, `agents/<id>/` | agent registry and per-agent adapter files |
 | `worktrees/` | git worktrees created for agents |
@@ -318,6 +319,14 @@ shows **admin** in the header and can:
   name, optionally limit it to some agents, optionally trust it (see
   [Folder trust](#folder-trust)) and add the current folder.
 - **Remove roots** (running agents are not affected).
+- **Run sessions**: start Claude Code, Codex or a shell, follow the
+  conversation, answer the agent, type into it and stop it (see
+  [Sessions in the browser](#sessions-in-the-browser)), on this machine or
+  on other fleets.
+- **Add roots on other machines**: the folder picker starts with a
+  *Machine* row listing this daemon and every fleet on the LAN with a
+  dashboard. Pick one to browse its folders and add a root there (see
+  [Several machines](#several-machines-one-dashboard)).
 - **Jump to other fleets**: every daemon under *Fleet on the network*
   links to its own dashboard. Each fleet has its own admin token: run
   `fleet web` there once as well.
@@ -344,9 +353,89 @@ Changes apply at once, rewrite `config.toml` and show up in the CLI
   disables it. If the port is busy the daemon logs a warning and runs
   without it. The daemon advertises the dashboard's port in mDNS (TXT
   `web`) unless it listens on loopback only.
+- Text fields are 16px on phones, so iOS does not zoom in, and dialogs
+  do not pop up the keyboard when they open. Buttons, keys and list rows
+  are at least 44px tall on touch screens and phone-width windows.
 - Everything is embedded in the binary. The compiled Tailwind CSS
   (`internal/web/static/app.css`) is committed, so `make build` needs no
   Tailwind; `make web` rebuilds it after UI changes.
+
+### Sessions in the browser
+
+With the admin link, every agent row has an **open** button (**answer** when
+it needs input), and *Agents → New session* starts one:
+
+- **Start**: pick the machine, the agent (Claude Code, Codex, shell), a
+  root and a folder inside it, and optionally a prompt (Ctrl+Enter starts).
+  *Options* choose a worktree or the folder itself, the Docker sandbox, a
+  name and a branch, like `fleet run`. The session opens right away.
+- **Chat.** The conversation is read from the transcript the CLI writes
+  (`~/.claude/projects/…/<session>.jsonl` for Claude Code,
+  `~/.codex/sessions/…/rollout-….jsonl` for Codex; in a sandbox, those in
+  the sandbox home). Your messages, the agent's replies and every tool call
+  are shown; click a tool call for its input and output. Messages appear
+  when the CLI has written them, not token by token. The page long-polls
+  (`GET /api/agents/{id}/chat?wait=1`, answered as soon as something
+  changes, else after 8 seconds); *Load earlier* pages back through long
+  sessions. After `/clear` the chat follows the new session.
+- **Send.** The message box types into the agent's terminal and presses
+  Enter (Enter sends, Shift+Enter is a new line; text with several lines
+  goes in as one paste). While the agent works, Claude Code and Codex queue
+  it.
+- **Screen and keys.** Permission prompts, folder trust and menus are not
+  part of the transcript. *Screen* shows the agent's terminal as text
+  (refreshed every 1.5 seconds; it opens by itself when the agent needs
+  input), and the key row sends Esc, arrows, Tab, Enter, 1-3 and Ctrl-C to
+  answer them. For the full terminal, `fleet attach` still works.
+- **Stop** asks in a bar under the header, away from Stop itself, so a
+  double tap cannot stop a session; *Stop session* there kills it like
+  `fleet kill` (the worktree is kept). On a phone the session fills the
+  screen and closes with the back arrow at the top left.
+
+The agent's hooks tell the daemon where its transcript is; fleet only
+reads transcripts inside the CLI's own transcript folder (and, for
+sandboxed agents, inside the sandbox home), so a sandboxed agent cannot
+point the dashboard at other files on the server. Agents started before
+this version are found by their session id.
+
+### Several machines, one dashboard
+
+Machines that hold the same **fleet key** manage each other's roots, and
+run each other's agents, from their dashboards. `fleet web` prints the command for the other machines:
+
+```
+To manage other machines from this dashboard, start fleet on them with:
+
+    fleet start --join 5b1e...
+```
+
+Run it once on each machine (it starts fleet there if needed, and only
+stores the key if fleet already runs). From then on, the dashboard of any
+of them lists the agents of all of them (tagged with their machine, polled
+every 4 seconds), starts sessions on any of them, and its folder picker
+can browse and add roots on all of them. A machine without the
+key shows up as *not joined*, with the command to copy; the picker notices
+when it has been run. No pairing is needed for this: pairing (`fleet pair`)
+is only for the fleet CLI and native apps talking to a daemon over TLS.
+
+How it works: the browser only talks to the dashboard it opened, with that
+machine's admin token. That daemon asks the other one for a nonce and sends
+the request signed with the key (HMAC-SHA256 over the target's server id,
+the nonce, the method, the path and the body). The key never crosses the
+network, a signature is good for one request to one daemon, and a machine
+that only pretends to be a fleet learns nothing it can use. Only folder
+listings, adding or removing roots, and the session routes (list, start,
+chat, screen, input, stop) are forwarded.
+
+- The key lives in `~/.fleet/fleet-key` (0600). `fleet web --rotate` does
+  not change it. For a new key, delete the file and run `fleet web`
+  again, then join the other machines again.
+- The key is a password for all machines at once: whoever has it, or the
+  admin token of any member, can add roots, list folders, read agent
+  conversations and start agents (a shell included) on every member. Treat
+  it like an SSH key that opens all of them.
+- The other machines' dashboards must be reachable from this one (the
+  `web` port on their LAN address).
 
 ## How tmux is used, and how cleanup works
 
@@ -418,9 +507,12 @@ What protects the daemon:
 - **Local socket.** `~/.fleet/fleet.sock` is mode 0600: any process of the
   same Unix user has full access without pairing.
 - **Web dashboard.** Anyone who can reach its port sees agents, paths,
-  roots and devices. Changing roots and listing folders needs the admin
-  token from `fleet web` (see [Web dashboard](#web-dashboard)); it cannot
-  start, stop or type into agents.
+  roots and devices. Everything else needs the admin token from `fleet
+  web` (see [Web dashboard](#web-dashboard)): changing roots, listing
+  folders, reading conversations and terminal screens, and starting,
+  typing into and stopping agents. Like a paired device, the admin token
+  is a shell on the server. Machines holding the same fleet key accept
+  each other's signed requests for the same actions.
 
 Honest limits:
 
@@ -462,10 +554,14 @@ Honest limits:
   daemon. Pinning makes this harmless for paired servers; during pairing
   the fingerprint check is what stops it.
 - **The web admin token travels over plain HTTP.** Someone who can sniff
-  the LAN can capture it from a browser's admin request and then add
-  roots (with trust) and list every folder the daemon's user can read.
+  the LAN can capture it from a browser's admin request and then do
+  anything the daemon's user can: start a shell agent, read conversations,
+  add roots (with trust) and list every folder.
   Rotate it with `fleet web --rotate`, and bind the dashboard to
-  `127.0.0.1` on networks you do not trust.
+  `127.0.0.1` on networks you do not trust. With a fleet key, that token
+  reaches every machine in the fleet through this dashboard. The requests
+  between daemons are signed but also plain HTTP, so folder listings,
+  conversations and what you type can be read on the wire.
 - **The device key is the credential.** Whoever copies
   `~/.fleet/identity/device.key` (or an app's key) has that device's access
   until it is revoked.

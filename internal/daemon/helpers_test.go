@@ -19,15 +19,19 @@ import (
 	"fleet/internal/adapter"
 	"fleet/internal/config"
 	"fleet/internal/tmux"
+	"fleet/internal/transcript"
 	"fleet/internal/wire"
 )
 
 // testAdapter runs `sh -c <extra args joined>` (default: sleep 60), with
 // $TEST_TRUST_DIR set to LaunchRequest.TrustDir. Its DetectPrompt matches
-// testDialog on the screen.
+// testDialog on the screen, and DialogOpen testQuestion.
 type testAdapter struct{}
 
-const testDialog = "fleet-test-dialog"
+const (
+	testDialog   = "fleet-test-dialog"
+	testQuestion = "fleet-test-question"
+)
 
 func (testAdapter) ID() string          { return "test" }
 func (testAdapter) DisplayName() string { return "Test" }
@@ -57,10 +61,41 @@ func (testAdapter) DetectPrompt(screen string) (string, bool) {
 	return "", false
 }
 
+// TranscriptDir is transcripts/ in FLEET_HOME, or .test/transcripts in a
+// sandbox home.
+func (testAdapter) DialogOpen(screen string) bool { return strings.Contains(screen, testQuestion) }
+
+func (testAdapter) TranscriptDir(home string) string {
+	if home != "" {
+		return filepath.Join(home, ".test", "transcripts")
+	}
+	return filepath.Join(os.Getenv("FLEET_HOME"), "transcripts")
+}
+
+func (testAdapter) FindTranscript(dir, sessionID string) (string, bool) {
+	p := filepath.Join(dir, sessionID+".jsonl")
+	_, err := os.Stat(p)
+	return p, err == nil
+}
+
+// ParseTranscript makes each line a note.
+func (testAdapter) ParseTranscript(line []byte) []transcript.Entry {
+	return []transcript.Entry{{Kind: transcript.Note, Text: string(line)}}
+}
+
 func (testAdapter) HandleHook(ev adapter.HookEvent) (adapter.StateUpdate, bool) {
 	switch ev.Event {
+	case "transcript":
+		return adapter.StateUpdate{Transcript: string(ev.Payload)}, true
 	case "working":
 		return adapter.StateUpdate{State: fleetv1.AgentState_AGENT_STATE_WORKING, Detail: string(ev.Payload)}, true
+	case "ask", "done": // payload "<subagent>/<call>"
+		by, call, _ := strings.Cut(string(ev.Payload), "/")
+		u := adapter.StateUpdate{State: fleetv1.AgentState_AGENT_STATE_WORKING, Subagent: by, Call: call}
+		if ev.Event == "ask" {
+			u.State, u.Detail = fleetv1.AgentState_AGENT_STATE_NEEDS_INPUT, "asks "+call
+		}
+		return u, true
 	case "exited": // hooks must never end an agent
 		return adapter.StateUpdate{State: fleetv1.AgentState_AGENT_STATE_EXITED}, true
 	}
@@ -83,12 +118,25 @@ type env struct {
 	tm     *tmux.Tmux
 	listen string
 	// roots is Options.Roots for the next start.
-	roots  []config.Root
+	roots []config.Root
+	// web is Options.Web: "off" unless newWebEnv.
+	web    string
 	cancel context.CancelFunc
 	done   chan error
 }
 
 func newEnv(t *testing.T) *env {
+	t.Helper()
+	return newEnvWeb(t, false)
+}
+
+// newWebEnv is newEnv with the web dashboard on (see env.webURL).
+func newWebEnv(t *testing.T) *env {
+	t.Helper()
+	return newEnvWeb(t, true)
+}
+
+func newEnvWeb(t *testing.T, withWeb bool) *env {
 	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
@@ -112,6 +160,15 @@ func newEnv(t *testing.T) *env {
 	}
 	e.listen = ln.Addr().String()
 	ln.Close()
+	e.web = "off"
+	if withWeb {
+		wl, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.web = wl.Addr().String()
+		wl.Close()
+	}
 	t.Cleanup(func() {
 		e.stop()
 		_ = exec.Command("tmux", "-L", e.tm.Socket, "kill-server").Run()
@@ -134,7 +191,7 @@ func (e *env) start() {
 		Version:     "test",
 		FleetBinary: "/bin/true",
 		Listen:      e.listen,
-		Web:         "off",
+		Web:         e.web,
 		NoMDNS:      true,
 		Roots:       e.roots,
 	}

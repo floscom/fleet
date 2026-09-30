@@ -33,7 +33,7 @@
         </span>
         <span id="srv-version" class="rounded-full border border-ink-600 bg-ink-850 px-2.5 py-1 font-mono text-xs text-zinc-400">–</span>
         <span id="access" class="inline-flex items-center gap-1.5 rounded-full border border-ink-600 bg-ink-850 px-2.5 py-1 text-xs font-medium text-zinc-500">read-only</span>
-        <button id="signout" type="button" hidden class="rounded-full px-2 py-1 text-xs text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400">sign out</button>
+        <button id="signout" type="button" hidden class="touch:min-h-11 rounded-full px-2 py-1 text-xs text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400">sign out</button>
       </div>
       <h1 id="srv-name" class="truncate font-mono text-2xl font-semibold tracking-tight text-zinc-50 sm:text-3xl">fleet</h1>
       <dl class="flex flex-wrap gap-x-5 gap-y-1 text-xs text-zinc-500 lg:justify-end">
@@ -73,12 +73,15 @@
   <div class="grid grid-cols-1 gap-6 xl:grid-cols-3">
     <section id="agents" aria-labelledby="agents-h" class="min-w-0 rounded-xl border border-ink-700 bg-ink-900 xl:col-span-2 xl:self-start">
       <div class="flex items-center justify-between gap-3 border-b border-ink-700 px-4 py-3">
-        <h2 id="agents-h" class="text-sm font-semibold text-zinc-100">Agents</h2>
-        <span id="agents-meta" class="font-mono text-xs tabular-nums text-zinc-500"></span>
+        <div class="flex items-baseline gap-2">
+          <h2 id="agents-h" class="text-sm font-semibold text-zinc-100">Agents</h2>
+          <span id="agents-meta" class="font-mono text-xs tabular-nums text-zinc-500"></span>
+        </div>
+        <button id="agents-new" type="button" hidden class="touch:min-h-11 inline-flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-400/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"><span aria-hidden="true">+</span> New session</button>
       </div>
       <ul id="agents-live" class="divide-y divide-ink-700/70"></ul>
       <details id="history" class="group border-t border-ink-700">
-        <summary class="flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 text-xs font-medium text-zinc-500 hover:text-zinc-300 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400">
+        <summary class="touch:min-h-11 flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 text-xs font-medium text-zinc-500 hover:text-zinc-300 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400">
           <span class="inline-block transition-transform group-open:rotate-90 motion-reduce:transition-none">▸</span>
           <span>History</span>
           <span id="history-count" class="rounded-full bg-ink-800 px-1.5 font-mono tabular-nums text-zinc-400">0</span>
@@ -102,7 +105,7 @@
             <h2 id="roots-h" class="text-sm font-semibold text-zinc-100">Roots</h2>
             <span id="roots-meta" class="font-mono text-xs tabular-nums text-zinc-500"></span>
           </div>
-          <button id="roots-add" type="button" hidden class="inline-flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-400/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"><span aria-hidden="true">+</span> Add folder</button>
+          <button id="roots-add" type="button" hidden class="touch:min-h-11 inline-flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-400/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"><span aria-hidden="true">+</span> Add folder</button>
         </div>
         <ul id="roots" class="divide-y divide-ink-700/70"></ul>
         <p id="roots-hint" class="border-t border-ink-700/70 px-4 py-2.5 text-xs text-zinc-500">To add folders from here, run <code class="rounded border border-ink-600 bg-ink-850 px-1 font-mono text-[11px] text-zinc-300">fleet web</code> on <span id="roots-hint-host" class="font-mono text-zinc-400">the server</span> and open the link it prints.</p>
@@ -129,20 +132,25 @@
         <h2 id="picker-h" class="text-sm font-semibold text-zinc-100">Add a root folder</h2>
         <p class="mt-0.5 text-xs text-zinc-500">Agents can start anywhere inside a root. Pick a folder on <span id="picker-host" class="font-mono text-zinc-400">the server</span>.</p>
       </div>
-      <button id="picker-close" type="button" aria-label="Close" class="-mr-1 rounded-md px-2 py-1 text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400">✕</button>
+      <button id="picker-close" type="button" aria-label="Close" class="touch:min-h-11 touch:min-w-11 -mr-1 rounded-md px-2 py-1 text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400">✕</button>
+    </div>
+
+    <div class="flex flex-col gap-1.5 border-b border-ink-700 px-4 py-2.5">
+      <span id="picker-hosts-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Machine</span>
+      <div id="picker-hosts" role="radiogroup" aria-labelledby="picker-hosts-label" class="flex flex-wrap gap-1.5"></div>
     </div>
 
     <div class="flex flex-col gap-2 border-b border-ink-700 px-4 py-3">
       <div class="flex gap-2">
         <label for="picker-path" class="sr-only">Folder path</label>
-        <input id="picker-path" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="/path/to/folder" class="min-w-0 flex-1 rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
-        <button id="picker-go" type="button" class="rounded-md border border-ink-600 bg-ink-850 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Go</button>
+        <input id="picker-path" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="/path/to/folder" class="touch:min-h-11 min-w-0 flex-1 rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+        <button id="picker-go" type="button" class="touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Go</button>
       </div>
       <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <nav id="picker-crumbs" aria-label="Current folder" class="flex min-w-0 flex-wrap items-center font-mono text-xs"></nav>
         <div class="flex shrink-0 items-center gap-3">
-          <button id="picker-home" type="button" class="rounded px-1.5 py-0.5 font-mono text-xs text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400">~ home</button>
-          <label class="inline-flex cursor-pointer select-none items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300"><input id="picker-hidden" type="checkbox" class="accent-emerald-400"> hidden folders</label>
+          <button id="picker-home" type="button" class="touch:min-h-11 rounded px-1.5 py-0.5 font-mono text-xs text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400">~ home</button>
+          <label class="touch:min-h-11 inline-flex cursor-pointer select-none items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300"><input id="picker-hidden" type="checkbox" class="accent-emerald-400"> hidden folders</label>
         </div>
       </div>
     </div>
@@ -150,7 +158,7 @@
     <div class="flex min-h-0 flex-1 flex-col">
       <div class="px-4 pt-3">
         <label for="picker-filter" class="sr-only">Filter folders</label>
-        <input id="picker-filter" type="search" spellcheck="false" autocomplete="off" placeholder="filter · ↓ to move · ⌫ for parent folder" class="w-full rounded-md border border-ink-700 bg-ink-850 px-2.5 py-1.5 text-[13px] text-zinc-200 placeholder:text-zinc-600 focus:border-emerald-400/50 focus:outline-none focus:ring-2 focus:ring-emerald-400/15">
+        <input id="picker-filter" type="search" spellcheck="false" autocomplete="off" placeholder="filter · ↓ to move · ⌫ for parent folder" class="touch:min-h-11 w-full rounded-md border border-ink-700 bg-ink-850 px-2.5 py-1.5 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-200 placeholder:text-zinc-600 focus:border-emerald-400/50 focus:outline-none focus:ring-2 focus:ring-emerald-400/15">
       </div>
       <ul id="picker-list" aria-label="Folders" class="max-h-[45dvh] min-h-40 flex-1 overflow-y-auto px-2 py-2 transition-opacity sm:max-h-none sm:min-h-48"></ul>
     </div>
@@ -160,7 +168,7 @@
       <div class="grid gap-3 sm:grid-cols-2">
         <label class="block">
           <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Name</span>
-          <input id="picker-name" type="text" spellcheck="false" autocomplete="off" maxlength="64" class="mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+          <input id="picker-name" type="text" spellcheck="false" autocomplete="off" maxlength="64" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
         </label>
         <fieldset class="min-w-0">
           <legend class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Agents <span class="normal-case tracking-normal text-zinc-600">· none ticked = all</span></legend>
@@ -174,10 +182,121 @@
     </div>
 
     <div class="flex items-center justify-end gap-2 border-t border-ink-700 px-4 py-3">
-      <button id="picker-cancel" type="button" class="rounded-md border border-ink-600 bg-ink-850 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Cancel</button>
-      <button id="picker-add" type="submit" class="rounded-md bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Add as root</button>
+      <button id="picker-cancel" type="button" class="touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Cancel</button>
+      <button id="picker-add" type="submit" class="touch:min-h-11 rounded-md bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Add as root</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="launch" aria-labelledby="launch-h" class="m-auto max-h-[calc(100dvh-1.5rem)] w-[min(720px,calc(100vw-1.5rem))] overflow-y-auto rounded-xl border border-ink-600 bg-ink-900 p-0 text-[14px] text-zinc-300 shadow-2xl shadow-black/60 backdrop:bg-black/70">
+  <form id="launch-form" class="flex flex-col" novalidate>
+    <div class="flex items-start justify-between gap-3 border-b border-ink-700 px-4 py-3">
+      <div class="min-w-0">
+        <h2 id="launch-h" class="text-sm font-semibold text-zinc-100">Start a session</h2>
+        <p class="mt-0.5 text-xs text-zinc-500">Runs an agent in tmux on <span id="launch-host" class="font-mono text-zinc-400">the server</span>. Follow it, answer it and stop it from here.</p>
+      </div>
+      <button id="launch-close" type="button" aria-label="Close" class="touch:min-h-11 touch:min-w-11 -mr-1 rounded-md px-2 py-1 text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400">✕</button>
+    </div>
+
+    <div class="flex flex-col gap-3 border-b border-ink-700 px-4 py-3">
+      <div class="flex flex-col gap-1.5">
+        <span id="launch-hosts-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Machine</span>
+        <div id="launch-hosts" role="radiogroup" aria-labelledby="launch-hosts-label" class="flex flex-wrap gap-1.5"></div>
+      </div>
+      <div class="flex flex-col gap-1.5">
+        <span id="launch-adapters-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Agent</span>
+        <div id="launch-adapters" role="radiogroup" aria-labelledby="launch-adapters-label" class="flex min-h-8 flex-wrap items-center gap-1.5"></div>
+      </div>
+    </div>
+
+    <div class="flex flex-col gap-2 border-b border-ink-700 px-4 py-3">
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <label for="launch-root" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Folder</label>
+        <select id="launch-root" class="touch:min-h-11 min-w-0 max-w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20"></select>
+        <nav id="launch-crumbs" aria-label="Folder inside the root" class="flex min-w-0 flex-wrap items-center font-mono text-xs"></nav>
+      </div>
+      <ul id="launch-list" aria-label="Folders" class="max-h-[28dvh] min-h-24 overflow-y-auto rounded-md border border-ink-700 bg-ink-950/60 p-1 transition-opacity"></ul>
+    </div>
+
+    <div class="flex flex-col gap-3 px-4 py-3">
+      <label class="block">
+        <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Prompt <span class="normal-case tracking-normal text-zinc-600">· optional, the agent waits for your first message without one</span></span>
+        <textarea id="launch-prompt" rows="4" spellcheck="true" placeholder="What should the agent do?" class="mt-1 block w-full resize-y rounded-md border border-ink-600 bg-ink-950 px-2.5 py-2 text-[13px] leading-relaxed max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20"></textarea>
+      </label>
+      <details class="group rounded-md border border-ink-700 bg-ink-850/40">
+        <summary class="touch:min-h-11 flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400">
+          <span class="inline-block transition-transform group-open:rotate-90 motion-reduce:transition-none">▸</span> Options <span id="launch-options-note" class="font-normal text-zinc-600"></span>
+        </summary>
+        <div class="grid gap-3 border-t border-ink-700 px-3 py-3 sm:grid-cols-2">
+          <label class="block">
+            <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Checkout</span>
+            <select id="launch-iso" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+              <option value="">own worktree in git repos (default)</option>
+              <option value="worktree">own worktree</option>
+              <option value="pinned">the folder itself</option>
+            </select>
+          </label>
+          <label class="block">
+            <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Sandbox</span>
+            <select id="launch-sandbox" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+              <option value="">server default</option>
+              <option value="docker">Docker container</option>
+              <option value="none">none, on the server</option>
+            </select>
+          </label>
+          <label class="block">
+            <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Name</span>
+            <input id="launch-name" type="text" spellcheck="false" autocomplete="off" maxlength="64" placeholder="generated" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+          </label>
+          <label class="block">
+            <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Branch</span>
+            <input id="launch-branch" type="text" spellcheck="false" autocomplete="off" maxlength="200" placeholder="fleet/&lt;name&gt;" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+          </label>
+        </div>
+      </details>
+      <div id="launch-status" role="status" aria-live="polite" class="min-h-5 text-xs"></div>
+    </div>
+
+    <div class="flex items-center justify-end gap-2 border-t border-ink-700 px-4 py-3">
+      <button id="launch-cancel" type="button" class="touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Cancel</button>
+      <button id="launch-start" type="submit" class="touch:min-h-11 rounded-md bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Start</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="chat" aria-labelledby="chat-h" class="m-auto h-[min(92dvh,980px)] w-[min(1040px,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-ink-600 bg-ink-900 p-0 text-[14px] text-zinc-300 shadow-2xl shadow-black/60 backdrop:bg-black/70 open:flex max-sm:h-dvh max-sm:max-h-none max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:border-0">
+  <div class="flex items-start gap-3 border-b border-ink-700 px-4 py-3 max-sm:gap-2 max-sm:pl-1.5">
+    <div class="min-w-0 flex-1">
+      <div class="flex flex-wrap items-center gap-2">
+        <h2 id="chat-h" class="truncate font-mono text-sm font-semibold text-zinc-100">session</h2>
+        <span id="chat-badges" class="flex flex-wrap items-center gap-1.5"></span>
+      </div>
+      <div id="chat-sub" class="mt-0.5 truncate font-mono text-xs text-zinc-500"></div>
+    </div>
+    <div class="flex shrink-0 items-center gap-1.5 touch:gap-2">
+      <button id="chat-screen-toggle" type="button" aria-pressed="false" class="touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-2 py-1 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 aria-pressed:border-sky-400/40 aria-pressed:bg-sky-400/10 aria-pressed:text-sky-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Screen</button>
+      <span id="chat-stop-box" class="flex items-center"></span>
+    </div>
+    <!-- Full screen on phones: close is a back button at the top left, across the screen from Stop. -->
+    <button id="chat-close" type="button" aria-label="Close" class="touch:min-h-11 touch:min-w-11 -mr-1 rounded-md px-2 py-1 text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400 max-sm:order-first max-sm:mr-0 max-sm:text-3xl max-sm:leading-none"><span aria-hidden="true" class="sm:hidden">‹</span><span aria-hidden="true" class="max-sm:hidden">✕</span></button>
+  </div>
+  <div id="chat-confirm" hidden class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-rose-500/25 bg-rose-500/5 px-4 py-2.5"></div>
+  <div id="chat-detail" hidden class="border-b border-amber-400/20 bg-amber-400/5 px-4 py-2 text-xs text-amber-200/90"></div>
+  <div id="chat-scroll" class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4">
+    <div id="chat-log" class="mx-auto flex max-w-3xl flex-col gap-3" aria-live="polite"></div>
+  </div>
+  <section id="chat-screen" hidden aria-label="Terminal screen" class="max-h-[45%] min-h-24 overflow-auto border-t border-ink-700 bg-ink-950">
+    <pre id="chat-screen-pre" class="w-max min-w-full px-3 py-2 font-mono text-[11px] leading-[1.35] text-zinc-300"></pre>
+  </section>
+  <div class="border-t border-ink-700 bg-ink-850/60 px-3 py-2.5">
+    <div id="chat-keys" class="touch:gap-1.5 mb-2 flex items-center gap-1 overflow-x-auto"></div>
+    <form id="chat-form" class="flex items-end gap-2" novalidate>
+      <label for="chat-input" class="sr-only">Message</label>
+      <textarea id="chat-input" rows="1" spellcheck="true" placeholder="Message the agent · Enter sends, Shift+Enter for a new line" class="touch:min-h-11 max-h-48 min-h-9 min-w-0 flex-1 resize-none rounded-md border border-ink-600 bg-ink-950 px-2.5 py-2 text-[13.5px] leading-snug max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20 disabled:opacity-50"></textarea>
+      <button id="chat-send" type="submit" class="touch:h-11 touch:px-4 h-9 shrink-0 rounded-md bg-emerald-400 px-3 text-xs font-semibold text-ink-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Send</button>
+    </form>
+    <div id="chat-status" role="status" aria-live="polite" class="mt-1 min-h-4 truncate text-[11px] text-zinc-500"></div>
+  </div>
 </dialog>
 
 <footer class="mx-auto max-w-[1400px] px-4 pb-8 font-mono text-[11px] text-zinc-600 sm:px-6 lg:px-8"><span id="footer-mode">read-only view</span> · <span id="srv-id" class="break-all"></span></footer>

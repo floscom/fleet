@@ -133,7 +133,10 @@ func Run(ctx context.Context, opts Options) error {
 	var ws *web.Server
 	wsrc := &webSource{d: d}
 	if webAddr != "off" {
-		ws, err = web.New(web.Options{Addr: webAddr, Source: wsrc, TokenPath: config.Path("web-token"), Log: d.log})
+		ws, err = web.New(web.Options{
+			Addr: webAddr, Source: wsrc, Log: d.log,
+			TokenPath: config.Path("web-token"), KeyPath: config.Path("fleet-key"),
+		})
 		if err != nil {
 			return err
 		}

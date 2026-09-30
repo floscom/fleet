@@ -64,9 +64,24 @@ Shared helpers:
    hook runs, implement `adapter.PromptDetector`. `DetectPrompt` gets the
    visible screen of a starting agent and returns a short detail while the
    prompt is up. Match text that only the dialog shows.
-8. Register it in `cmd/fleet`. Test argv construction, generated files
-   (parse them back), and `HandleHook` with payloads captured from the
-   real CLI.
+8. Chat view (optional): if the CLI writes its conversation to a JSONL
+   transcript, implement `adapter.Transcripter`: `TranscriptDir` (where
+   the CLI keeps transcripts for a home directory; fleet reads nothing
+   outside it), `FindTranscript` (by session id, for agents whose hooks
+   never said where it is) and `ParseTranscript` (one line to
+   `transcript.Entry` values: user, assistant, tool, result, note). Set
+   `StateUpdate.Transcript` from the hook payload's `transcript_path`.
+   Give a tool entry an `ID` only when its output follows in a separate
+   result entry.
+9. Dialogs (optional): implement `adapter.DialogDetector`. `DialogOpen`
+   gets the visible screen and reports whether the CLI shows a dialog,
+   where Enter picks the highlighted option. The daemon then does not
+   press Enter after text typed from the dashboard, and drops dialogs
+   hooks reported once the screen no longer shows one. Set
+   `StateUpdate.Subagent` and `Call` so dialogs close on the right hooks.
+10. Register it in `cmd/fleet`. Test argv construction, generated files
+    (parse them back), and `HandleHook` with payloads captured from the
+    real CLI.
 
 ## Verified agent behaviour (claude 2.1.280, codex 0.154.0)
 
@@ -79,7 +94,22 @@ Shared helpers:
   `--session-id`.
 - `Notification` has `notification_type`. `idle_prompt` means "Claude is
   waiting for your input" and arrives about 60s after a turn.
-  `permission_prompt` means Claude is asking for permission.
+  `permission_prompt` means Claude is asking for permission. It follows
+  the `PermissionRequest` for the same dialog and does not say who asks,
+  so fleet ignores it.
+- `AskUserQuestion` (Claude's multiple-choice questions) is a permission
+  dialog: `PermissionRequest` fires with the questions in `tool_input`.
+  Enter in it picks the highlighted option; typed text is dropped.
+- Hooks fired inside a subagent carry `agent_id`. Background subagents keep
+  calling tools while a dialog waits for the user, so their `PostToolUse`
+  says nothing about the dialog. Their own permission dialogs show in the
+  main terminal. Refusing a permission, or dismissing a question with
+  Esc, fires no hook at all (no `PostToolUseFailure`, no `Stop`, and no
+  `idle_prompt` later), so the daemon checks the screen for the dialog
+  (`DialogDetector`). `SubagentStop` tells when a subagent is gone (it
+  also fires for Claude's internal helper agents).
+- `PermissionRequest` has no `tool_use_id`; its `tool_name` and
+  `tool_input` match the call's `PreToolUse` / `PostToolUse`.
 - On first launch in an untrusted directory, Claude shows a trust dialog
   whose default is "No, exit". No hook fires until someone answers it in
   the terminal. Trust lives in the global config file (`~/.claude.json`,

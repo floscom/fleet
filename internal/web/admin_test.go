@@ -83,7 +83,8 @@ func TestAdminAuth(t *testing.T) {
 	}
 
 	// Every admin route refuses a missing or wrong token.
-	for _, rt := range [][2]string{{"GET", "/api/fs"}, {"GET", "/api/adapters"}, {"POST", "/api/roots"}, {"DELETE", "/api/roots/code"}} {
+	for _, rt := range [][2]string{{"GET", "/api/fs"}, {"GET", "/api/adapters"}, {"GET", "/api/roots"}, {"POST", "/api/roots"},
+		{"DELETE", "/api/roots/code"}, {"GET", "/api/join"}, {"GET", "/api/hosts/peer-id/fs"}} {
 		for _, bad := range []string{"", "wrong"} {
 			var e struct{ Error string }
 			if code := api(t, ts, rt[0], rt[1], bad, `{"path":"/"}`, &e); code != 401 || e.Error == "" {
@@ -157,8 +158,9 @@ func TestAdminRoots(t *testing.T) {
 	if !reflect.DeepEqual(src.removed, []string{"my root", "gone"}) {
 		t.Fatalf("removed %v", src.removed)
 	}
-	if code := api(t, ts, "GET", "/api/roots", tok, "", nil); code != 405 {
-		t.Fatalf("GET /api/roots: %d, want 405", code)
+	var roots struct{ Roots []Root }
+	if code := api(t, ts, "GET", "/api/roots", tok, "", &roots); code != 200 || len(roots.Roots) != 1 || roots.Roots[0].Name != "code" {
+		t.Fatalf("GET /api/roots: %d %+v", code, roots)
 	}
 
 	var ad struct{ Adapters []Adapter }
