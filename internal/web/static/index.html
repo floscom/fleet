@@ -81,7 +81,7 @@
           <h2 id="agents-h" class="text-sm font-semibold text-zinc-100">Agents</h2>
           <span id="agents-meta" class="font-mono text-xs tabular-nums text-zinc-500"></span>
         </div>
-        <button id="agents-new" type="button" hidden class="touch:min-h-11 inline-flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-400/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"><span aria-hidden="true">+</span> New session</button>
+        <button id="agents-new" type="button" hidden aria-keyshortcuts="n" class="touch:min-h-11 inline-flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-400/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"><span aria-hidden="true">+</span> New session<kbd aria-hidden="true" class="ml-1 inline rounded border border-emerald-400/30 px-1 font-mono text-[10px] leading-4 text-emerald-300/70 touch:hidden" title="press N">N</kbd></button>
       </div>
       <ul id="agents-live" class="divide-y divide-ink-700/70"></ul>
       <details id="history" class="group border-t border-ink-700">
@@ -111,7 +111,13 @@
           </div>
           <button id="roots-add" type="button" hidden class="touch:min-h-11 inline-flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-400/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"><span aria-hidden="true">+</span> Add folder</button>
         </div>
-        <ul id="roots" class="divide-y divide-ink-700/70"></ul>
+        <!-- Many roots: a filter, and only the first few until "show all". -->
+        <div id="roots-find" hidden class="border-b border-ink-700/70 px-3 py-2">
+          <label for="roots-filter" class="sr-only">Filter roots</label>
+          <input id="roots-filter" type="search" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="Filter roots" class="touch:min-h-11 w-full rounded-md border border-ink-700 bg-ink-850 px-2.5 py-1 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-200 placeholder:text-zinc-600 focus:border-emerald-400/50 focus:outline-none focus:ring-2 focus:ring-emerald-400/15">
+        </div>
+        <ul id="roots" class="divide-y divide-ink-700/70 overflow-y-auto overscroll-contain xl:max-h-[min(32rem,60vh)]"></ul>
+        <button id="roots-more" type="button" hidden class="touch:min-h-11 flex w-full items-center justify-center gap-1.5 border-t border-ink-700/70 px-4 py-2 text-xs font-medium text-zinc-500 hover:bg-ink-850 hover:text-zinc-200 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400"></button>
         <p id="roots-hint" class="border-t border-ink-700/70 px-4 py-2.5 text-xs text-zinc-500">To add folders from here, <button id="roots-unlock" type="button" class="rounded font-medium text-emerald-300 underline decoration-emerald-400/40 underline-offset-2 hover:text-emerald-200 focus-visible:outline-2 focus-visible:outline-emerald-400">unlock</button> with the fleet key, or run <code class="rounded border border-ink-600 bg-ink-850 px-1 font-mono text-[11px] text-zinc-300">fleet web</code> on <span id="roots-hint-host" class="font-mono text-zinc-400">the server</span> and open the link it prints.</p>
       </section>
 
@@ -270,27 +276,25 @@
           <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Prompt <span class="normal-case tracking-normal text-zinc-600">· optional, the agent waits for your first message without one</span></span>
           <textarea id="launch-prompt" rows="3" spellcheck="true" placeholder="What should the agent do? · Ctrl+Enter starts" class="mt-1 block max-h-[40dvh] min-h-20 w-full resize-none rounded-md border border-ink-600 bg-ink-950 px-2.5 py-2 text-[13px] leading-relaxed max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20"></textarea>
         </label>
-        <details class="group rounded-md border border-ink-700 bg-ink-850/40">
+        <div class="flex flex-col gap-3 sm:gap-2.5">
+          <div class="flex flex-col gap-1.5 sm:grid sm:grid-cols-[4.5rem_1fr] sm:items-baseline sm:gap-3">
+            <span id="launch-iso-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Checkout</span>
+            <div id="launch-iso" role="radiogroup" aria-labelledby="launch-iso-label" class="flex flex-wrap items-center gap-1.5"></div>
+          </div>
+          <div class="flex flex-col gap-1.5 sm:grid sm:grid-cols-[4.5rem_1fr] sm:items-baseline sm:gap-3">
+            <span id="launch-sandbox-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Sandbox</span>
+            <div id="launch-sandbox" role="radiogroup" aria-labelledby="launch-sandbox-label" class="flex flex-wrap items-center gap-1.5"></div>
+          </div>
+          <div class="flex flex-col gap-1.5 sm:grid sm:grid-cols-[4.5rem_1fr] sm:items-baseline sm:gap-3">
+            <span id="launch-then-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Then</span>
+            <div id="launch-then" role="radiogroup" aria-labelledby="launch-then-label" class="flex flex-wrap items-center gap-1.5"></div>
+          </div>
+        </div>
+        <details id="launch-more" class="group rounded-md border border-ink-700 bg-ink-850/40">
           <summary class="touch:min-h-11 flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400">
-            <span class="inline-block transition-transform group-open:rotate-90 motion-reduce:transition-none">▸</span> Options <span id="launch-options-note" class="font-normal text-zinc-600"></span>
+            <span class="inline-block transition-transform group-open:rotate-90 motion-reduce:transition-none">▸</span> Name &amp; branch <span id="launch-more-note" class="font-normal text-zinc-600">· generated</span>
           </summary>
           <div class="grid gap-3 border-t border-ink-700 px-3 py-3 sm:grid-cols-2">
-            <label class="block">
-              <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Checkout</span>
-              <select id="launch-iso" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
-                <option value="">own worktree in git repos (default)</option>
-                <option value="worktree">own worktree</option>
-                <option value="pinned">the folder itself</option>
-              </select>
-            </label>
-            <label class="block">
-              <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Sandbox</span>
-              <select id="launch-sandbox" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
-                <option value="">server default</option>
-                <option value="docker">Docker container</option>
-                <option value="none">none, on the server</option>
-              </select>
-            </label>
             <label class="block">
               <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Name</span>
               <input id="launch-name" type="text" spellcheck="false" autocomplete="off" maxlength="64" placeholder="generated" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
@@ -306,6 +310,7 @@
 
     <div class="flex shrink-0 flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t border-ink-700 px-4 py-3 max-sm:pb-[max(0.75rem,env(safe-area-inset-bottom))]">
       <div id="launch-status" role="status" aria-live="polite" class="min-h-5 min-w-0 basis-full text-xs sm:basis-0 sm:flex-1"></div>
+      <div id="launch-keys" hidden class="flex touch:hidden basis-full flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-600 sm:order-last"></div>
       <button id="launch-cancel" type="button" class="touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Cancel</button>
       <button id="launch-start" type="submit" class="touch:min-h-11 rounded-md bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Start</button>
     </div>

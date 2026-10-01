@@ -372,16 +372,22 @@ Changes apply at once, rewrite `config.toml` and show up in the CLI
 ### Sessions in the browser
 
 With the admin link, every agent row has an **open** button (**answer** when
-it needs input), and *Agents → New session* starts one:
+it needs input), and *Agents → New session* (or the **N** key, or **▸ start**
+on a root, which picks that folder) starts one:
 
 - **Start**: pick the machine, the agent (Claude Code, Codex, shell), a
-  root and a folder inside it, and optionally a prompt (Ctrl+Enter starts).
+  root and a folder inside it, and optionally a prompt.
   *Model* and *Effort* choose what the agent runs at (Claude Code: Opus,
   Fable, Sonnet, Haiku at Low to Max or Ultracode; Codex: the models it
   lists), *Default* leaves it to the CLI's own settings; the page remembers
-  the pick per agent. *Options* choose a worktree or the folder itself, the
-  Docker sandbox, a name and a branch, like `fleet run`. The session opens
-  right away.
+  the pick per agent. *Checkout* (worktree or the folder itself) and
+  *Sandbox* (Docker or not) are click choices like `fleet run`'s flags, *Then*
+  opens the chat, the chat with the terminal screen, or stays on the list;
+  the page remembers them. *Name & branch* are optional. Keys: Ctrl/⌘+Enter
+  starts, Ctrl/⌘+Shift+Enter starts and shows the screen, Alt+1–9 picks the
+  agent.
+- **Roots**: with more than six, the list shows the first six, a filter and
+  *Show all*.
 - **Model and effort.** Under the message box, *model* and *effort* show
   what the session runs at (read from the transcript: the model of the
   last reply, or a switch since). In a Claude Code session they switch it,

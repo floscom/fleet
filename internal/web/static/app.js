@@ -438,6 +438,8 @@
       (multi ? `${S.roots.length ? ' · ' : ''}on ${S.server.name || S.server.hostname}` : '');
     if (confirmRemove && !S.roots.some((r) => r.name === confirmRemove)) confirmRemove = '';
     if (!S.roots.length) {
+      $('roots-find').hidden = true;
+      $('roots-more').hidden = true;
       if (admin) {
         const li = emptyRow('no roots yet', 'agents can only start inside a root folder');
         const add = h('button', 'touch:min-h-11 mt-3 inline-flex items-center gap-1 rounded-md bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-emerald-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400', '+ Add a folder');
@@ -450,21 +452,50 @@
       }
       return;
     }
-    ul.replaceChildren(...S.roots.map((r) => {
-      const li = h('li', 'group flex items-start gap-3 px-4 py-3');
+    // Many roots: a filter, and the first few until "show all".
+    const many = S.roots.length > ROOTS_FEW;
+    $('roots-find').hidden = !many;
+    const q = many ? $('roots-filter').value.trim().toLowerCase() : '';
+    const words = q.split(/\s+/).filter(Boolean);
+    const found = S.roots.filter((r) => words.every((w) => (r.name + ' ' + shortPath(r.path)).toLowerCase().includes(w)));
+    const shown = q || rootsAll || !many ? found : found.slice(0, ROOTS_FEW);
+    // Keep the one awaiting removal in view.
+    if (confirmRemove && !shown.some((r) => r.name === confirmRemove)) {
+      const r = found.find((x) => x.name === confirmRemove);
+      if (r) shown.push(r);
+    }
+    const more = $('roots-more');
+    more.hidden = !many || !!q;
+    more.textContent = rootsAll ? 'Show fewer' : `Show all ${S.roots.length} roots`;
+    more.setAttribute('aria-expanded', String(rootsAll));
+    if (!shown.length) {
+      ul.replaceChildren(emptyRow(`no root matches "${q}"`));
+      return;
+    }
+    ul.replaceChildren(...shown.map((r) => {
+      const li = h('li', 'group flex items-center gap-2 py-2 pl-4 pr-2');
       const main = h('div', 'min-w-0 flex-1');
-      const top = h('div', 'flex flex-wrap items-center gap-2');
-      top.append(h('span', 'font-mono text-[13px] font-semibold text-zinc-100', r.name));
-      top.append(r.trust
-        ? chip('trusted', 'inline-flex items-center rounded-full bg-emerald-400/10 px-2 py-px text-[11px] font-medium text-emerald-300 ring-1 ring-inset ring-emerald-400/30')
-        : chip('untrusted', 'inline-flex items-center rounded-full bg-zinc-400/10 px-2 py-px text-[11px] font-medium text-zinc-400 ring-1 ring-inset ring-zinc-400/25'));
-      const path = h('div', 'mt-0.5 truncate font-mono text-xs text-zinc-500', shortPath(r.path));
+      const top = h('div', 'flex min-w-0 items-center gap-2');
+      const dot = h('span', r.trust ? 'size-1.5 shrink-0 rounded-full bg-emerald-400' : 'size-1.5 shrink-0 rounded-full bg-zinc-600');
+      dot.title = r.trust ? 'trusted: agents skip the "trust this folder?" prompt' : 'untrusted';
+      dot.setAttribute('role', 'img');
+      dot.setAttribute('aria-label', r.trust ? 'trusted' : 'untrusted');
+      top.append(dot, h('span', 'min-w-0 truncate font-mono text-[13px] font-semibold text-zinc-100', r.name));
+      if (r.adapters && r.adapters.length) {
+        top.append(h('span', 'shrink-0 truncate font-mono text-[11px] text-zinc-500', r.adapters.join(' · ')));
+      }
+      const path = h('div', 'truncate pl-3.5 font-mono text-xs text-zinc-500', shortPath(r.path));
       path.title = r.path;
       main.append(top, path);
-      if (r.adapters && r.adapters.length) {
-        main.append(h('div', 'mt-1.5 flex flex-wrap gap-1', ...r.adapters.map((a) => chip(a))));
-      }
       li.append(main);
+      if (admin && confirmRemove !== r.name) {
+        const go = h('button', 'touch:min-h-11 touch:min-w-11 touch:text-base shrink-0 rounded-md px-2 py-1 text-xs font-medium text-emerald-300/80 hover:bg-emerald-400/10 hover:text-emerald-200 focus-visible:outline-2 focus-visible:outline-emerald-400', '▸', h('span', 'touch:hidden', ' start'));
+        go.type = 'button';
+        go.title = `Start a session in ${r.name}`;
+        go.setAttribute('aria-label', `Start a session in ${r.name}`);
+        go.addEventListener('click', () => openLaunch({ root: r.name }));
+        li.append(go);
+      }
       if (admin) li.append(removeControl(r));
       return flash(li, 'root:' + r.name);
     }));
@@ -488,7 +519,8 @@
         h('span', 'text-[11px] text-zinc-500', 'running agents keep going'),
         h('div', 'flex items-center gap-1 touch:gap-2', no, yes));
     }
-    const b = h('button', 'touch:min-h-11 shrink-0 rounded-md px-2 py-1 text-xs text-zinc-600 hover:bg-ink-800 hover:text-rose-300 focus-visible:outline-2 focus-visible:outline-emerald-400 group-hover:text-zinc-400', 'remove');
+    const b = h('button', 'touch:min-h-11 touch:min-w-11 touch:text-sm shrink-0 rounded-md px-2 py-1 text-xs text-zinc-600 hover:bg-ink-800 hover:text-rose-300 focus-visible:outline-2 focus-visible:outline-emerald-400 group-hover:text-zinc-400',
+      h('span', 'touch:hidden', 'remove'), h('span', 'hidden touch:inline', '✕'));
     b.type = 'button';
     b.dataset.remove = r.name;
     b.setAttribute('aria-label', `Remove root ${r.name}`);
@@ -732,6 +764,8 @@
   let admin = false;
   let linkToken = false; // a token just came from a link; the next hello checks it
   let confirmRemove = ''; // root whose removal awaits confirmation
+  let rootsAll = false; // every root shown, not just the first few
+  const ROOTS_FEW = 6;
 
   function getToken() {
     try {
@@ -1608,7 +1642,9 @@
     error: '',
     listSig: '', // what the folder list shows (see renderLaunchList)
     listView: '', // and which list: a new one scrolls back to the top
+    listShown: false, // the chosen folder was scrolled into view in it
     modelSig: '', // what the model pickers show (see renderLaunchModel)
+    then: '', // what to show once started, if a shortcut says so
   };
 
   const launchAPI = (path) => (launch.host ? `/api/hosts/${encodeURIComponent(launch.host)}/${path}` : '/api/' + path);
@@ -1617,19 +1653,30 @@
   const dirKey = (root, sub) => JSON.stringify([root, sub]);
   const inRoot = (r, sub) => (sub ? joinPath(r.path, sub) : r.path);
 
-  function openLaunch() {
+  // openLaunch opens the dialog; opts.root (with opts.host, opts.sub)
+  // chooses the folder to start in.
+  function openLaunch(opts) {
     if (!admin) return;
     launch.open = true;
     launch.error = '';
     launch.busy = false;
+    if (opts && opts.root) {
+      launch.host = opts.host || '';
+      launch.root = opts.root;
+      launch.sub = opts.sub || '';
+    }
     if (launch.host && !pickerHosts().some((x) => x.id === launch.host)) launch.host = '';
     $('launch-prompt').value = '';
     $('launch-search').value = '';
     // Key hints only where there are keys.
-    $('launch-prompt').placeholder = touch() ? 'What should the agent do?' : 'What should the agent do? · Ctrl+Enter starts';
+    $('launch-prompt').placeholder = touch() ? 'What should the agent do?' : `What should the agent do? · ${MOD}+Enter starts`;
     $('launch-search').placeholder = touch() ? 'Search folders' : 'Search folders · ↓ to move · → to look inside';
     $('launch-name').value = '';
     $('launch-branch').value = '';
+    $('launch-more').open = false;
+    renderLaunchMore();
+    renderLaunchOptions();
+    renderLaunchKeys();
     $('launch').showModal();
     $('launch-body').scrollTop = 0;
     fitHeight($('launch-prompt'));
@@ -1637,6 +1684,60 @@
     checkHosts();
     loadLaunchHost();
     if (!touch()) $('launch-prompt').focus();
+  }
+
+  // Checkout, sandbox and what to show once started: click chips, kept
+  // for the next session.
+  const LAUNCH_OPTS = 'fleet.launch.options';
+  const LAUNCH_CHOICES = {
+    iso: [['', 'Auto', 'an own worktree in git repos, else the folder itself'], ['worktree', 'Own worktree', 'a git worktree on a branch of its own'], ['pinned', 'The folder itself', 'works in the folder, next to you and other agents']],
+    sandbox: [['', 'Server default', "the server's [sandbox] setting"], ['docker', 'Docker', 'in a Docker container'], ['none', 'None', 'right on the server']],
+    then: [['chat', 'Show chat', 'open the conversation'], ['screen', 'Show screen', 'open the conversation with the terminal screen'], ['stay', 'Stay here', 'keep this dialog closed and the list in view']],
+  };
+  const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  const MOD = MAC ? '⌘' : 'Ctrl';
+
+  const checkedValue = (id) => ($(id).querySelector('input:checked') || { value: '' }).value;
+
+  function launchOpts() {
+    try {
+      return JSON.parse(localStorage.getItem(LAUNCH_OPTS)) || {};
+    } catch {
+      return {};
+    }
+  }
+
+  function renderLaunchOptions() {
+    const saved = launchOpts();
+    for (const [key, choices] of Object.entries(LAUNCH_CHOICES)) {
+      const pick = choices.some(([v]) => v === saved[key]) ? saved[key] : choices[0][0];
+      refill($('launch-' + key), ...choices.map(([v, label, title]) => radioChip('launch-' + key, v, label, v === pick, title)));
+    }
+  }
+
+  function saveLaunchOptions() {
+    const o = {};
+    for (const key of Object.keys(LAUNCH_CHOICES)) o[key] = checkedValue('launch-' + key);
+    try {
+      localStorage.setItem(LAUNCH_OPTS, JSON.stringify(o));
+    } catch {
+      // private mode: kept until the dialog opens again
+    }
+  }
+
+  // renderLaunchMore sums up the name and branch while they are folded.
+  function renderLaunchMore() {
+    const set = [$('launch-name').value.trim(), $('launch-branch').value.trim()].filter(Boolean);
+    $('launch-more-note').textContent = '· ' + (set.length ? set.join(' · ') : 'generated');
+  }
+
+  function renderLaunchKeys() {
+    const box = $('launch-keys');
+    box.hidden = touch();
+    if (box.hidden) return;
+    const key = (k, what) => h('span', '', h('kbd', 'rounded border border-ink-600 bg-ink-850 px-1 font-mono text-[10px] text-zinc-400', k), ' ' + what);
+    box.replaceChildren(key(MOD + '+Enter', 'start'), key(MOD + '+Shift+Enter', 'start, show screen'),
+      key((MAC ? '⌥' : 'Alt+') + '1–9', 'agent'), key('Esc', 'close'));
   }
 
   function closeLaunch() {
@@ -1821,9 +1922,8 @@
   }
 
   function saveLaunchPick() {
-    const value = (id) => ($(id).querySelector('input:checked') || { value: '' }).value;
     const picks = launchPicks();
-    picks[launch.adapter] = { model: value('launch-model'), effort: value('launch-effort') };
+    picks[launch.adapter] = { model: checkedValue('launch-model'), effort: checkedValue('launch-effort') };
     try {
       localStorage.setItem(LAUNCH_PICKS, JSON.stringify(picks));
     } catch {
@@ -2050,7 +2150,17 @@
       return h('li', 'flex items-stretch gap-0.5', b, look);
     }));
     ul.classList.toggle('opacity-60', rows.length === 1 && rows[0].note === 'loading…');
-    if (!sameView) ul.scrollTop = 0;
+    // A new list starts at the top; recent folders and roots at the chosen
+    // folder once it is in them.
+    if (!sameView) {
+      ul.scrollTop = 0;
+      launch.listShown = false;
+    }
+    const c = !launch.listShown && !launch.look && !$('launch-search').value.trim() && ul.querySelector('button[aria-pressed="true"]');
+    if (c) {
+      launch.listShown = true;
+      ul.scrollTop = c.getBoundingClientRect().top - ul.getBoundingClientRect().top - ul.clientHeight / 3;
+    }
     if (focused) {
       const again = [...ul.querySelectorAll('button[data-key]')].find((b) => b.dataset.key === focused);
       if (again) again.focus();
@@ -2093,6 +2203,8 @@
     const root = launchRoot();
     if (!root || !launch.adapter || launch.busy) return;
     const host = launch.host;
+    const then = launch.then || checkedValue('launch-then') || 'chat';
+    launch.then = '';
     launch.busy = true;
     launch.error = '';
     renderLaunch();
@@ -2107,8 +2219,8 @@
         prompt: $('launch-prompt').value,
         name: $('launch-name').value.trim(),
         branch: $('launch-branch').value.trim(),
-        isolation: $('launch-iso').value,
-        sandbox: $('launch-sandbox').value,
+        isolation: checkedValue('launch-iso'),
+        sandbox: checkedValue('launch-sandbox'),
       });
       launch.busy = false;
       closeLaunch();
@@ -2119,7 +2231,7 @@
         S.remote.set(host, rem);
         invalidate('agents');
       }
-      openChat(host, r.agent.id, r.agent);
+      if (then !== 'stay') openChat(host, r.agent.id, r.agent, { screen: then === 'screen' });
       return;
     } catch (e) {
       launch.error = e.message;
@@ -2133,7 +2245,7 @@
     const search = $('launch-search');
     const list = $('launch-list');
     const prompt = $('launch-prompt');
-    $('agents-new').addEventListener('click', openLaunch);
+    $('agents-new').addEventListener('click', () => openLaunch());
     $('launch-form').addEventListener('submit', startSession);
     $('launch-close').addEventListener('click', closeLaunch);
     $('launch-cancel').addEventListener('click', closeLaunch);
@@ -2147,6 +2259,9 @@
     });
     $('launch-model').addEventListener('change', saveLaunchPick);
     $('launch-effort').addEventListener('change', saveLaunchPick);
+    for (const key of Object.keys(LAUNCH_CHOICES)) $('launch-' + key).addEventListener('change', saveLaunchOptions);
+    $('launch-name').addEventListener('input', renderLaunchMore);
+    $('launch-branch').addEventListener('input', renderLaunchMore);
     search.addEventListener('input', renderLaunch);
     search.addEventListener('keydown', (ev) => {
       const first = list.querySelector('button[data-key]');
@@ -2192,11 +2307,21 @@
       const below = prompt.getBoundingClientRect().bottom + 12 - body.getBoundingClientRect().bottom;
       if (below > 0) body.scrollTop += below;
     });
-    // Ctrl/Cmd+Enter in the prompt starts the session.
-    prompt.addEventListener('keydown', (ev) => {
+    // Anywhere in the dialog: Ctrl/Cmd+Enter starts the session, with
+    // Shift it shows the screen too; Alt+1–9 chooses the agent CLI.
+    dlg.addEventListener('keydown', (ev) => {
+      if (ev.isComposing) return;
       if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
         ev.preventDefault();
+        launch.then = ev.shiftKey ? 'screen' : '';
         $('launch-form').requestSubmit();
+      } else if (ev.altKey && !ev.ctrlKey && !ev.metaKey && /^Digit[1-9]$/.test(ev.code)) {
+        const rb = $('launch-adapters').querySelectorAll('input[name="launch-adapter"]')[Number(ev.code.slice(5)) - 1];
+        if (!rb || rb.disabled) return;
+        ev.preventDefault();
+        rb.checked = true;
+        launch.adapter = rb.value;
+        renderLaunch();
       }
     });
     dlg.addEventListener('close', () => {
@@ -2273,6 +2398,7 @@
     if (opts && opts.run) wf.shown.add(opts.run);
     chat.screenOpen = !!agent && (agent.state === 'needs_input' || agent.adapter === 'shell');
     chat.screenAutoOpened = chat.screenOpen && agent.adapter !== 'shell';
+    if (opts && opts.screen) Object.assign(chat, { screenOpen: true, screenAuto: false, screenAutoOpened: false });
     $('chat-input').value = '';
     autosize();
     $('chat-screen-pre').textContent = '';
@@ -4718,6 +4844,34 @@
     setTimeout(connect, wait);
   }
 
+  function wireRoots() {
+    const filter = $('roots-filter');
+    filter.addEventListener('input', () => invalidate('roots'));
+    filter.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && filter.value) {
+        filter.value = '';
+        invalidate('roots');
+      }
+    });
+    $('roots-more').addEventListener('click', () => {
+      rootsAll = !rootsAll;
+      invalidate('roots');
+    });
+  }
+
+  // N starts a session from anywhere on the page, but in a text field or
+  // an open dialog.
+  function wireKeys() {
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'n' && ev.key !== 'N') return;
+      if (ev.ctrlKey || ev.metaKey || ev.altKey || ev.isComposing || ev.repeat || !admin) return;
+      const t = ev.target;
+      if (t.closest('input, textarea, select, [contenteditable]') || document.querySelector('dialog[open]')) return;
+      ev.preventDefault();
+      openLaunch();
+    });
+  }
+
   // ------------------------------------------------------------------- boot
 
   linkToken = takeLinkToken();
@@ -4725,6 +4879,8 @@
   wirePicker();
   wireLaunch();
   wireChat();
+  wireRoots();
+  wireKeys();
   // A `fleet web` link opened in a tab that already shows the dashboard.
   window.addEventListener('hashchange', () => {
     if (takeLinkToken()) checkSession(true);
