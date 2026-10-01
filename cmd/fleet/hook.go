@@ -20,16 +20,22 @@ const (
 	hookMaxPayload  = 1 << 20
 	hookReadTimeout = 2 * time.Second
 	hookSendTimeout = 2 * time.Second
+	// hookWaitTimeout bounds `fleet hook --wait`; the agent CLI's own hook
+	// timeout usually ends it first.
+	hookWaitTimeout = 25 * time.Hour
 )
 
 // newHookCmd is `fleet hook`, run by agent CLIs from their hooks. It must
 // never disturb the agent: it prints nothing, ignores every error and always
 // exits 0 (agents feed hook stdout to the model, and some treat non-zero
 // exits as "block this action"). Flags are parsed by hand so even a bad
-// command line cannot make cobra print usage.
+// command line cannot make cobra print usage. The one exception is
+// --wait: the daemon may hold the event until the user answered what the
+// hook asks on the dashboard, and the hook prints what the daemon returns
+// (see adapter.Asker).
 func newHookCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:                "hook --agent ID --adapter A <event> [payload]",
+		Use:                "hook [--wait] --agent ID --adapter A <event> [payload]",
 		Short:              "Internal: deliver an agent hook event to the local daemon",
 		Hidden:             true,
 		DisableFlagParsing: true,
@@ -45,6 +51,7 @@ type hookArgs struct {
 	agent, adapter, event string
 	payload               []byte // from the positional argument, if any
 	hasPayload            bool
+	wait                  bool
 }
 
 // parseHookArgs accepts --agent/--adapter as "--k v", "--k=v" or with a
@@ -65,6 +72,9 @@ func parseHookArgs(args []string) hookArgs {
 		k, v, hasV := strings.Cut(strings.TrimLeft(a, "-"), "=")
 		var dst *string
 		switch k {
+		case "wait":
+			h.wait = !hasV
+			continue
 		case "agent":
 			dst = &h.agent
 		case "adapter":
@@ -97,14 +107,21 @@ func runHook(args []string, stdin *os.File) {
 	if !h.hasPayload && stdin != nil && !term.IsTerminal(int(stdin.Fd())) {
 		payload = readWithTimeout(stdin, hookMaxPayload, hookReadTimeout)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hookSendTimeout)
+	timeout := hookSendTimeout
+	if h.wait {
+		timeout = hookWaitTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	c, err := client.DialLocal(ctx)
 	if err != nil {
 		return
 	}
 	defer c.Close()
-	_ = c.Hook(ctx, &fleetv1.HookEvent{AgentId: h.agent, Adapter: h.adapter, Event: h.event, Payload: payload})
+	resp, err := c.Hook(ctx, &fleetv1.HookEvent{AgentId: h.agent, Adapter: h.adapter, Event: h.event, Payload: payload, Wait: h.wait})
+	if err == nil && h.wait && len(resp.GetOutput()) > 0 {
+		_, _ = os.Stdout.Write(resp.GetOutput())
+	}
 }
 
 // readWithTimeout reads r to EOF (at most max bytes), giving up after

@@ -104,6 +104,11 @@ func (s *Server) apiWorkflowChat(w http.ResponseWriter, r *http.Request) {
 	s.serveChat(w, r, func() (Chat, error) { return s.opts.Source.WorkflowChat(id, run, sub) })
 }
 
+func (s *Server) apiWorkflowImage(w http.ResponseWriter, r *http.Request) {
+	id, run, sub := r.PathValue("id"), r.PathValue("run"), r.PathValue("sub")
+	s.serveImage(w, r, func() (Chat, error) { return s.opts.Source.WorkflowChat(id, run, sub) })
+}
+
 // version names what v says, short.
 func version(v any) string {
 	data, _ := json.Marshal(v)

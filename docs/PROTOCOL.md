@@ -866,7 +866,10 @@ errors.
 
 **`HookEvent` → `HookResponse`**: sent by `fleet hook` from inside an
 agent's process tree. On TLS it fails with `UNAUTHENTICATED`. Clients never
-send it.
+send it. With `wait` set (`fleet hook --wait`), a hook that asks the user
+something the dashboard can answer (Claude's `AskUserQuestion`) gets its
+response only once the question is answered on the dashboard, answered in
+the terminal, or gone; `output` is what the hook prints for the agent CLI.
 
 ## 12. Events (Subscribe)
 

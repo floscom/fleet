@@ -113,6 +113,7 @@ type block struct {
 	Input     json.RawMessage `json:"input"`
 	ToolUseID string          `json:"tool_use_id"`
 	Content   json.RawMessage `json:"content"`
+	Source    imageSource     `json:"source"`
 	IsError   bool            `json:"is_error"`
 }
 
@@ -198,10 +199,12 @@ func userContent(raw json.RawMessage) []transcript.Entry {
 	}
 	var out []transcript.Entry
 	var parts []string
+	var imgs []transcript.Image
+	n := 0 // the line's images so far, numbered as TranscriptImage does
 	flush := func() {
-		if len(parts) > 0 {
-			out = append(out, transcript.Entry{Kind: transcript.User, Text: transcript.Clip(strings.Join(parts, "\n"), transcript.MaxText)})
-			parts = nil
+		if len(parts) > 0 || len(imgs) > 0 {
+			out = append(out, transcript.Entry{Kind: transcript.User, Text: transcript.Clip(strings.Join(parts, "\n"), transcript.MaxText), Images: imgs})
+			parts, imgs = nil, nil
 		}
 	}
 	for _, raw := range blocks {
@@ -219,10 +222,14 @@ func userContent(raw json.RawMessage) []transcript.Entry {
 			flush()
 			out = append(out, es...)
 		case "image":
-			parts = append(parts, "[image]")
+			if b.Source.inline() {
+				imgs = append(imgs, transcript.Image{N: n, Type: b.Source.MediaType})
+				n++
+			}
 		case "tool_result":
 			flush()
-			out = append(out, transcript.Entry{Kind: transcript.Result, ID: b.ToolUseID, Output: resultText(b.Content), Error: b.IsError})
+			text, ri := resultContent(b.Content, &n)
+			out = append(out, transcript.Entry{Kind: transcript.Result, ID: b.ToolUseID, Output: text, Error: b.IsError, Images: ri})
 		}
 	}
 	flush()
@@ -340,25 +347,31 @@ func stripTag(s, tag string) string {
 	}
 }
 
-// resultText is the text of a tool result: a string, or text, image and
-// tool reference blocks. Claude Code appends system reminders to some
-// results (they are for the model) and wraps tool errors in a tag.
-func resultText(raw json.RawMessage) string {
+// resultContent is the text and the images of a tool result: a string, or
+// text, image and tool reference blocks. n numbers the images of the line
+// (see userContent). Claude Code appends system reminders to some results
+// (they are for the model) and wraps tool errors in a tag.
+func resultContent(raw json.RawMessage, n *int) (string, []transcript.Image) {
 	var s string
+	var imgs []transcript.Image
 	if json.Unmarshal(raw, &s) != nil {
 		var blocks []struct {
-			Type     string `json:"type"`
-			Text     string `json:"text"`
-			ToolName string `json:"tool_name"`
+			Type     string      `json:"type"`
+			Text     string      `json:"text"`
+			ToolName string      `json:"tool_name"`
+			Source   imageSource `json:"source"`
 		}
 		_ = json.Unmarshal(raw, &blocks)
 		parts := make([]string, 0, len(blocks))
 		for _, b := range blocks {
-			switch b.Type {
-			case "text":
+			switch {
+			case b.Type == "text":
 				parts = append(parts, b.Text)
-			case "tool_reference":
+			case b.Type == "tool_reference":
 				parts = append(parts, b.ToolName)
+			case b.Type == "image" && b.Source.inline():
+				imgs = append(imgs, transcript.Image{N: *n, Type: b.Source.MediaType})
+				*n++
 			default:
 				parts = append(parts, "["+b.Type+"]")
 			}
@@ -369,7 +382,7 @@ func resultText(raw json.RawMessage) string {
 	if strings.HasPrefix(strings.TrimSpace(s), "<tool_use_error>") {
 		s, _ = inner(s, "tool_use_error")
 	}
-	return transcript.Clip(strings.Trim(s, "\r\n"), transcript.MaxOutput)
+	return transcript.Clip(strings.Trim(s, "\r\n"), transcript.MaxOutput), imgs
 }
 
 // assistantContent maps an assistant message. API errors are recorded as

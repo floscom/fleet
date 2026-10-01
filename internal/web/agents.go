@@ -9,6 +9,8 @@ package web
 //	GET  /api/agents/{id}/chat        its conversation (see serveChat)
 //	GET  /api/agents/{id}/screen      its terminal screen, as text
 //	POST /api/agents/{id}/input       type text and/or press keys (see apiInput)
+//	GET  /api/agents/{id}/image       an image of its conversation
+//	POST /api/agents/{id}/answer      answer the questions it asks
 //	POST /api/agents/{id}/model       switch its model and/or effort
 //	POST /api/agents/{id}/stop        kill it
 
@@ -26,6 +28,7 @@ import (
 	"time"
 
 	fleetv1 "fleet/gen/fleetv1"
+	"fleet/internal/ask"
 	"fleet/internal/transcript"
 )
 
@@ -54,6 +57,11 @@ type Chat struct {
 	// Model is the model and effort the session runs at; nil when its
 	// adapter offers no choice of model.
 	Model *Model
+	// Image reads image n of a transcript line; nil when the adapter keeps
+	// no images.
+	Image func(line []byte, n int) (mediaType string, data []byte, ok bool)
+	// Asks are the questions the agent waits on, for a form.
+	Asks []ask.Pending
 }
 
 // Model is the model and effort an agent's session runs at, and what it
@@ -265,6 +273,9 @@ type chatReply struct {
 	// Model is the model and effort the session runs at, if its adapter
 	// offers a choice.
 	Model *Model `json:"model,omitempty"`
+	// Asks are the questions the agent waits on, in the order it shows
+	// them; answer them with POST .../answer.
+	Asks []ask.Pending `json:"asks"`
 }
 
 // apiChat serves an agent's conversation, parsed from its transcript.
@@ -280,6 +291,7 @@ func (s *Server) apiChat(w http.ResponseWriter, r *http.Request) {
 //	file=F&after=N       entries after offset N of file F; with wait=1 and
 //	                     v=<updatedAtMs the page knows>, held until there
 //	                     are some, the agent changed, or chatWait passed
+//	                     (or with asks=<ids>, its questions changed)
 //	file=F&before=N      entries before offset N (older)
 //
 // A file that is not the agent's transcript (anymore) gives the latest
@@ -298,7 +310,7 @@ func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, find func() (
 			s.writeSourceError(w, err)
 			return
 		}
-		reply := chatReply{Agent: agentOf(c.Agent), File: fileKey(c.Path), Entries: []transcript.Entry{}, Model: c.Model}
+		reply := chatReply{Agent: agentOf(c.Agent), File: fileKey(c.Path), Entries: []transcript.Entry{}, Model: c.Model, Asks: nonNil(c.Asks)}
 		switch {
 		case c.Path == "":
 			reply.Reset = file != ""
@@ -313,14 +325,14 @@ func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, find func() (
 			err = reply.tail(c)
 		}
 		if errors.Is(err, fs.ErrNotExist) {
-			reply = chatReply{Agent: reply.Agent, Entries: []transcript.Entry{}, Reset: file != "", Model: c.Model}
+			reply = chatReply{Agent: reply.Agent, Entries: []transcript.Entry{}, Reset: file != "", Model: c.Model, Asks: reply.Asks}
 			err = nil
 		}
 		if err != nil {
 			s.writeSourceError(w, err)
 			return
 		}
-		news := len(reply.Entries) > 0 || reply.Reset || reply.More || reply.Agent.UpdatedAtMs != seen
+		news := len(reply.Entries) > 0 || reply.Reset || reply.More || reply.Agent.UpdatedAtMs != seen || q.Has("asks") && asksNews(q.Get("asks"), reply.Asks)
 		if !wait || news || !time.Now().Before(deadline) {
 			writeJSON(w, http.StatusOK, reply)
 			return
@@ -331,6 +343,87 @@ func (s *Server) serveChat(w http.ResponseWriter, r *http.Request, find func() (
 		case <-time.After(chatPoll):
 		}
 	}
+}
+
+// asksNews reports whether the questions differ from those the page knows
+// (asks=<ids, comma separated>): a question comes with the dialog that
+// asks it, but may also turn up while the agent already waits on another.
+func asksNews(known string, asks []ask.Pending) bool {
+	ids := make([]string, len(asks))
+	for i, a := range asks {
+		ids[i] = a.ID
+	}
+	return strings.Join(ids, ",") != known
+}
+
+// apiAnswer answers questions the agent asks (chatReply.Asks):
+//
+//	{"ask": "<id>", "answers": {"<question>": ["<label or text>", ...]},
+//	 "notes": {"<question>": "..."}}  or  {"ask": "<id>", "decline": "..."}
+func (s *Server) apiAnswer(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Ask string `json:"ask"`
+		ask.Answer
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Ask == "" {
+		writeError(w, http.StatusBadRequest, "ask is required")
+		return
+	}
+	if err := s.opts.Source.Answer(r.PathValue("id"), req.Ask, req.Answer); err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// imageTypes are the image types the page is given.
+var imageTypes = map[string]bool{"image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true}
+
+// apiImage serves an image of an agent's conversation.
+func (s *Server) apiImage(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.serveImage(w, r, func() (Chat, error) { return s.opts.Source.Chat(id) })
+}
+
+// serveImage serves image n of the line at offset line of the transcript
+// find returns (file=F&line=N&n=K, see transcript.Image) as
+// {"type": "image/png", "data": "<base64>"}: JSON, like every reply a
+// fleet forwards from another (see peers.go), shown as a data: URL.
+func (s *Server) serveImage(w http.ResponseWriter, r *http.Request, find func() (Chat, error)) {
+	q := r.URL.Query()
+	line, err1 := strconv.ParseInt(q.Get("line"), 10, 64)
+	n, err2 := strconv.Atoi(q.Get("n"))
+	if err1 != nil || err2 != nil || line < 0 || n < 0 {
+		writeError(w, http.StatusBadRequest, "line and n are required")
+		return
+	}
+	c, err := find()
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	if c.Path == "" || c.Image == nil || q.Get("file") != fileKey(c.Path) {
+		writeError(w, http.StatusNotFound, "no such image")
+		return
+	}
+	data, ok, err := transcript.LineAt(c.Path, line, transcript.MaxLine)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		s.writeSourceError(w, err)
+		return
+	}
+	var typ string
+	var img []byte
+	if ok {
+		typ, img, ok = c.Image(data, n)
+	}
+	if !ok || !imageTypes[typ] {
+		writeError(w, http.StatusNotFound, "no such image")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"type": typ, "data": img})
 }
 
 // read fills the reply from a page.

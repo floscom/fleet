@@ -133,9 +133,10 @@ func TestParseHookArgs(t *testing.T) {
 		args                  []string
 		agent, adapter, event string
 		payload               string
-		hasPayload            bool
+		hasPayload, wait      bool
 	}{
 		{args: []string{"--agent", "a1", "--adapter", "claude", "Stop"}, agent: "a1", adapter: "claude", event: "Stop"},
+		{args: []string{"--wait", "--agent", "a1", "--adapter", "claude", "PermissionRequest"}, agent: "a1", adapter: "claude", event: "PermissionRequest", wait: true},
 		{args: []string{"--agent=a1", "-adapter=codex", "notify", `{"type":"x"}`}, agent: "a1", adapter: "codex", event: "notify", payload: `{"type":"x"}`, hasPayload: true},
 		{args: []string{"Stop", "--agent", "a1", "--bogus"}, agent: "a1", event: "Stop"},
 		{args: []string{"--agent", "a1", "--", "-weird", "{}"}, agent: "a1", event: "-weird", payload: "{}", hasPayload: true},
@@ -143,7 +144,7 @@ func TestParseHookArgs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		h := parseHookArgs(tt.args)
-		if h.agent != tt.agent || h.adapter != tt.adapter || h.event != tt.event || string(h.payload) != tt.payload || h.hasPayload != tt.hasPayload {
+		if h.agent != tt.agent || h.adapter != tt.adapter || h.event != tt.event || string(h.payload) != tt.payload || h.hasPayload != tt.hasPayload || h.wait != tt.wait {
 			t.Errorf("parseHookArgs(%q) = %+v", tt.args, h)
 		}
 	}

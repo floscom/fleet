@@ -1,16 +1,22 @@
 package daemon
 
 import (
+	"context"
 	"slices"
 
 	fleetv1 "fleet/gen/fleetv1"
 	"fleet/internal/adapter"
+	"fleet/internal/ask"
 )
 
 // hook routes an event from `fleet hook` to the agent's adapter and applies
 // the resulting state update. Updates for finished agents are ignored, and
 // hooks can never end an agent: tmux is the source of truth for exits.
-func (m *manager) hook(ev *fleetv1.HookEvent) error {
+//
+// A waiting hook (`fleet hook --wait`) whose dialog asks questions the
+// dashboard can answer (adapter.Asker) returns only once they are
+// answered or the dialog is gone, with what the hook prints.
+func (m *manager) hook(ctx context.Context, ev *fleetv1.HookEvent) ([]byte, error) {
 	m.mu.Lock()
 	a, ok := m.agents[ev.GetAgentId()]
 	var adapterID string
@@ -19,24 +25,45 @@ func (m *manager) hook(ev *fleetv1.HookEvent) error {
 	}
 	m.mu.Unlock()
 	if !ok {
-		return errf(codeNotFound, "no agent %q", ev.GetAgentId())
+		return nil, errf(codeNotFound, "no agent %q", ev.GetAgentId())
 	}
 	if ev.GetAdapter() != "" && ev.GetAdapter() != adapterID {
-		return errf(codeInvalid, "agent %s runs adapter %q, not %q", ev.GetAgentId(), adapterID, ev.GetAdapter())
+		return nil, errf(codeInvalid, "agent %s runs adapter %q, not %q", ev.GetAgentId(), adapterID, ev.GetAdapter())
 	}
 	ad, ok := m.d.opts.Adapters.Get(adapterID)
 	if !ok {
-		return errf(codeNotFound, "adapter %q is not registered", adapterID)
+		return nil, errf(codeNotFound, "adapter %q is not registered", adapterID)
 	}
-	upd, ok := ad.HandleHook(adapter.HookEvent{AgentID: ev.GetAgentId(), Event: ev.GetEvent(), Payload: ev.GetPayload()})
+	hev := adapter.HookEvent{AgentID: ev.GetAgentId(), Event: ev.GetEvent(), Payload: ev.GetPayload()}
+	upd, ok := ad.HandleHook(hev)
 	if !ok {
-		return nil
+		return nil, nil
+	}
+	var qs []ask.Question
+	asker, _ := ad.(adapter.Asker)
+	if ev.GetWait() && asker != nil && upd.State == stateNeedsInput {
+		qs, _ = asker.Questions(hev)
 	}
 
+	// The question is recorded with the state change, under the same lock:
+	// whoever sees the agent's dialog sees its question too.
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.applyHookLocked(a, ad, upd)
+	var p *pendingAsk
+	if len(qs) > 0 && a.live() {
+		p = m.addAskLocked(a, upd.Subagent, upd.Call, qs, hev, asker)
+	}
+	m.mu.Unlock()
+	if p == nil {
+		return nil, nil
+	}
+	return m.awaitAnswer(ctx, p), nil
+}
+
+// applyHookLocked applies a hook's state update to a live agent.
+func (m *manager) applyHookLocked(a *agentRec, ad adapter.Adapter, upd adapter.StateUpdate) {
 	if !a.live() {
-		return nil
+		return
 	}
 	changed := false
 	if upd.SessionID != "" && upd.SessionID != a.SessionID {
@@ -60,7 +87,6 @@ func (m *manager) hook(ev *fleetv1.HookEvent) error {
 	case saved:
 		m.saveLocked()
 	}
-	return nil
 }
 
 // dialog is a dialog a hook reported open.

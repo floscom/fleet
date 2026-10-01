@@ -399,6 +399,21 @@ it needs input), and *Agents → New session* starts one:
   (`GET /api/agents/{id}/chat?wait=1`, answered as soon as something
   changes, else after 8 seconds); *Load earlier* pages back through long
   sessions. After `/clear` the chat follows the new session.
+- **Images.** Images pasted into a message, and those a tool returned (a
+  `Read` of a PNG, a browser screenshot), show in the chat as thumbnails;
+  click one for full size. They stay in the transcript: the page fetches
+  each as it scrolls into view (`GET /api/agents/{id}/image`, the data as
+  JSON). Claude Code only for now.
+- **Questions.** When Claude asks you something with choices (its
+  AskUserQuestion tool), the questions show as a form above the message box:
+  pick one option, or several where it allows, type your own answer, add a
+  note, and *Answer*. A message sent while the form shows answers none of
+  them: Claude reads it instead, as with *Chat about this* in the terminal.
+  The dialog stays open in the terminal meanwhile, and whichever you answer
+  first wins. This works through Claude's PermissionRequest hook, which
+  `fleet hook --wait` holds open until the question is answered or gone
+  (`POST /api/agents/{id}/answer`); sessions started before this version,
+  or a question asked while the daemon restarted, fall back to the keys.
 - **Send.** The message box types into the agent's terminal and presses
   Enter (Enter sends, Shift+Enter is a new line; text with several lines
   goes in as one paste). While the agent works, Claude Code and Codex queue
@@ -469,7 +484,8 @@ the nonce, the method, the path and the body). The key never crosses the
 network, a signature is good for one request to one daemon, and a machine
 that only pretends to be a fleet learns nothing it can use. Only folder
 listings, adding or removing roots, and the session routes (list, start,
-chat, screen, input, model, stop, workflows) are forwarded.
+chat, images, screen, input, answers, model, stop, workflows) are
+forwarded.
 
 - The key lives in `~/.fleet/fleet-key` (0600). `fleet web --rotate` does
   not change it. For a new key, delete the file and run `fleet web`

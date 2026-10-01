@@ -613,5 +613,12 @@ message HookEvent {
   string adapter = 2;
   string event = 3;
   bytes payload = 4;
+  // Set by `fleet hook --wait`: the hook may wait for the user's answer to
+  // what it asks (a question the agent asks, answered from the dashboard),
+  // and prints HookResponse.output for the agent CLI.
+  bool wait = 5;
 }
-message HookResponse {}
+message HookResponse {
+  // What `fleet hook --wait` prints to its stdout; empty: nothing.
+  bytes output = 1;
+}

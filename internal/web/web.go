@@ -37,6 +37,7 @@ import (
 	"github.com/coder/websocket"
 
 	fleetv1 "fleet/gen/fleetv1"
+	"fleet/internal/ask"
 	"fleet/internal/discovery"
 	"fleet/internal/workflow"
 )
@@ -99,6 +100,8 @@ type Source interface {
 	// SwitchModel switches a live agent's session to another model and/or
 	// effort ("" keeps the current one), for that session only.
 	SwitchModel(ctx context.Context, agent, model, effort string) (*Model, error)
+	// Answer answers the questions id the agent waits on (Chat.Asks).
+	Answer(agent, id string, a ask.Answer) error
 }
 
 // BrowseFunc finds fleet daemons on the LAN (discovery.Browse).

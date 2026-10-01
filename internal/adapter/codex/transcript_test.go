@@ -3,7 +3,7 @@ package codex
 import (
 	"os"
 	"path/filepath"
-	"slices"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -125,7 +125,7 @@ func TestParseTranscript(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := a.ParseTranscript([]byte(tt.line))
-			if !slices.Equal(got, tt.want) {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("got\n%+v\nwant\n%+v", got, tt.want)
 			}
 		})

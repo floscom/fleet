@@ -16,7 +16,16 @@ import (
 // Agent CLIs run hook commands through a shell, so every word is quoted.
 // The hook payload arrives on the command's stdin.
 func Command(fleetBinary, agentID, adapterID, event string) string {
-	words := []string{fleetBinary, "hook", "--agent", agentID, "--adapter", adapterID, event}
+	return command(fleetBinary, "hook", "--agent", agentID, "--adapter", adapterID, event)
+}
+
+// WaitCommand is Command with --wait: the hook waits for the user's answer
+// to what it asks, and prints it (see adapter.Asker).
+func WaitCommand(fleetBinary, agentID, adapterID, event string) string {
+	return command(fleetBinary, "hook", "--wait", "--agent", agentID, "--adapter", adapterID, event)
+}
+
+func command(words ...string) string {
 	for i, w := range words {
 		words[i] = Quote(w)
 	}

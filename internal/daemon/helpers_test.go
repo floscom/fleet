@@ -18,6 +18,7 @@ import (
 
 	fleetv1 "fleet/gen/fleetv1"
 	"fleet/internal/adapter"
+	"fleet/internal/ask"
 	"fleet/internal/config"
 	"fleet/internal/tmux"
 	"fleet/internal/transcript"
@@ -116,6 +117,20 @@ func (testAdapter) HandleHook(ev adapter.HookEvent) (adapter.StateUpdate, bool) 
 		return adapter.StateUpdate{State: fleetv1.AgentState_AGENT_STATE_EXITED}, true
 	}
 	return adapter.StateUpdate{}, false
+}
+
+// Questions asks the questions of an "ask" hook whose call starts with
+// "q" (adapter.Asker); AnswerOutput gives the answer as JSON.
+func (testAdapter) Questions(ev adapter.HookEvent) ([]ask.Question, bool) {
+	_, call, _ := strings.Cut(string(ev.Payload), "/")
+	if ev.Event != "ask" || !strings.HasPrefix(call, "q") {
+		return nil, false
+	}
+	return []ask.Question{{Question: call + "?", Options: []ask.Option{{Label: "yes"}, {Label: "no"}}}}, true
+}
+
+func (testAdapter) AnswerOutput(_ adapter.HookEvent, a ask.Answer) ([]byte, error) {
+	return json.Marshal(a)
 }
 
 // unavailableAdapter is never installed.

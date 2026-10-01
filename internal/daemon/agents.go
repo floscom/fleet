@@ -170,6 +170,10 @@ type manager struct {
 	modelMu   sync.Mutex
 	models    map[string]*modelCursor
 	switching map[string]bool
+
+	// asks are the hooks waiting for answers to questions, by id (asks.go);
+	// guarded by mu.
+	asks map[string]*pendingAsk
 }
 
 // readyLocked clears a's busy flag and stamps it with a new ready generation.

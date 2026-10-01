@@ -60,6 +60,17 @@ type Entry struct {
 	Error bool `json:"error,omitempty"`
 	// TimeMs is when it happened, ms since the epoch; 0 if unknown.
 	TimeMs int64 `json:"ts,omitempty"`
+	// Images are the images of a User message or a Result.
+	Images []Image `json:"images,omitempty"`
+}
+
+// Image is an image a transcript holds inline. Line is the offset of its
+// line (the reader sets it) and N its index among that line's images; the
+// adapter reads it from there (adapter.TranscriptImager).
+type Image struct {
+	Line int64  `json:"line"`
+	N    int    `json:"n"`
+	Type string `json:"type,omitempty"` // media type, e.g. image/png
 }
 
 // Parser turns one line of a transcript (without its newline) into entries.
@@ -213,13 +224,20 @@ func read(f *os.File, from, stop int64, parse Parser) (Page, error) {
 		if !complete {
 			return p, nil
 		}
+		at := p.End
 		p.End += n
 		if long {
 			p.Entries = append(p.Entries, Entry{Kind: Note, Text: fmt.Sprintf("(an entry of %d KB is too large to show)", n>>10)})
 			continue
 		}
 		if len(line) > 0 {
-			p.Entries = append(p.Entries, parse(line)...)
+			es := parse(line)
+			for _, e := range es {
+				for i := range e.Images {
+					e.Images[i].Line = at
+				}
+			}
+			p.Entries = append(p.Entries, es...)
 		}
 	}
 	// Stopped at the chunk limit: tell the caller whether lines follow.
@@ -267,6 +285,48 @@ func trimNewline(b []byte) []byte {
 		b = b[:len(b)-1]
 	}
 	return b
+}
+
+// LineAt reads the line that starts at offset at (without its newline),
+// up to max bytes long. ok is false if no complete line of at most max
+// bytes starts there.
+func LineAt(path string, at int64, max int) (line []byte, ok bool, err error) {
+	f, size, err := open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	if at < 0 || at >= size {
+		return nil, false, nil
+	}
+	if at > 0 {
+		// A line starts at at if the byte before it ends one.
+		var b [1]byte
+		if _, err := f.ReadAt(b[:], at-1); err != nil {
+			return nil, false, err
+		}
+		if b[0] != '\n' {
+			return nil, false, nil
+		}
+	}
+	r := bufio.NewReaderSize(io.NewSectionReader(f, at, int64(max)+1), 64<<10)
+	for {
+		b, err := r.ReadSlice('\n')
+		if len(line)+len(b) > max+1 {
+			return nil, false, nil
+		}
+		line = append(line, b...)
+		switch {
+		case err == nil:
+			return trimNewline(line), true, nil
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF):
+			return nil, false, nil // not complete (yet)
+		default:
+			return nil, false, err
+		}
+	}
 }
 
 // OneLine returns the first non-empty line of s, trimmed.

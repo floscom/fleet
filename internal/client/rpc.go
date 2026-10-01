@@ -106,11 +106,11 @@ func (c *Client) RevokeDevice(ctx context.Context, device string) error {
 	return err
 }
 
-// Hook delivers an agent hook event (local socket only).
-func (c *Client) Hook(ctx context.Context, ev *fleetv1.HookEvent) error {
-	_, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_Hook{Hook: ev}},
+// Hook delivers an agent hook event (local socket only). With ev.Wait set
+// it may wait for the user's answer to what the hook asks.
+func (c *Client) Hook(ctx context.Context, ev *fleetv1.HookEvent) (*fleetv1.HookResponse, error) {
+	return unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_Hook{Hook: ev}},
 		(*fleetv1.ServerMessage).GetHook)
-	return err
 }
 
 // Subscribe starts the event stream. The daemon first sends one

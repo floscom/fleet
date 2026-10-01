@@ -25,6 +25,12 @@ var HookEvents = []string{
 // hookTimeout (seconds) bounds a `fleet hook` run; the default is 60.
 const hookTimeout = 10
 
+// askTimeout (seconds) bounds the PermissionRequest hook, which waits for
+// an answer from the dashboard while Claude asks the user questions (see
+// Questions). The dialog stays open in the terminal meanwhile, and the
+// hook ends as soon as it closes, so a long wait blocks nothing.
+const askTimeout = 24 * 60 * 60
+
 // Settings is the subset of Claude Code's settings.json that fleet writes:
 //
 //	{"hooks": {"<Event>": [{"matcher": "", "hooks": [{"type": "command", "command": "...", "timeout": 10}]}]}}
@@ -48,15 +54,16 @@ type HookHandler struct {
 }
 
 // BuildSettings returns the settings that route every HookEvents event to
-// `fleet hook --agent <agentID> --adapter claude <Event>`.
+// `fleet hook --agent <agentID> --adapter claude <Event>`, with --wait for
+// PermissionRequest.
 func BuildSettings(fleetBinary, agentID string) Settings {
 	s := Settings{Hooks: map[string][]MatcherGroup{}}
 	for _, ev := range HookEvents {
-		s.Hooks[ev] = []MatcherGroup{{Hooks: []HookHandler{{
-			Type:    "command",
-			Command: hookcmd.Command(fleetBinary, agentID, ID, ev),
-			Timeout: hookTimeout,
-		}}}}
+		h := HookHandler{Type: "command", Command: hookcmd.Command(fleetBinary, agentID, ID, ev), Timeout: hookTimeout}
+		if ev == "PermissionRequest" {
+			h.Command, h.Timeout = hookcmd.WaitCommand(fleetBinary, agentID, ID, ev), askTimeout
+		}
+		s.Hooks[ev] = []MatcherGroup{{Hooks: []HookHandler{h}}}
 	}
 	return s
 }

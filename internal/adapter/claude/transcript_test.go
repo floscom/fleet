@@ -1,9 +1,10 @@
 package claude
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
-	"slices"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -50,7 +51,9 @@ func TestParseTranscript(t *testing.T) {
 		// what the user typed
 		{"prompt", user(`"  fix the tests\n"`), Es{{Kind: transcript.User, Text: "fix the tests", TimeMs: ms}}},
 		{"prompt blocks", user(`[{"type":"text","text":"what is this?"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBO"}}]`),
-			Es{{Kind: transcript.User, Text: "what is this?\n[image]", TimeMs: ms}}},
+			Es{{Kind: transcript.User, Text: "what is this?", TimeMs: ms, Images: []transcript.Image{{N: 0, Type: "image/png"}}}}},
+		{"image only", user(`[{"type":"image","source":{"type":"url","url":"https://x"}},{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"iVBO"}}]`),
+			Es{{Kind: transcript.User, TimeMs: ms, Images: []transcript.Image{{N: 0, Type: "image/jpeg"}}}}},
 		{"prompt mentioning a tag", user(`"why does <command-name> show up?"`),
 			Es{{Kind: transcript.User, Text: "why does <command-name> show up?", TimeMs: ms}}},
 		{"system reminder removed", user(`"hi<system-reminder>be nice</system-reminder>"`), Es{{Kind: transcript.User, Text: "hi", TimeMs: ms}}},
@@ -85,7 +88,7 @@ func TestParseTranscript(t *testing.T) {
 		{"tool error", user(`[{"type":"tool_result","content":"<tool_use_error>File has not been read yet.</tool_use_error>","is_error":true,"tool_use_id":"toolu_2"}]`),
 			Es{{Kind: transcript.Result, ID: "toolu_2", Output: "File has not been read yet.", Error: true, TimeMs: ms}}},
 		{"tool result blocks", user(`[{"tool_use_id":"toolu_3","type":"tool_result","content":[{"type":"text","text":"see:"},{"type":"image","source":{"type":"base64","data":"iVBO"}},{"type":"tool_reference","tool_name":"WebFetch"}]}]`),
-			Es{{Kind: transcript.Result, ID: "toolu_3", Output: "see:\n[image]\nWebFetch", TimeMs: ms}}},
+			Es{{Kind: transcript.Result, ID: "toolu_3", Output: "see:\nWebFetch", TimeMs: ms, Images: []transcript.Image{{N: 0}}}}},
 		{"tool result reminder removed", user(`[{"tool_use_id":"toolu_4","type":"tool_result","content":"     1\tpackage main\n\n<system-reminder>\nWhenever you read a file...\n</system-reminder>\n"}]`),
 			Es{{Kind: transcript.Result, ID: "toolu_4", Output: "     1\tpackage main", TimeMs: ms}}},
 		{"tool result and text", user(`[{"tool_use_id":"toolu_5","type":"tool_result","content":"done"},{"type":"text","text":"now commit"}]`),
@@ -168,7 +171,7 @@ func TestParseTranscript(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := a.ParseTranscript([]byte(tt.line))
-			if !slices.Equal(got, tt.want) {
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("got\n%+v\nwant\n%+v", got, tt.want)
 			}
 		})
@@ -308,4 +311,36 @@ func TestRealTranscripts(t *testing.T) {
 		}
 	}
 	t.Logf("%d files, entries %v, %d results without a tool call", len(files), kinds, orphans)
+}
+
+func TestTranscriptImage(t *testing.T) {
+	// A pasted image, then a tool result with two: numbered in that order.
+	line := []byte(`{"type":"user","message":{"content":[` +
+		`{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAEC"}},` +
+		`{"type":"text","text":"look"},` +
+		`{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"x"},` +
+		`{"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":"AwQF"}},` +
+		`{"type":"image","source":{"type":"base64","media_type":"image/webp","data":"Bgc="}}]}]}}`)
+	c := New("", nil).(adapter.TranscriptImager)
+	want := []struct {
+		typ  string
+		data []byte
+	}{{"image/png", []byte{0, 1, 2}}, {"image/jpeg", []byte{3, 4, 5}}, {"image/webp", []byte{6, 7}}}
+	for n, w := range want {
+		typ, data, ok := c.TranscriptImage(line, n)
+		if !ok || typ != w.typ || !bytes.Equal(data, w.data) {
+			t.Errorf("image %d = %q %v %v, want %q %v", n, typ, data, ok, w.typ, w.data)
+		}
+	}
+	if _, _, ok := c.TranscriptImage(line, 3); ok {
+		t.Error("image 3 found")
+	}
+	// The parser numbers them the same way.
+	var got []transcript.Image
+	for _, e := range New("", nil).(adapter.Transcripter).ParseTranscript(line) {
+		got = append(got, e.Images...)
+	}
+	if len(got) != 3 || got[0].N != 0 || got[1].N != 1 || got[2].N != 2 || got[2].Type != "image/webp" {
+		t.Errorf("parsed images = %+v", got)
+	}
 }

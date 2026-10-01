@@ -160,10 +160,11 @@ func (c *conn) dispatch(id uint64, m *fleetv1.ClientMessage) error {
 		if !c.local {
 			return errf(codeUnauth, "hook events are only accepted on the local socket")
 		}
-		if err := d.agents.hook(msg.Hook); err != nil {
+		out, err := d.agents.hook(c.ctx, msg.Hook)
+		if err != nil {
 			return err
 		}
-		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_Hook{Hook: &fleetv1.HookResponse{}}})
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_Hook{Hook: &fleetv1.HookResponse{Output: out}}})
 	}
 	return errf(codeInvalid, "unsupported message %T", m.GetMsg())
 }

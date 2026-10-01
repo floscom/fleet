@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
+	"strings"
 	"testing"
 
 	fleetv1 "fleet/gen/fleetv1"
 	"fleet/internal/adapter"
+	"fleet/internal/ask"
 )
 
 func fakeClaude(t *testing.T) string {
@@ -176,6 +179,10 @@ func TestSettingsFile(t *testing.T) {
 		if h.Type != "command" || h.Command != want || h.Timeout != hookTimeout {
 			t.Errorf("%s: %+v, want command %q", ev, h, want)
 		}
+	}
+	h := raw.Hooks["PermissionRequest"][0].Hooks[0]
+	if want := "'/opt/my fleet/fleet' hook --wait --agent 'ag 1' --adapter claude PermissionRequest"; h.Command != want || h.Timeout != askTimeout {
+		t.Errorf("PermissionRequest: %+v, want command %q", h, want)
 	}
 }
 
@@ -475,5 +482,60 @@ func TestAuthFile(t *testing.T) {
 	unlock()
 	if fileExists(filepath.Join(dir, ".storage-write.lock")) {
 		t.Error("lock dir not released")
+	}
+}
+
+func TestAsk(t *testing.T) {
+	c := New("", nil).(adapter.Asker)
+	// As captured from Claude Code 2.1.280.
+	payload := `{"session_id":"s","hook_event_name":"PermissionRequest","tool_name":"AskUserQuestion","tool_input":` +
+		`{"questions":[{"question":"Which color?","header":"Color","multiSelect":false,"options":[{"label":"Red","description":"The color red"},{"label":"Blue","description":"The color blue","preview":"<b>"}]},` +
+		`{"question":"Which fruits?","header":"Fruits","multiSelect":true,"options":[{"label":"Apple","description":"A fruit"},{"label":"Pear","description":"Another"}]}]}}`
+	ev := adapter.HookEvent{Event: "PermissionRequest", Payload: []byte(payload)}
+	qs, ok := c.Questions(ev)
+	want := []ask.Question{
+		{Question: "Which color?", Header: "Color", Options: []ask.Option{{Label: "Red", Description: "The color red"}, {Label: "Blue", Description: "The color blue", Preview: "<b>"}}},
+		{Question: "Which fruits?", Header: "Fruits", MultiSelect: true, Options: []ask.Option{{Label: "Apple", Description: "A fruit"}, {Label: "Pear", Description: "Another"}}},
+	}
+	if !ok || !reflect.DeepEqual(qs, want) {
+		t.Fatalf("Questions = %+v %v", qs, ok)
+	}
+	for _, other := range []adapter.HookEvent{
+		{Event: "PermissionRequest", Payload: []byte(`{"tool_name":"Bash","tool_input":{"command":"ls"}}`)},
+		{Event: "PreToolUse", Payload: []byte(payload)},
+		{Event: "PermissionRequest", Payload: []byte(`{"tool_name":"AskUserQuestion","tool_input":{"questions":[]}}`)},
+	} {
+		if _, ok := c.Questions(other); ok {
+			t.Errorf("Questions(%s %s) ok", other.Event, other.Payload)
+		}
+	}
+
+	out, err := c.AnswerOutput(ev, ask.Answer{
+		Answers: map[string][]string{"Which color?": {"Blue"}, "Which fruits?": {"Apple", "kiwi"}},
+		Notes:   map[string]string{"Which color?": " dark blue "},
+	})
+	var got struct {
+		HookSpecificOutput struct {
+			HookEventName string
+			Decision      struct {
+				Behavior     string
+				UpdatedInput map[string]json.RawMessage
+			}
+		}
+	}
+	if err != nil || json.Unmarshal(out, &got) != nil {
+		t.Fatalf("AnswerOutput: %s %v", out, err)
+	}
+	d := got.HookSpecificOutput.Decision
+	in := d.UpdatedInput
+	if got.HookSpecificOutput.HookEventName != "PermissionRequest" || d.Behavior != "allow" || len(in["questions"]) == 0 ||
+		string(in["answers"]) != `{"Which color?":"Blue","Which fruits?":["Apple","kiwi"]}` ||
+		string(in["annotations"]) != `{"Which color?":{"notes":"dark blue"}}` {
+		t.Fatalf("allow: %s", out)
+	}
+
+	out, _ = c.AnswerOutput(ev, ask.Answer{Decline: "what for?"})
+	if !strings.Contains(string(out), `"behavior":"deny"`) || !strings.Contains(string(out), `what for?`) {
+		t.Fatalf("decline: %s", out)
 	}
 }

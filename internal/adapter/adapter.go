@@ -20,6 +20,8 @@
 //     Workflower.
 //   - a choice of model and reasoning effort: implement Modeler, and
 //     ModelSwitcher to switch a running session.
+//   - questions answered in a form on the dashboard: implement Asker.
+//   - images in the chat: implement TranscriptImager.
 package adapter
 
 import (
@@ -28,6 +30,7 @@ import (
 	"sync"
 
 	fleetv1 "fleet/gen/fleetv1"
+	"fleet/internal/ask"
 	"fleet/internal/transcript"
 	"fleet/internal/workflow"
 )
@@ -66,6 +69,28 @@ type PromptDetector interface {
 // dashboard, and notices dialogs that closed without a hook saying so.
 type DialogDetector interface {
 	DialogOpen(screen string) bool
+}
+
+// Asker is implemented by adapters whose CLI asks the user questions with
+// choices in a dialog and whose hook can answer them: the hook runs
+// `fleet hook --wait` (hookcmd.WaitCommand), the dashboard shows the
+// questions as a form, and the hook prints the answer. The dialog stays
+// open in the terminal meanwhile: whichever answers first wins.
+type Asker interface {
+	// Questions returns the questions a hook event asks, ok=false if it
+	// asks none the dashboard can answer.
+	Questions(ev HookEvent) (qs []ask.Question, ok bool)
+	// AnswerOutput is what the hook of ev prints to answer its questions
+	// (a was checked against them).
+	AnswerOutput(ev HookEvent, a ask.Answer) ([]byte, error)
+}
+
+// TranscriptImager is implemented by Transcripters whose transcripts hold
+// images inline (transcript.Image says where).
+type TranscriptImager interface {
+	// TranscriptImage returns image n of a transcript line: its media type
+	// and data.
+	TranscriptImage(line []byte, n int) (mediaType string, data []byte, ok bool)
 }
 
 // AuthProvider is implemented by adapters whose CLI keeps its login in a

@@ -35,6 +35,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,7 +54,7 @@ const (
 	peerTimeout     = 15 * time.Second
 	peerDialTimeout = 2 * time.Second
 	// maxPeerReply caps a reply relayed from another daemon.
-	maxPeerReply = 4 << 20
+	maxPeerReply = 6 << 20 // an image of a transcript line is up to transcript.MaxLine
 )
 
 // errNotJoined means the other daemon does not hold our fleet key.
@@ -208,9 +209,9 @@ func forwardable(method, rest string) bool {
 		case "session", "fs", "adapters", "roots", "agents", "workflows":
 			return true
 		}
-		return agentRoute(rest, "chat", "screen", "workflows") || workflowChatRoute(rest)
+		return agentRoute(rest, "chat", "screen", "workflows", "image") || workflowChatRoute(rest, "chat", "image")
 	case http.MethodPost:
-		return rest == "roots" || rest == "agents" || agentRoute(rest, "input", "model", "stop")
+		return rest == "roots" || rest == "agents" || agentRoute(rest, "input", "answer", "model", "stop")
 	case http.MethodDelete:
 		return oneSegment(strings.CutPrefix(rest, "roots/"))
 	}
@@ -232,11 +233,11 @@ func agentRoute(rest string, actions ...string) bool {
 }
 
 // workflowChatRoute reports whether rest is
-// agents/<id>/workflows/<run>/agents/<sub>/chat.
-func workflowChatRoute(rest string) bool {
+// agents/<id>/workflows/<run>/agents/<sub>/<one of actions>.
+func workflowChatRoute(rest string, actions ...string) bool {
 	p := strings.Split(rest, "/")
 	return len(p) == 7 && p[0] == "agents" && p[1] != "" && p[2] == "workflows" && p[3] != "" &&
-		p[4] == "agents" && p[5] != "" && p[6] == "chat"
+		p[4] == "agents" && p[5] != "" && slices.Contains(actions, p[6])
 }
 
 // oneSegment reports whether s is a non-empty path segment (and ok).

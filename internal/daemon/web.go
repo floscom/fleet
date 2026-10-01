@@ -5,6 +5,8 @@ import (
 	"net/http"
 
 	fleetv1 "fleet/gen/fleetv1"
+	"fleet/internal/adapter"
+	"fleet/internal/ask"
 	"fleet/internal/web"
 	"fleet/internal/workflow"
 )
@@ -130,11 +132,25 @@ func (s *webSource) Chat(agent string) (web.Chat, error) {
 	if err != nil {
 		return web.Chat{}, webError(err)
 	}
-	c := web.Chat{Agent: a, Path: path, Parse: parse}
+	c := web.Chat{Agent: a, Path: path, Parse: parse, Image: s.imager(a), Asks: s.d.agents.asksOf(a.GetId())}
 	if info, ok, err := s.d.agents.model(a.GetId()); err == nil && ok {
 		c.Model = webModel(info)
 	}
 	return c, nil
+}
+
+// imager reads the images of agent a's transcripts, if its adapter keeps
+// any there.
+func (s *webSource) imager(a *fleetv1.Agent) func([]byte, int) (string, []byte, bool) {
+	ad, _ := s.d.opts.Adapters.Get(a.GetAdapter())
+	if im, ok := ad.(adapter.TranscriptImager); ok {
+		return im.TranscriptImage
+	}
+	return nil
+}
+
+func (s *webSource) Answer(agent, id string, a ask.Answer) error {
+	return webError(s.d.agents.answer(agent, id, a))
 }
 
 func (s *webSource) Workflows(agent string) (*fleetv1.Agent, []workflow.Run, error) {
@@ -147,7 +163,7 @@ func (s *webSource) WorkflowChat(agent, run, sub string) (web.Chat, error) {
 	if err != nil {
 		return web.Chat{}, webError(err)
 	}
-	return web.Chat{Agent: a, Path: path, Parse: parse}, nil
+	return web.Chat{Agent: a, Path: path, Parse: parse, Image: s.imager(a)}, nil
 }
 
 // webError turns a protocol error into a *web.Error the page may show;

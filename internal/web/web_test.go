@@ -19,6 +19,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 
 	fleetv1 "fleet/gen/fleetv1"
+	"fleet/internal/ask"
 	"fleet/internal/discovery"
 	"fleet/internal/workflow"
 )
@@ -50,6 +51,8 @@ type fakeSource struct {
 	wfChats map[string]Chat
 	// switches are the model switches received (see model_test.go).
 	switches []fakeSwitch
+	// answers are the answers received (see ask_test.go).
+	answers []ask.Answer
 }
 
 type fakeInput struct {

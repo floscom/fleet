@@ -2239,6 +2239,10 @@
     switchedAt: 0, // when the last one ended: replies read before it are stale
     confirmStop: false,
     stopping: false,
+    screenAutoOpened: false, // the screen opened by itself for a dialog
+    asks: [], // questions the agent waits on, first shown first (see questions)
+    answered: new Set(), // ids of questions answered here: late replies may still list them
+    askForm: null, // the form of asks[0]
   };
 
   const chatAPI = (rest) => {
@@ -2259,17 +2263,21 @@
     Object.assign(chat, {
       open: true, host, id, agent: agent || null, view,
       sending: false, held: false, confirmStop: false, stopping: false, screenAuto: true,
-      model: null, switching: false, switchedAt: 0,
+      model: null, switching: false, switchedAt: 0, screenAutoOpened: false, asks: [], askForm: null,
     });
+    chat.answered.clear();
     Object.assign(wf, { runs: [], v: '', loaded: false, sub: null, hint: (S.workflows.get(agentKey(host, id)) || []).length });
     wf.shown.clear();
     wf.known.clear();
     wf.cards.clear();
     if (opts && opts.run) wf.shown.add(opts.run);
     chat.screenOpen = !!agent && (agent.state === 'needs_input' || agent.adapter === 'shell');
+    chat.screenAutoOpened = chat.screenOpen && agent.adapter !== 'shell';
     $('chat-input').value = '';
     autosize();
     $('chat-screen-pre').textContent = '';
+    $('chat-ask').replaceChildren();
+    $('chat-ask').hidden = true;
     $('wf-list').replaceChildren();
     const d = $('chat');
     if (!d.open) d.showModal();
@@ -2295,11 +2303,13 @@
     const was = chat.agent && chat.agent.state;
     chat.agent = a;
     if (a.state !== was) paintPending(chat.feed);
-    if (a.state === 'needs_input' && was !== 'needs_input' && chat.screenAuto && !chat.screenOpen) {
+    if (a.state === 'needs_input' && was !== 'needs_input' && chat.screenAuto && !chat.screenOpen && !chat.asks.length) {
       chat.screenOpen = true;
+      chat.screenAutoOpened = true;
       renderChatScreen();
     }
     renderChatHead();
+    renderChatAsk();
     renderChatInput();
   }
 
@@ -2320,7 +2330,8 @@
   // newFeed makes a feed. o holds its scroller and log elements; url(query)
   // of its chat requests; live() while more may be written; working()
   // while its agent works (a call without output yet is then running);
-  // empty(), the note for no transcript; and optionally onReply(reply),
+  // empty(), the note for no transcript; imageURL(query) of its images; and
+  // optionally query(q) to add to its long polls, onReply(reply),
   // onStatus() when its error or entries changed, onFile() when a
   // transcript appeared or went.
   function newFeed(o) {
@@ -2363,6 +2374,7 @@
         q.set('after', String(f.end));
         q.set('wait', '1');
         q.set('v', String((chat.agent && chat.agent.updatedAtMs) || 0));
+        if (f.query) f.query(q);
       }
       let r;
       try {
@@ -2485,10 +2497,13 @@
 
   function entryNode(f, e) {
     switch (e.kind) {
-      case 'user':
+      case 'user': {
         if (f !== chat.feed) return taskNode(e);
-        return timeTitle(h('div', 'flex justify-end',
-          h('div', 'max-w-[85%] whitespace-pre-wrap break-words rounded-lg rounded-br-sm bg-emerald-400/10 px-3 py-2 text-[13.5px] leading-relaxed text-zinc-100 ring-1 ring-inset ring-emerald-400/20', e.text || '')), e);
+        const imgs = e.images && e.images.length ? imagesNode(f, e.images, 'max-w-[85%] justify-end') : null;
+        return timeTitle(h('div', 'flex flex-col items-end gap-1.5',
+          e.text ? h('div', 'max-w-[85%] whitespace-pre-wrap break-words rounded-lg rounded-br-sm bg-emerald-400/10 px-3 py-2 text-[13.5px] leading-relaxed text-zinc-100 ring-1 ring-inset ring-emerald-400/20', e.text) : null,
+          imgs), e);
+      }
       case 'assistant':
         return timeTitle(md(e.text || ''), e);
       case 'tool':
@@ -2498,13 +2513,13 @@
       case 'result': {
         const t = e.id && f.tools.get(e.id);
         if (t) {
-          setToolOutput(t, e.output, e.error);
+          setToolOutput(t, e.output, e.error, e.images);
           return null;
         }
         // The call is before the loaded range (or, rarely, written after
         // its result): shown on its own until the call turns up.
-        const el = toolNode(f, { kind: 'tool', name: 'result', text: oneLine(e.output), output: e.output, error: e.error });
-        if (e.id) f.orphans.set(e.id, { el, output: e.output, error: e.error });
+        const el = toolNode(f, { kind: 'tool', name: 'result', text: oneLine(e.output) || (e.images ? 'image' : ''), output: e.output, error: e.error, images: e.images });
+        if (e.id) f.orphans.set(e.id, { el, output: e.output, error: e.error, images: e.images });
         return el;
       }
       default:
@@ -2545,7 +2560,7 @@
     const body = h('div', 'flex min-w-0 flex-col gap-2 border-t border-ink-700 px-2.5 py-2');
     d.append(sum, body);
     timeTitle(sum, e);
-    const t = { el: d, status, body, name: e.name, call: e, done: false, output: null, error: false, built: false };
+    const t = { f, el: d, status, body, name: e.name, call: e, done: false, output: null, error: false, images: null, built: false };
     d.addEventListener('toggle', () => {
       if (d.open) buildTool(t);
     });
@@ -2571,12 +2586,12 @@
       f.orphans.delete(e.id);
       early.el.remove();
       f.tools.set(e.id, t);
-      setToolOutput(t, early.output, early.error);
+      setToolOutput(t, early.output, early.error, early.images);
     } else if (e.id) {
       t.status.className = f.working() ? TOOL_STATUS.pending : TOOL_STATUS.stale;
       f.tools.set(e.id, t);
     } else {
-      setToolOutput(t, e.output, e.error);
+      setToolOutput(t, e.output, e.error, e.images);
     }
   }
 
@@ -2588,10 +2603,13 @@
     for (const t of (tools || f.tools).values()) if (!t.done) t.status.className = cls;
   }
 
-  function setToolOutput(t, output, error) {
+  // setToolOutput gives a call what it returned. A call that returned
+  // images opens to show them.
+  function setToolOutput(t, output, error, images) {
     t.done = true;
     t.output = output || '';
     t.error = !!error;
+    t.images = images && images.length ? images : null;
     t.status.className = error ? TOOL_STATUS.error : TOOL_STATUS.ok;
     if (t.onOutput) {
       t.onOutput();
@@ -2599,19 +2617,84 @@
     }
     if (error) t.el.classList.add('border-rose-500/30');
     if (t.built) addOutput(t);
+    else if (t.images) t.el.open = true; // builds it (toggle)
   }
 
   function buildTool(t) {
     if (t.built) return;
     t.built = true;
-    if (t.call.detail) t.body.append(inputView(t.call));
+    // A Read of an image says all in its summary: the image is what counts.
+    if (t.call.detail && !(t.images && t.name === 'Read')) t.body.append(inputView(t.call));
     if (t.done) addOutput(t);
   }
 
   function addOutput(t) {
     if (t.output == null) return; // shown on its own (see loadEarlier)
+    if (t.images) t.body.append(imagesNode(t.f, t.images));
     if (t.output) t.body.append(outputView(t));
     else if (!t.body.childElementCount) t.body.append(h('div', 'font-mono text-[11px] text-zinc-600', '// no output'));
+  }
+
+  // ---- images: pasted into a message, or returned by a tool
+
+  // Images stay in the transcript: the page asks for each as it scrolls
+  // into view (GET .../image, its data as JSON) and keeps the latest few.
+  const IMG_KEEP = 48;
+  const imgCache = new Map(); // url -> Promise of a data: URL, oldest first
+
+  function loadImage(url) {
+    let p = imgCache.get(url);
+    if (p) imgCache.delete(url); // most recent again
+    else {
+      p = api('GET', url).then((r) => `data:${r.type};base64,${r.data}`);
+      p.catch(() => imgCache.delete(url));
+    }
+    imgCache.set(url, p);
+    while (imgCache.size > IMG_KEEP) imgCache.delete(imgCache.keys().next().value);
+    return p;
+  }
+
+  const imgSeen = 'IntersectionObserver' in window ? new IntersectionObserver((list) => {
+    for (const en of list) {
+      if (!en.isIntersecting) continue;
+      imgSeen.unobserve(en.target);
+      en.target.loadImage();
+    }
+  }, { rootMargin: '600px' }) : null;
+
+  // imagesNode shows images of feed f's entries as thumbnails, which open
+  // full size.
+  function imagesNode(f, images, cls) {
+    const row = h('div', 'flex min-w-0 flex-wrap gap-2 ' + (cls || ''));
+    for (const im of images) {
+      const url = f.imageURL(new URLSearchParams({ file: f.file, line: String(im.line), n: String(im.n) }));
+      const img = h('img', 'block max-h-64 max-w-full object-contain');
+      img.alt = 'image';
+      const b = h('button', 'flex min-h-20 min-w-28 max-w-full items-center justify-center overflow-hidden rounded-md border border-ink-600 bg-ink-950 hover:border-zinc-500 focus-visible:outline-2 focus-visible:outline-emerald-400',
+        h('span', 'font-mono text-[11px] text-zinc-600', 'image…'));
+      b.type = 'button';
+      b.title = 'Open full size';
+      b.loadImage = () => loadImage(url).then((src) => {
+        img.src = src;
+        b.replaceChildren(img);
+      }, (e) => {
+        b.replaceChildren(h('span', 'px-2 font-mono text-[11px] text-zinc-500', '// image: ' + e.message));
+        b.disabled = true;
+      });
+      b.addEventListener('click', () => {
+        if (img.src) openImage(img.src);
+      });
+      if (imgSeen) imgSeen.observe(b);
+      else b.loadImage();
+      row.append(b);
+    }
+    return row;
+  }
+
+  function openImage(src) {
+    $('img-view-img').src = src;
+    const d = $('img-view');
+    if (!d.open) d.showModal();
   }
 
   // Tools whose output is the agent's or a page's text, in markdown.
@@ -3414,7 +3497,9 @@
     sub.title = a.cwd || a.path || '';
 
     const det = $('chat-detail');
-    if (a.state === 'needs_input') {
+    if (askShown()) {
+      det.hidden = true; // the form says it
+    } else if (a.state === 'needs_input') {
       det.hidden = false;
       det.replaceChildren(h('span', 'font-semibold', 'Needs input'), a.stateDetail ? ': ' + a.stateDetail : '',
         h('span', 'text-amber-200/60', ' · answer on the screen below with the keys'));
@@ -3499,6 +3584,7 @@
     const a = chat.agent;
     st.textContent = !a ? '' : !chatLive() ? 'the session has ended'
       : chat.switching ? 'switching the model…'
+      : askShown() ? 'a message sent now answers none of the questions: the agent reads it instead'
       : chatDialog() ? 'in a dialog, Send types your text without pressing Enter: Enter picks the highlighted option'
       : a.state === 'working' ? 'working… new messages appear as the agent writes them' : '';
   }
@@ -3588,6 +3674,234 @@
     if (chat.screenOpen) setTimeout(refreshScreen, 150);
   }
 
+  // -------------------------------------------------------------- questions
+  //
+  // Questions the agent asks in a dialog of choices (Claude's
+  // AskUserQuestion), as a form above the message box: each chat reply
+  // lists those it waits on (asks), POST .../answer answers one. The dialog
+  // stays open in the terminal too; whichever answers first wins. A message
+  // sent while the form shows replies in place of answers ("Chat about
+  // this" in the terminal).
+
+  // askShown is the question the form shows: the agent shows its dialogs
+  // one at a time, in order.
+  const askShown = () => (chatLive() && chat.view === 'chat' && chat.asks[0]) || null;
+
+  // chatAsks takes the questions of a chat reply.
+  function chatAsks(asks) {
+    asks = (asks || []).filter((a) => !chat.answered.has(a.id));
+    if (asks.map((a) => a.id).join(',') === chat.asks.map((a) => a.id).join(',')) return;
+    const had = chat.asks.length > 0;
+    chat.asks = asks;
+    // The form answers the dialog: no need for the screen it opened for it.
+    if (asks.length && !had && chat.screenAutoOpened && chat.screenOpen) {
+      chat.screenOpen = false;
+      chat.screenAutoOpened = false;
+      renderChatScreen();
+    }
+    renderChatHead();
+    renderChatAsk();
+    renderChatInput();
+  }
+
+  function renderChatAsk() {
+    const box = $('chat-ask');
+    const a = askShown();
+    box.hidden = !a;
+    if (!a) {
+      if (chat.askForm) box.replaceChildren();
+      chat.askForm = null;
+      return;
+    }
+    // Built once per question: a reply must not undo the picks.
+    if (!chat.askForm || chat.askForm.id !== a.id) {
+      chat.askForm = askForm(a);
+      box.replaceChildren(chat.askForm.el);
+    }
+    paintAsk();
+  }
+
+  const ASK_OPTION = 'touch:min-h-11 flex min-w-0 cursor-pointer items-start gap-2.5 rounded-md border border-ink-600 bg-ink-900 px-2.5 py-2 hover:border-zinc-500 has-checked:border-amber-400/50 has-checked:bg-amber-400/10 focus-within:outline-2 focus-within:outline-offset-1 focus-within:outline-amber-400';
+  const ASK_INPUT = 'mt-0.5 size-4 shrink-0 accent-amber-400 focus:outline-none';
+
+  // askForm builds the form of a question: per question its options, one
+  // to type, a preview of the option looked at, and a note.
+  function askForm(a) {
+    const form = { id: a.id, sending: false, qs: [] };
+    const fields = h('div', 'flex flex-col gap-4');
+    a.questions.forEach((q, i) => {
+      const name = `ask-${a.id}-${i}`;
+      const type = q.multiSelect ? 'checkbox' : 'radio';
+      const fq = { q, opts: [], other: null, note: null };
+      const opts = h('div', 'grid gap-1.5 sm:grid-cols-2');
+      // The preview of the option looked at, else of the one picked. Its
+      // box keeps its size: the form grows upwards, and options moving
+      // under the pointer would take the click meant for another.
+      const hasPreview = (q.options || []).some((o) => o.preview);
+      const preview = h('pre', 'mt-1.5 h-44 overflow-auto rounded-md border border-ink-700 bg-ink-950 px-3 py-2 font-mono text-[11.5px] leading-snug text-zinc-300');
+      preview.hidden = !hasPreview;
+      const showPreview = (o) => {
+        if (!hasPreview) return;
+        const p = (o && o.preview) || (fq.opts.find((x) => x.input.checked && x.preview) || {}).preview;
+        preview.textContent = p || 'Point at an option to see its preview.';
+        preview.classList.toggle('text-zinc-600', !p);
+      };
+      for (const o of q.options || []) {
+        const input = h('input', ASK_INPUT);
+        input.type = type;
+        input.name = name;
+        input.value = o.label;
+        const label = h('label', ASK_OPTION, input,
+          h('span', 'min-w-0',
+            h('span', 'block break-words text-[13px] font-medium text-zinc-100', o.label),
+            o.description ? h('span', 'mt-0.5 block break-words text-xs leading-snug text-zinc-400', o.description) : null));
+        if (o.preview) {
+          label.addEventListener('mouseenter', () => showPreview(o));
+          label.addEventListener('mouseleave', () => showPreview(null));
+          label.addEventListener('focusin', () => showPreview(o));
+        }
+        input.addEventListener('change', () => {
+          showPreview(o.preview ? o : null);
+          paintAsk();
+        });
+        fq.opts.push({ label: o.label, input, preview: o.preview || '' });
+        opts.append(label);
+      }
+      // One of their own, as in the terminal's "Type something".
+      const oin = h('input', ASK_INPUT);
+      oin.type = type;
+      oin.name = name;
+      oin.setAttribute('aria-label', 'Your own answer');
+      const otext = h('input', 'touch:min-h-9 min-w-0 flex-1 rounded border border-ink-600 bg-ink-950 px-2 py-1 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-amber-400/60 focus:outline-none');
+      otext.type = 'text';
+      otext.placeholder = 'Something else…';
+      otext.maxLength = 8000;
+      otext.setAttribute('aria-label', `Your own answer to: ${q.question}`);
+      otext.addEventListener('input', () => {
+        oin.checked = otext.value.trim() !== '' || (!q.multiSelect && oin.checked);
+        paintAsk();
+      });
+      otext.addEventListener('focus', () => {
+        if (!q.multiSelect && otext.value.trim()) oin.checked = true;
+        paintAsk();
+      });
+      otext.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' && !ev.isComposing) {
+          ev.preventDefault();
+          submitAsk();
+        }
+      });
+      oin.addEventListener('change', () => {
+        if (oin.checked && !otext.value.trim()) otext.focus();
+        paintAsk();
+      });
+      fq.other = { input: oin, text: otext };
+      opts.append(h('label', ASK_OPTION + ' items-center sm:col-span-2', oin, otext));
+      // A note on the answer.
+      const note = h('textarea', 'touch:min-h-11 mt-1.5 min-h-9 w-full resize-y rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-amber-400/60 focus:outline-none');
+      note.rows = 2;
+      note.maxLength = 8000;
+      note.placeholder = 'A note for the agent on this answer';
+      note.hidden = true;
+      note.setAttribute('aria-label', `Note on: ${q.question}`);
+      const addNote = h('button', 'touch:min-h-11 mt-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-amber-400', '+ note');
+      addNote.type = 'button';
+      addNote.addEventListener('click', () => {
+        note.hidden = false;
+        addNote.hidden = true;
+        note.focus();
+      });
+      fq.note = note;
+      const legend = h('legend', 'mb-2 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1',
+        q.header ? h('span', 'rounded bg-amber-400/15 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-amber-200', q.header) : null,
+        h('span', 'break-words text-[14px] font-medium leading-snug text-zinc-100', q.question),
+        q.multiSelect ? h('span', 'text-[11px] text-zinc-500', 'pick any') : null);
+      fields.append(h('fieldset', 'min-w-0', legend, opts, preview, addNote, note));
+      showPreview(null);
+      form.qs.push(fq);
+    });
+    form.progress = h('span', 'text-[11px] text-zinc-500');
+    form.send = h('button', 'touch:h-11 touch:px-4 h-8 shrink-0 rounded-md bg-amber-400 px-3 text-xs font-semibold text-ink-950 hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-amber-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400', 'Answer');
+    form.send.type = 'button';
+    form.send.addEventListener('click', submitAsk);
+    form.more = h('span', 'text-[11px] text-zinc-500');
+    const who = chat.agent && chat.agent.adapter === 'claude' ? 'Claude asks' : 'The agent asks';
+    form.el = h('div', 'mx-auto flex max-w-3xl flex-col gap-3',
+      h('div', 'flex items-center gap-2',
+        h('span', STATES.needs_input.dot),
+        h('span', 'text-[11px] font-semibold uppercase tracking-wider text-amber-300', who),
+        form.more),
+      fields,
+      // Stays in sight while the questions scroll (phones).
+      h('div', 'sticky -bottom-3 z-10 -mx-3 -mb-3 flex flex-wrap items-center justify-end gap-x-3 gap-y-1.5 border-t border-amber-400/15 bg-ink-900 px-3 py-2',
+        h('span', 'mr-auto text-[11px] text-zinc-500', 'Answer here or in the terminal · or reply below instead'),
+        form.progress, form.send));
+    return form;
+  }
+
+  // askAnswer is what the form says: {answers, notes}, and how many
+  // questions are still unanswered.
+  function askAnswer(form) {
+    const answers = {};
+    const notes = {};
+    let open = 0;
+    for (const fq of form.qs) {
+      const picks = fq.opts.filter((o) => o.input.checked).map((o) => o.label);
+      const own = fq.other.text.value.trim();
+      if (fq.other.input.checked && own) picks.push(own);
+      if (!picks.length) open++;
+      else answers[fq.q.question] = picks;
+      const note = fq.note.value.trim();
+      if (note) notes[fq.q.question] = note;
+    }
+    return { answers, notes, open };
+  }
+
+  function paintAsk() {
+    const form = chat.askForm;
+    if (!form) return;
+    const { open } = askAnswer(form);
+    const n = form.qs.length;
+    form.progress.textContent = n > 1 ? `${n - open} of ${n} answered` : '';
+    form.send.disabled = open > 0 || form.sending || !chatLive();
+    form.send.textContent = form.sending ? 'Sending…' : 'Answer';
+    form.more.textContent = chat.asks.length > 1 ? `· ${chat.asks.length - 1} more after this` : '';
+  }
+
+  async function submitAsk() {
+    const form = chat.askForm;
+    if (!form) return;
+    const { answers, notes, open } = askAnswer(form);
+    if (open) return;
+    await sendAnswer(form, Object.keys(notes).length ? { answers, notes } : { answers });
+  }
+
+  // sendAnswer answers the form's question; it reports whether that worked.
+  async function sendAnswer(form, body) {
+    if (form.sending || !chatLive()) return false;
+    const seq = chat.seq;
+    form.sending = true;
+    paintAsk();
+    let ok = false;
+    try {
+      await api('POST', chatAPI('answer'), Object.assign({ ask: form.id }, body));
+      ok = true;
+    } catch (e) {
+      toast(e.status === 404 ? 'that question was answered already, or is gone' : `could not answer: ${e.message}`, 'error');
+      if (e.status !== 404) {
+        form.sending = false;
+        if (seq === chat.seq) paintAsk();
+        return false;
+      }
+    }
+    if (seq !== chat.seq) return ok;
+    chat.answered.add(form.id);
+    chat.asks = chat.asks.filter((x) => x.id !== form.id);
+    renderChatAsk();
+    renderChatInput();
+    return ok;
+  }
+
   // Keys for the agent's own dialogs (permissions, trust, menus).
   const CHAT_KEYS = [
     ['escape', 'Esc'], ['up', '↑'], ['down', '↓'], ['left', '←'], ['right', '→'], ['tab', 'Tab'],
@@ -3599,6 +3913,7 @@
     const ta = $('chat-input');
     ta.disabled = !live;
     ta.placeholder = !live ? 'the session has ended'
+      : askShown() ? 'Or reply in your own words instead of answering'
       : chatDialog() ? 'Type into the dialog (Enter is not pressed)'
       : touch() ? 'Message the agent' : 'Message the agent · Enter sends, Shift+Enter for a new line';
     $('chat-send').disabled = !live || chat.sending;
@@ -3636,6 +3951,14 @@
     const ta = $('chat-input');
     const text = ta.value;
     if (!text.trim() || chat.sending || !chatLive()) return;
+    if (askShown() && chat.askForm) {
+      // In place of answers: the agent gets the text instead.
+      if (await sendAnswer(chat.askForm, { decline: text }) && ta.value === text) {
+        ta.value = '';
+        autosize();
+      }
+      return;
+    }
     const seq = chat.seq;
     chat.sending = true;
     chat.held = false;
@@ -3739,6 +4062,7 @@
   // renderChatView shows the parts of the dialog the view has.
   function renderChatView() {
     const v = chat.view;
+    renderChatAsk();
     $('chat-scroll').hidden = v !== 'chat';
     $('chat-foot').hidden = v !== 'chat';
     $('wf-view').hidden = v !== 'wf';
@@ -3749,6 +4073,7 @@
 
   function wireChat() {
     const dlg = $('chat');
+    $('img-view').addEventListener('click', () => $('img-view').close());
     $('chat-close').addEventListener('click', closeChat);
     $('chat-form').addEventListener('submit', sendMessage);
     const ta = $('chat-input');
@@ -3767,6 +4092,7 @@
     $('chat-effort-sel').addEventListener('change', switchChatModel);
     $('chat-screen-toggle').addEventListener('click', () => {
       chat.screenAuto = false;
+      chat.screenAutoOpened = false;
       if (chat.view !== 'chat') {
         chat.screenOpen = true;
         setView('chat');
@@ -3804,12 +4130,15 @@
       scroller: $('chat-scroll'),
       log: $('chat-log'),
       url: (q) => chatAPI('chat?' + q),
+      imageURL: (q) => chatAPI('image?' + q),
       live: chatLive,
       working: () => !!chat.agent && chat.agent.state === 'working',
       empty: chatEmpty,
+      query: (q) => q.set('asks', chat.asks.map((a) => a.id).join(',')),
       onReply: (r) => {
         if (r.agent) chatAgent(chat.host, r.agent);
         chatModel(r.model);
+        chatAsks(r.asks);
       },
       onStatus: renderChatStatus,
       onFile: renderChatScreen,
@@ -3818,6 +4147,7 @@
       scroller: $('sub-scroll'),
       log: $('sub-log'),
       url: (q) => chatAPI(`workflows/${encodeURIComponent(wf.sub.run)}/agents/${encodeURIComponent(wf.sub.id)}/chat?` + q),
+      imageURL: (q) => chatAPI(`workflows/${encodeURIComponent(wf.sub.run)}/agents/${encodeURIComponent(wf.sub.id)}/image?` + q),
       live: subLive,
       working: subLive,
       empty: () => 'This agent has written nothing yet.',
