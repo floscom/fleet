@@ -1,7 +1,8 @@
 //go:build ignore
 
-// gen_icons draws the dashboard's favicon and app icons into static/ from
-// one pixel map. Run `go generate ./internal/web` (or `make icons`) after
+// gen_icons draws the dashboard's favicon, app icons and iOS launch
+// screens into static/ from one pixel map, and lists the launch screens in
+// index.html. Run `go generate ./internal/web` (or `make icons`) after
 // changing it.
 package main
 
@@ -65,11 +66,16 @@ func main() {
 		"apple-touch-icon.png":  encode(icon(180, 11, 0)),
 		"icon-maskable-512.png": encode(icon(512, 26, 0)),
 	}
+	links := splashes(files)
+	if err := os.MkdirAll(filepath.Join("static", "splash"), 0o755); err != nil {
+		log.Fatal(err)
+	}
 	for name, b := range files {
 		if err := os.WriteFile(filepath.Join("static", name), b, 0o644); err != nil {
 			log.Fatal(err)
 		}
 	}
+	writeLinks(filepath.Join("static", "index.html"), links)
 }
 
 func tiled(scale int) *image.NRGBA {
@@ -190,4 +196,142 @@ func rgb(hex string) color.NRGBA {
 	}
 	c.A = 255
 	return c
+}
+
+// ------------------------------------------------------------ launch screens
+
+// iOS shows a launch screen while a web app added to the home screen
+// loads, but only an image made for the exact screen: one per screen
+// size and orientation, picked by the media query of its link.
+var screens = []struct{ w, h, dpr int }{ // portrait, in CSS pixels
+	{320, 568, 2},   // iPhone SE (1st)
+	{375, 667, 2},   // iPhone 6–8, SE (2nd, 3rd)
+	{414, 736, 3},   // iPhone 6–8 Plus
+	{375, 812, 3},   // iPhone X, XS, 11 Pro, 12 mini, 13 mini
+	{414, 896, 2},   // iPhone XR, 11
+	{414, 896, 3},   // iPhone XS Max, 11 Pro Max
+	{390, 844, 3},   // iPhone 12–14, 16e
+	{428, 926, 3},   // iPhone 12 and 13 Pro Max, 14 Plus
+	{393, 852, 3},   // iPhone 14 Pro, 15, 15 Pro, 16
+	{430, 932, 3},   // iPhone 14 Pro Max, 15 Plus, 15 Pro Max, 16 Plus
+	{402, 874, 3},   // iPhone 16 Pro, 17, 17 Pro
+	{420, 912, 3},   // iPhone Air
+	{440, 956, 3},   // iPhone 16 Pro Max, 17 Pro Max
+	{744, 1133, 2},  // iPad mini (6th, 7th)
+	{768, 1024, 2},  // iPad (up to 6th), mini (up to 5th), Air (up to 2nd), Pro 9.7"
+	{810, 1080, 2},  // iPad (7th–9th)
+	{820, 1180, 2},  // iPad (10th, A16), Air (4th, 5th)
+	{834, 1112, 2},  // iPad Air (3rd), Pro 10.5"
+	{834, 1194, 2},  // iPad Pro 11" (1st–4th), Air 11" (M2, M3)
+	{834, 1210, 2},  // iPad Pro 11" (M4, M5)
+	{1024, 1366, 2}, // iPad Pro 12.9", Air 13" (M2, M3)
+	{1032, 1376, 2}, // iPad Pro 13" (M4, M5)
+}
+
+// wordmark is the ASCII logo of the page header: blocks are letters, the
+// box-drawing characters their shadow.
+var wordmark = []string{
+	"███████╗██╗     ███████╗███████╗████████╗",
+	"██╔════╝██║     ██╔════╝██╔════╝╚══██╔══╝",
+	"█████╗  ██║     █████╗  █████╗     ██║   ",
+	"██╔══╝  ██║     ██╔══╝  ██╔══╝     ██║   ",
+	"██║     ███████╗███████╗███████╗   ██║   ",
+	"╚═╝     ╚══════╝╚══════╝╚══════╝   ╚═╝   ",
+}
+
+// splashes adds a launch screen per screen and orientation to files, and
+// returns their links.
+func splashes(files map[string][]byte) []string {
+	var links []string
+	for _, sc := range screens {
+		for _, o := range []string{"portrait", "landscape"} {
+			w, h := sc.w*sc.dpr, sc.h*sc.dpr
+			if o == "landscape" {
+				w, h = h, w
+			}
+			name := fmt.Sprintf("splash/%dx%d.png", w, h)
+			files[name] = encode(splash(w, h))
+			links = append(links, fmt.Sprintf(`<link rel="apple-touch-startup-image" href="/%s" media="(device-width: %dpx) and (device-height: %dpx) and (-webkit-device-pixel-ratio: %d) and (orientation: %s)">`,
+				name, sc.w, sc.h, sc.dpr, o))
+		}
+	}
+	return links
+}
+
+// splash draws a w×h launch screen: the glyph above the wordmark, centred
+// on the page background, sized by the shorter side.
+func splash(w, h int) *image.NRGBA {
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	draw.Draw(img, img.Bounds(), image.NewUniform(rgb(bg)), image.Point{}, draw.Src)
+	short := min(w, h)
+	// The glyph a quarter of the short side wide, the wordmark half of it,
+	// in cells twice as tall as wide like a terminal's.
+	gs := max(1, short/4/len(glyph[0]))
+	cw := max(1, short/2/len([]rune(wordmark[0])))
+	gw, gh := len(glyph[0])*gs, len(glyph)*gs
+	ww, wh := len([]rune(wordmark[0]))*cw, len(wordmark)*2*cw
+	gap := gh / 2
+	y0 := (h - gh - gap - wh) / 2
+	for _, p := range palette {
+		for row, line := range glyph {
+			for col := range line {
+				if line[col] == p.key {
+					fill(img, (w-gw)/2+col*gs, y0+row*gs, gs, gs, p.hex)
+				}
+			}
+		}
+	}
+	x0, y1 := (w-ww)/2, y0+gh+gap
+	for row, line := range wordmark {
+		for col, r := range []rune(line) {
+			x, y := x0+col*cw, y1+row*2*cw
+			if r == '█' {
+				fill(img, x, y, cw, 2*cw, "#d4d4d8") // zinc-300, as the header's letters
+				continue
+			}
+			// A box-drawing line from the cell's middle to the sides it
+			// connects, in the header's shadow colour.
+			up, down := strings.ContainsRune("║╚╝", r), strings.ContainsRune("║╔╗", r)
+			left, right := strings.ContainsRune("═╗╝", r), strings.ContainsRune("═╔╚", r)
+			t := max(1, cw/4)
+			mx, my := x+(cw-t)/2, y+cw-t/2
+			const shadow = "#3f3f46" // zinc-700
+			if up {
+				fill(img, mx, y, t, my-y+t, shadow)
+			}
+			if down {
+				fill(img, mx, my, t, y+2*cw-my, shadow)
+			}
+			if left {
+				fill(img, x, my, mx-x+t, t, shadow)
+			}
+			if right {
+				fill(img, mx, my, x+cw-mx, t, shadow)
+			}
+		}
+	}
+	return img
+}
+
+func fill(img *image.NRGBA, x, y, w, h int, hex string) {
+	draw.Draw(img, image.Rect(x, y, x+w, y+h), image.NewUniform(rgb(hex)), image.Point{}, draw.Src)
+}
+
+// writeLinks puts the launch screen links between the splash markers of
+// the page.
+func writeLinks(path string, links []string) {
+	const begin, end = "<!-- splash:begin -->\n", "<!-- splash:end -->"
+	b, err := os.ReadFile(path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	page := string(b)
+	i, j := strings.Index(page, begin), strings.Index(page, end)
+	if i < 0 || j < i {
+		log.Fatalf("%s: no %q ... %q", path, strings.TrimSpace(begin), end)
+	}
+	page = page[:i+len(begin)] + strings.Join(links, "\n") + "\n" + page[j:]
+	if err := os.WriteFile(path, []byte(page), 0o644); err != nil {
+		log.Fatal(err)
+	}
 }

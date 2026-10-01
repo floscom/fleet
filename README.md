@@ -367,7 +367,11 @@ Changes apply at once, rewrite `config.toml` and show up in the CLI
   Tailwind; `make web` rebuilds it after UI changes.
 - The favicon and the home-screen / install icons (with a web app
   manifest) are drawn from one pixel map in `internal/web/gen_icons.go`;
-  `make icons` redraws them, and the results are committed too.
+  `make icons` redraws them, and the results are committed too. Added to
+  an iPhone's or iPad's home screen, the dashboard opens full screen with
+  a launch screen (the icon over the header's FLEET logo): iOS needs one
+  image per screen size and orientation, so `make icons` draws 44 of them
+  into `static/splash/` and writes their links into `index.html`.
 
 ### Sessions in the browser
 
