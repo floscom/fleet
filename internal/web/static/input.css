@@ -63,6 +63,12 @@
   html {
     color-scheme: dark;
     -webkit-text-size-adjust: 100%;
+    /* Thin dark scrollbars instead of the system's wide grey ones. The
+       colour is inherited by every scrolling box, the width is not. */
+    scrollbar-color: #3a4452 transparent;
+  }
+  * {
+    scrollbar-width: thin;
   }
   ::selection {
     background: rgb(52 211 153 / 0.3);

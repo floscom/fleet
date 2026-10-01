@@ -113,6 +113,18 @@
     return h('span', cls || 'inline-flex items-center rounded border border-ink-600 bg-ink-800 px-1.5 py-px font-mono text-[11px] text-zinc-400', text);
   }
 
+  // pathBreaks lets a long path wrap before a slash rather than inside a
+  // folder name.
+  function pathBreaks(p) {
+    return p.split('/').flatMap((part, i) => (i ? [h('wbr'), '/' + part] : [part]));
+  }
+
+  // fitHeight grows a text box with its text, up to its CSS max height.
+  function fitHeight(ta) {
+    ta.style.height = 'auto';
+    ta.style.height = ta.scrollHeight + 2 + 'px';
+  }
+
   function shortPath(p) {
     if (!p) return '';
     return p.replace(/^\/(home|Users)\/[^/]+/, '~');
@@ -680,7 +692,7 @@
         S.roots = next;
         invalidate('roots');
         if (picker.open) renderPicker();
-        if (launch.open && !launch.host) renderLaunch();
+        if (launch.open && !launch.host) launchRootsChanged();
         break;
       }
       case 'agent': {
@@ -1586,20 +1598,24 @@
     host: '', // server id; '' = this daemon
     adapters: null, // [{id, name, available, models, efforts}] of the machine
     roots: null, // roots of another machine (this one's are S.roots)
-    root: '', // chosen root name
-    sub: '', // folder inside the root, relative, '' = the root itself
-    dir: null, // listing of root/sub
+    root: '', // chosen folder: a root name
+    sub: '', // and a folder inside it, relative, '' = the root itself
+    look: null, // {root, sub} the folder list looks into; null = recent folders and roots
+    dirs: new Map(), // dirKey -> {root, sub, entries, truncated, error}, entries null while listed
     adapter: '',
-    seq: 0, // stale replies are dropped
-    loading: false,
+    gen: 0, // bumped for another machine or on close: stale replies are dropped
     busy: false, // a start is in flight
     error: '',
+    listSig: '', // what the folder list shows (see renderLaunchList)
+    listView: '', // and which list: a new one scrolls back to the top
     modelSig: '', // what the model pickers show (see renderLaunchModel)
   };
 
   const launchAPI = (path) => (launch.host ? `/api/hosts/${encodeURIComponent(launch.host)}/${path}` : '/api/' + path);
   const launchRoots = () => (launch.host ? launch.roots || [] : S.roots);
   const launchRoot = () => launchRoots().find((r) => r.name === launch.root);
+  const dirKey = (root, sub) => JSON.stringify([root, sub]);
+  const inRoot = (r, sub) => (sub ? joinPath(r.path, sub) : r.path);
 
   function openLaunch() {
     if (!admin) return;
@@ -1608,9 +1624,15 @@
     launch.busy = false;
     if (launch.host && !pickerHosts().some((x) => x.id === launch.host)) launch.host = '';
     $('launch-prompt').value = '';
+    $('launch-search').value = '';
+    // Key hints only where there are keys.
+    $('launch-prompt').placeholder = touch() ? 'What should the agent do?' : 'What should the agent do? · Ctrl+Enter starts';
+    $('launch-search').placeholder = touch() ? 'Search folders' : 'Search folders · ↓ to move · → to look inside';
     $('launch-name').value = '';
     $('launch-branch').value = '';
     $('launch').showModal();
+    $('launch-body').scrollTop = 0;
+    fitHeight($('launch-prompt'));
     renderLaunchHosts();
     checkHosts();
     loadLaunchHost();
@@ -1625,11 +1647,11 @@
   // loadLaunchHost loads the adapters and roots of the chosen machine.
   async function loadLaunchHost() {
     const host = launch.host;
-    const seq = ++launch.seq;
+    const gen = ++launch.gen;
     launch.adapters = null;
     launch.roots = null;
-    launch.dir = null;
-    launch.loading = true;
+    launch.dirs = new Map();
+    launch.look = null;
     launch.error = '';
     renderLaunch();
     let err = '';
@@ -1642,44 +1664,69 @@
       api('GET', launchAPI('adapters')).then((r) => (r && r.adapters) || []).catch(fail),
       host ? api('GET', launchAPI('roots')).then((r) => (r && r.roots) || []).catch(fail) : null,
     ]);
-    if (seq !== launch.seq) return;
+    if (gen !== launch.gen) return;
     if (host && ads) setHostState(host, 'joined');
     launch.adapters = ads || [];
     launch.roots = roots;
-    launch.loading = false;
     launch.error = err;
-    const all = launchRoots();
-    if (!all.some((r) => r.name === launch.root)) {
-      launch.root = all.length ? all[0].name : '';
-      launch.sub = '';
-    }
-    renderLaunch();
-    browseLaunch();
+    launchRootsChanged();
   }
 
-  // browseLaunch lists the folder launch.sub of the chosen root.
-  async function browseLaunch() {
-    const root = launchRoot();
-    const seq = ++launch.seq;
-    if (!root) {
-      launch.dir = null;
-      renderLaunch();
-      return;
+  // launchRootsChanged lists new roots for the search, and chooses the
+  // last folder a session started in if the chosen root is gone.
+  function launchRootsChanged() {
+    if (!launchRoot()) {
+      const r = launchRoots()[0];
+      const pick = launchRecent(1)[0] || (r ? { root: r.name, sub: '' } : { root: '', sub: '' });
+      launch.root = pick.root;
+      launch.sub = pick.sub;
     }
-    launch.loading = true;
+    if (launch.look && !launchRoots().some((r) => r.name === launch.look.root)) launch.look = null;
+    for (const r of launchRoots()) listDir(r.name, '');
     renderLaunch();
-    let dir = null;
-    let err = '';
+  }
+
+  // listDir lists the subfolders of a folder into launch.dirs, once per
+  // opening of the dialog: the search looks through every listing.
+  async function listDir(root, sub) {
+    const key = dirKey(root, sub);
+    const r = launchRoots().find((x) => x.name === root);
+    if (!r || launch.dirs.has(key)) return;
+    const gen = launch.gen;
+    const d = { root, sub, entries: null, truncated: false, error: '' };
+    launch.dirs.set(key, d);
     try {
-      dir = await api('GET', launchAPI('fs?' + new URLSearchParams({ path: launch.sub ? joinPath(root.path, launch.sub) : root.path })));
+      const dir = await api('GET', launchAPI('fs?' + new URLSearchParams({ path: inRoot(r, sub) })));
+      d.entries = dir.entries || [];
+      d.truncated = !!dir.truncated;
     } catch (e) {
-      err = e.message;
+      d.entries = [];
+      d.error = e.message;
     }
-    if (seq !== launch.seq) return;
-    launch.loading = false;
-    launch.dir = dir;
-    launch.error = err;
-    renderLaunch();
+    if (gen === launch.gen) renderLaunch();
+  }
+
+  // launchRecent is the folders sessions started in on the chosen machine,
+  // newest first. It keeps its last 200 sessions, so every browser and
+  // phone sees the same ones. The list shows five, the search finds all.
+  const LAUNCH_RECENT = 5;
+
+  function launchRecent(max) {
+    const agents = launch.host ? (S.remote.get(launch.host) || { agents: new Map() }).agents : S.agents;
+    const out = [];
+    const seen = new Set();
+    for (const a of [...agents.values()].sort((x, y) => y.createdAtMs - x.createdAtMs)) {
+      const r = launchRoots().find((x) => x.name === a.root);
+      if (!r || a.isolation === 'clone' || !a.path) continue; // a clone runs outside the root
+      const base = joinPath(r.path, '');
+      const sub = a.path === r.path ? '' : a.path.startsWith(base) ? a.path.slice(base.length) : null;
+      const key = sub == null ? '' : dirKey(r.name, sub);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push({ root: r.name, sub });
+      if (out.length === max) break;
+    }
+    return out;
   }
 
   function selectLaunchHost(id) {
@@ -1687,6 +1734,7 @@
     launch.host = id;
     launch.root = '';
     launch.sub = '';
+    $('launch-search').value = '';
     renderLaunchHosts();
     loadLaunchHost();
   }
@@ -1704,6 +1752,26 @@
         note ? h('span', 'font-sans text-[11px] text-zinc-500', note) : null);
     }));
     $('launch-host').textContent = hostName(launch.host);
+  }
+
+  // refill replaces the chips of a radio group, and keeps the focus on
+  // the checked one if it was in the group (arrow keys move through it).
+  function refill(box, ...chips) {
+    const had = box.contains(document.activeElement);
+    box.replaceChildren(...chips);
+    const checked = had && box.querySelector('input:checked');
+    if (checked) checked.focus();
+  }
+
+  function radioChip(name, value, label, checked, title) {
+    const rb = h('input', 'sr-only');
+    rb.type = 'radio';
+    rb.name = name;
+    rb.value = value;
+    rb.checked = checked;
+    const chipEl = h('label', HOST_CHIP, rb, label);
+    if (title) chipEl.title = title;
+    return chipEl;
   }
 
   // Model and effort picks, per agent CLI, kept for the next session.
@@ -1736,23 +1804,26 @@
     const p = launchPick();
     $('launch-model-row').hidden = !p;
     if (!p) return;
-    // Rebuilt only when they change: browsing folders renders the dialog
-    // again, and would close a picker the user has open.
+    // Rebuilt only when they change: the dialog renders again as folders
+    // are listed, and would swallow a click on a chip.
     const sig = JSON.stringify([p.ad.id, p.ad.models, p.ad.efforts, p.model && p.model.id, p.effort && p.effort.id]);
     if (sig === launch.modelSig) return;
     launch.modelSig = sig;
-    const msel = $('launch-model');
-    msel.replaceChildren(opt('', 'Default'), ...p.ad.models.map((m) => opt(m.id, m.label)));
-    msel.value = p.model ? p.model.id : '';
-    const esel = $('launch-effort');
-    esel.replaceChildren(opt('', p.model && !p.efforts.length ? 'none' : 'Default'), ...p.efforts.map((e) => opt(e.id, e.label)));
-    esel.value = p.effort ? p.effort.id : '';
-    esel.disabled = !p.efforts.length;
+    const dflt = "the CLI's own setting";
+    refill($('launch-model'), radioChip('launch-model', '', 'Default', !p.model, dflt),
+      ...(p.ad.models || []).map((m) => radioChip('launch-model', m.id, m.label, p.model === m)));
+    if (!p.efforts.length) {
+      refill($('launch-effort'), h('span', 'text-xs text-zinc-600', p.model ? `${p.model.label} has no effort levels` : 'none'));
+    } else {
+      refill($('launch-effort'), radioChip('launch-effort', '', 'Default', !p.effort, dflt),
+        ...p.efforts.map((e) => radioChip('launch-effort', e.id, e.label, p.effort === e)));
+    }
   }
 
   function saveLaunchPick() {
+    const value = (id) => ($(id).querySelector('input:checked') || { value: '' }).value;
     const picks = launchPicks();
-    picks[launch.adapter] = { model: $('launch-model').value, effort: $('launch-effort').value };
+    picks[launch.adapter] = { model: value('launch-model'), effort: value('launch-effort') };
     try {
       localStorage.setItem(LAUNCH_PICKS, JSON.stringify(picks));
     } catch {
@@ -1781,60 +1852,48 @@
     if (!launch.adapters) box.replaceChildren(h('span', 'text-xs text-zinc-600', 'loading…'));
     else if (!allowed.length) box.replaceChildren(h('span', 'text-xs text-zinc-600', 'no agent CLI allowed here'));
     else {
-      box.replaceChildren(...allowed.map((a) => {
-        const rb = h('input', 'sr-only');
-        rb.type = 'radio';
-        rb.name = 'launch-adapter';
-        rb.value = a.id;
-        rb.checked = a.id === launch.adapter;
-        rb.disabled = !a.available;
-        const label = h('label', a.available ? HOST_CHIP : 'touch:min-h-11 inline-flex cursor-not-allowed select-none items-center gap-1.5 rounded-md border border-ink-700 bg-ink-900 px-2 py-1 font-mono text-[12px] text-zinc-600', rb, a.name || a.id);
-        if (!a.available) {
-          label.append(h('span', 'font-sans text-[11px]', 'not installed'));
-          label.title = `${a.name} is not installed on ${hostName(launch.host)}`;
-        }
-        return label;
-      }));
+      const sig = JSON.stringify([allowed, launch.adapter, launch.host]);
+      if (box.dataset.sig !== sig) {
+        box.dataset.sig = sig;
+        refill(box, ...allowed.map((a) => {
+          const label = radioChip('launch-adapter', a.id, a.name || a.id, a.id === launch.adapter);
+          if (!a.available) {
+            label.querySelector('input').disabled = true;
+            label.className = 'touch:min-h-11 inline-flex cursor-not-allowed select-none items-center gap-1.5 rounded-md border border-ink-700 bg-ink-900 px-2 py-1 font-mono text-[12px] text-zinc-600';
+            label.append(h('span', 'font-sans text-[11px]', 'not installed'));
+            label.title = `${a.name} is not installed on ${hostName(launch.host)}`;
+          }
+          return label;
+        }));
+      }
     }
+    if (!launch.adapters || !allowed.length) delete box.dataset.sig;
 
     renderLaunchModel();
 
-    // roots
-    const sel = $('launch-root');
-    const roots = launchRoots();
-    const opts = roots.map((r) => {
-      const o = h('option', '', `${r.name} · ${shortPath(r.path)}`);
-      o.value = r.name;
-      o.selected = r.name === launch.root;
-      return o;
-    });
-    if (!roots.length) {
-      const o = h('option', '', launch.adapters ? 'no roots on this machine' : 'loading…');
-      o.value = '';
-      opts.push(o);
-    }
-    sel.replaceChildren(...opts);
-    sel.disabled = !roots.length;
-
-    renderLaunchCrumbs(root);
-    renderLaunchList(root, notJoined);
+    const folder = $('launch-folder');
+    folder.textContent = root ? `${root.name}:${launch.sub}` : '';
+    folder.title = root ? shortPath(inRoot(root, launch.sub)) : '';
+    renderLaunchCrumbs();
+    renderLaunchList(notJoined);
 
     const st = $('launch-status');
+    const roots = launchRoots();
     if (notJoined) {
-      st.className = 'min-h-5 text-xs text-amber-200/90';
+      st.className = 'min-h-5 min-w-0 basis-full text-xs text-amber-200/90 sm:basis-0 sm:flex-1';
       st.textContent = `${hostName(launch.host)} does not have this fleet's key: run \`fleet start --join <key>\` there (see Add folder).`;
     } else if (launch.error) {
-      st.className = 'min-h-5 text-xs text-rose-300';
+      st.className = 'min-h-5 min-w-0 basis-full text-xs text-rose-300 sm:basis-0 sm:flex-1';
       st.textContent = launch.error;
     } else if (root) {
-      st.className = 'min-h-5 min-w-0 break-all text-xs text-zinc-500';
+      st.className = 'min-h-5 min-w-0 basis-full break-words text-xs text-zinc-500 sm:basis-0 sm:flex-1';
       const p = launchPick();
       const runs = p && [p.model && p.model.label, p.effort && p.effort.label + ' effort'].filter(Boolean).join(' · ');
       st.replaceChildren(h('span', '', 'starts ', h('span', 'font-mono text-zinc-200', launch.adapter || '…'),
         runs ? h('span', 'text-zinc-400', ` (${runs})`) : null, ' in ',
-        h('span', 'font-mono text-zinc-200', shortPath(launch.sub ? joinPath(root.path, launch.sub) : root.path))));
+        h('span', 'font-mono text-zinc-200', ...pathBreaks(shortPath(inRoot(root, launch.sub))))));
     } else {
-      st.className = 'min-h-5 text-xs text-zinc-500';
+      st.className = 'min-h-5 min-w-0 basis-full text-xs text-zinc-500 sm:basis-0 sm:flex-1';
       st.textContent = launch.adapters && !roots.length ? 'Add a root folder on this machine first (Roots → Add folder).' : '';
     }
     const start = $('launch-start');
@@ -1842,69 +1901,191 @@
     start.textContent = launch.busy ? 'Starting…' : 'Start';
   }
 
-  function renderLaunchCrumbs(root) {
-    const nav = $('launch-crumbs');
-    if (!root) {
-      nav.replaceChildren();
-      return;
+  // The folder list: recent folders and roots, the search results, or the
+  // subfolders of one folder. A click on a row chooses it, › looks inside.
+
+  function chooseFolder(root, sub) {
+    launch.root = root;
+    launch.sub = sub;
+    renderLaunch();
+  }
+
+  // lookInto shows the subfolders of root/sub; a null root goes back to
+  // recent folders and roots.
+  function lookInto(root, sub) {
+    launch.look = root == null ? null : { root, sub };
+    $('launch-search').value = '';
+    if (launch.look) listDir(root, sub);
+    renderLaunch();
+    if (!touch()) $('launch-search').focus();
+  }
+
+  function lookUp() {
+    const l = launch.look;
+    if (!l) return;
+    if (!l.sub) lookInto(null);
+    else lookInto(l.root, l.sub.split('/').slice(0, -1).join('/'));
+  }
+
+  // folderRow describes the row of root/sub: its name, where it is, and
+  // whether it is a git repo (if not given, as its parent's listing says).
+  function folderRow(root, sub, git) {
+    const r = launchRoots().find((x) => x.name === root);
+    const parts = sub ? sub.split('/') : [];
+    const name = parts.length ? parts[parts.length - 1] : root;
+    if (git == null && parts.length) {
+      const d = launch.dirs.get(dirKey(root, parts.slice(0, -1).join('/')));
+      git = d && d.entries && (d.entries.find((e) => e.name === name) || {}).git;
     }
+    return {
+      root, sub, name, git: !!git,
+      where: parts.length ? [root, ...parts.slice(0, -1)].join('/') : shortPath(r ? r.path : ''),
+    };
+  }
+
+  const LAUNCH_FOUND_MAX = 50;
+
+  // launchRows is what the folder list shows, as plain data (compared
+  // before the list is rebuilt).
+  function launchRows(notJoined) {
+    const note = (text) => ({ note: text });
+    if (notJoined) return [note('not in this fleet yet')];
+    if (!launch.adapters) return [note('loading…')];
+    const roots = launchRoots();
+    if (!roots.length) return [note('no roots on this machine')];
+    const q = $('launch-search').value.trim().toLowerCase();
+    if (q) return searchRows(q);
+
+    const l = launch.look;
+    if (l) {
+      const d = launch.dirs.get(dirKey(l.root, l.sub));
+      const rows = [{ ...folderRow(l.root, l.sub), where: 'this folder', here: true }];
+      if (!d || !d.entries) rows.push(note('loading…'));
+      else if (d.error) rows.push(note(d.error));
+      else {
+        for (const e of d.entries) rows.push({ ...folderRow(l.root, l.sub ? l.sub + '/' + e.name : e.name, e.git), where: '' });
+        if (!d.entries.length) rows.push(note('no subfolders'));
+        if (d.truncated) rows.push(note(`only the first ${d.entries.length} folders are listed: search to find others`));
+      }
+      return rows;
+    }
+
+    const rows = [];
+    const recent = launchRecent(LAUNCH_RECENT);
+    if (recent.length) rows.push({ head: 'Recent' }, ...recent.map((f) => folderRow(f.root, f.sub)));
+    rows.push({ head: 'Roots' }, ...roots.map((r) => folderRow(r.name, '')));
+    return rows;
+  }
+
+  // searchRows finds folders whose root:path has every word of q: folders
+  // of past sessions, roots, the folders in them and in every folder
+  // looked into.
+  function searchRows(q) {
+    const words = q.split(/\s+/);
+    const last = words[words.length - 1];
+    const found = new Map();
+    const add = (root, sub, git, rank) => {
+      const key = dirKey(root, sub);
+      if (found.has(key)) return;
+      const hay = (root + ':' + sub).toLowerCase();
+      if (!words.every((w) => hay.includes(w))) return;
+      const row = folderRow(root, sub, git);
+      const name = row.name.toLowerCase();
+      const score = name === last ? 0 : name.startsWith(last) ? 1 : name.includes(last) ? 2 : 3;
+      found.set(key, { row, score, rank, depth: sub ? sub.split('/').length : 0 });
+    };
+    const recent = launchRecent();
+    recent.forEach((f, i) => add(f.root, f.sub, null, i));
+    for (const r of launchRoots()) add(r.name, '', null, recent.length);
+    let listing = false;
+    for (const d of launch.dirs.values()) {
+      if (!d.entries) listing = true;
+      else for (const e of d.entries) add(d.root, d.sub ? d.sub + '/' + e.name : e.name, e.git, recent.length);
+    }
+    const hits = [...found.values()].sort((a, b) => a.score - b.score || a.rank - b.rank || a.depth - b.depth ||
+      a.row.name.localeCompare(b.row.name));
+    const rows = hits.slice(0, LAUNCH_FOUND_MAX).map((x) => x.row);
+    if (hits.length > LAUNCH_FOUND_MAX) rows.push({ note: `${hits.length - LAUNCH_FOUND_MAX} more: type more to narrow them down` });
+    if (listing) rows.push({ note: 'still listing folders…' });
+    else if (!hits.length) rows.push({ note: `no folder matches "${q}": look inside one (›) to search its folders too` });
+    return rows;
+  }
+
+  const LAUNCH_ROW = 'touch:min-h-11 flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1 text-left font-mono text-[12.5px] text-zinc-300 hover:bg-ink-800 hover:text-zinc-50 focus-visible:bg-ink-800 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-emerald-400/60 aria-pressed:bg-emerald-400/10 aria-pressed:text-emerald-100 aria-pressed:hover:bg-emerald-400/15';
+  const LAUNCH_LOOK = 'touch:min-h-11 touch:min-w-11 shrink-0 rounded px-2.5 font-mono text-sm text-zinc-600 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-emerald-400/60';
+  const GIT_CHIP = 'inline-flex shrink-0 items-center rounded border border-violet-400/25 bg-violet-400/10 px-1.5 py-px font-mono text-[10px] text-violet-300';
+
+  function renderLaunchList(notJoined) {
+    const ul = $('launch-list');
+    const rows = launchRows(notJoined);
+    const view = JSON.stringify([launch.host, $('launch-search').value.trim(), launch.look]);
+    const sig = JSON.stringify([view, rows, launch.root, launch.sub]);
+    if (sig === launch.listSig) return;
+    const sameView = view === launch.listView;
+    launch.listSig = sig;
+    launch.listView = view;
+    const focused = ul.contains(document.activeElement) ? document.activeElement.dataset.key : '';
+    ul.replaceChildren(...rows.map((row) => {
+      if (row.head) return h('li', 'px-2 pb-1 pt-2.5 text-[10px] font-medium uppercase tracking-wider text-zinc-600 first:pt-1', row.head);
+      if (row.note) return h('li', 'px-2 py-4 text-center font-mono text-xs text-zinc-600', '// ' + row.note);
+      const chosen = row.root === launch.root && row.sub === launch.sub;
+      const b = h('button', LAUNCH_ROW,
+        h('span', 'w-3 shrink-0 text-emerald-400', chosen ? '✓' : ''),
+        h('span', 'min-w-0 max-w-[70%] shrink-0 truncate', row.name, row.here ? '' : h('span', 'text-zinc-600', '/')),
+        row.git ? chip('git', GIT_CHIP) : null,
+        h('span', 'ml-auto min-w-0 truncate pl-2 font-sans text-[11px] text-zinc-500', row.where));
+      b.type = 'button';
+      b.dataset.key = dirKey(row.root, row.sub);
+      b.setAttribute('aria-pressed', String(chosen));
+      const r = launchRoots().find((x) => x.name === row.root);
+      if (r) b.title = shortPath(inRoot(r, row.sub));
+      b.addEventListener('click', () => chooseFolder(row.root, row.sub));
+      if (row.here) return h('li', 'flex', b);
+      const look = h('button', LAUNCH_LOOK, '›');
+      look.type = 'button';
+      look.tabIndex = -1; // → does it from the keyboard
+      look.setAttribute('aria-label', `Look inside ${row.name}`);
+      look.title = 'look inside';
+      look.addEventListener('click', () => lookInto(row.root, row.sub));
+      return h('li', 'flex items-stretch gap-0.5', b, look);
+    }));
+    ul.classList.toggle('opacity-60', rows.length === 1 && rows[0].note === 'loading…');
+    if (!sameView) ul.scrollTop = 0;
+    if (focused) {
+      const again = [...ul.querySelectorAll('button[data-key]')].find((b) => b.dataset.key === focused);
+      if (again) again.focus();
+      else if (!touch()) $('launch-search').focus();
+    }
+  }
+
+  function renderLaunchCrumbs() {
+    const nav = $('launch-crumbs');
+    const l = launch.look;
+    nav.hidden = !l || !!$('launch-search').value.trim();
+    if (nav.hidden) return nav.replaceChildren();
+    const up = h('button', 'touch:min-h-11 touch:min-w-11 shrink-0 rounded px-2 py-0.5 text-sm text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', '‹');
+    up.type = 'button';
+    up.setAttribute('aria-label', l.sub ? 'Parent folder' : 'Back to recent folders and roots');
+    up.title = l.sub ? 'parent folder' : 'recent folders and roots';
+    up.addEventListener('click', lookUp);
     const crumb = (label, sub, current) => {
       if (current) {
-        const el = h('span', 'rounded px-1 py-0.5 font-semibold text-zinc-100', label);
+        const el = h('span', 'min-w-0 truncate rounded px-1 py-0.5 font-semibold text-zinc-100', label);
         el.setAttribute('aria-current', 'location');
         return el;
       }
-      const b = h('button', 'touch:min-h-11 touch:min-w-11 rounded px-1 py-0.5 text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', label);
+      const b = h('button', 'touch:min-h-11 shrink-0 rounded px-1 py-0.5 text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', label);
       b.type = 'button';
-      b.addEventListener('click', () => {
-        launch.sub = sub;
-        browseLaunch();
-      });
+      b.addEventListener('click', () => lookInto(l.root, sub));
       return b;
     };
-    const parts = launch.sub ? launch.sub.split('/') : [];
-    const items = [crumb(root.name + ':', '', !parts.length)];
+    const parts = l.sub ? l.sub.split('/') : [];
+    const items = [up, crumb(l.root + ':', '', !parts.length)];
     parts.forEach((p, i) => {
-      if (i > 0) items.push(h('span', 'text-zinc-700', '/'));
+      if (i > 0) items.push(h('span', 'shrink-0 text-zinc-700', '/'));
       items.push(crumb(p, parts.slice(0, i + 1).join('/'), i === parts.length - 1));
     });
     nav.replaceChildren(...items);
-  }
-
-  const LAUNCH_LIST_MAX = 400;
-
-  function renderLaunchList(root, notJoined) {
-    const ul = $('launch-list');
-    ul.classList.toggle('opacity-50', launch.loading);
-    const note = (t) => h('li', 'px-2 py-5 text-center font-mono text-xs text-zinc-600', '// ' + t);
-    if (notJoined) return ul.replaceChildren(note('not in this fleet yet'));
-    if (!root) return ul.replaceChildren(note(launch.loading ? 'loading…' : 'no root chosen'));
-    const dir = launch.dir;
-    if (!dir) return ul.replaceChildren(note(launch.loading ? 'loading…' : 'cannot list this folder'));
-    const items = [];
-    const row = (label, onClick, extra) => {
-      const b = h('button', 'touch:min-h-11 group flex w-full items-center gap-2 rounded px-2 py-1 text-left font-mono text-[12.5px] text-zinc-300 hover:bg-ink-800 hover:text-zinc-50 focus-visible:bg-ink-800 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-emerald-400/60', ...label);
-      b.type = 'button';
-      if (extra) b.append(extra);
-      b.append(h('span', 'ml-auto shrink-0 pl-2 text-zinc-700 group-hover:text-zinc-400', '→'));
-      b.addEventListener('click', onClick);
-      return h('li', '', b);
-    };
-    if (launch.sub) {
-      items.push(row([h('span', 'text-zinc-500', '../')], () => {
-        launch.sub = launch.sub.split('/').slice(0, -1).join('/');
-        browseLaunch();
-      }));
-    }
-    for (const e of dir.entries.slice(0, LAUNCH_LIST_MAX)) {
-      items.push(row([h('span', 'min-w-0 truncate', e.name, h('span', 'text-zinc-600', '/'))], () => {
-        launch.sub = launch.sub ? launch.sub + '/' + e.name : e.name;
-        browseLaunch();
-      }, e.git ? chip('git', 'inline-flex shrink-0 items-center rounded border border-violet-400/25 bg-violet-400/10 px-1.5 py-px font-mono text-[10px] text-violet-300') : null));
-    }
-    if (!dir.entries.length) items.push(note('no subfolders: the agent starts here'));
-    if (dir.entries.length > LAUNCH_LIST_MAX) items.push(note(`${dir.entries.length - LAUNCH_LIST_MAX} more not shown`));
-    ul.replaceChildren(...items);
   }
 
   async function startSession(ev) {
@@ -1949,6 +2130,9 @@
 
   function wireLaunch() {
     const dlg = $('launch');
+    const search = $('launch-search');
+    const list = $('launch-list');
+    const prompt = $('launch-prompt');
     $('agents-new').addEventListener('click', openLaunch);
     $('launch-form').addEventListener('submit', startSession);
     $('launch-close').addEventListener('click', closeLaunch);
@@ -1963,14 +2147,53 @@
     });
     $('launch-model').addEventListener('change', saveLaunchPick);
     $('launch-effort').addEventListener('change', saveLaunchPick);
-    $('launch-root').addEventListener('change', (ev) => {
-      launch.root = ev.target.value;
-      launch.sub = '';
-      renderLaunch();
-      browseLaunch();
+    search.addEventListener('input', renderLaunch);
+    search.addEventListener('keydown', (ev) => {
+      const first = list.querySelector('button[data-key]');
+      if (ev.key === 'ArrowDown' && first) {
+        ev.preventDefault();
+        first.focus();
+      } else if (ev.key === 'Enter') {
+        ev.preventDefault(); // never start by accident; with a search, choose the first match
+        if (search.value.trim() && first) first.click();
+      } else if (ev.key === 'Backspace' && !search.value && launch.look) {
+        ev.preventDefault();
+        lookUp();
+      } else if (ev.key === 'Escape' && search.value) {
+        ev.preventDefault(); // clear the search instead of closing the dialog
+        search.value = '';
+        renderLaunch();
+      }
+    });
+    list.addEventListener('keydown', (ev) => {
+      const rows = [...list.querySelectorAll('button[data-key]')];
+      const i = rows.indexOf(document.activeElement);
+      if (i < 0) return;
+      if (ev.key === 'ArrowDown') {
+        ev.preventDefault();
+        if (i + 1 < rows.length) rows[i + 1].focus();
+      } else if (ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        (i > 0 ? rows[i - 1] : search).focus();
+      } else if (ev.key === 'ArrowRight') {
+        const look = rows[i].nextElementSibling;
+        if (!look) return;
+        ev.preventDefault();
+        look.click();
+      } else if ((ev.key === 'ArrowLeft' || ev.key === 'Backspace') && launch.look) {
+        ev.preventDefault();
+        lookUp();
+      }
+    });
+    // The prompt grows as it is typed into; keep its end in view.
+    prompt.addEventListener('input', () => {
+      fitHeight(prompt);
+      const body = $('launch-body');
+      const below = prompt.getBoundingClientRect().bottom + 12 - body.getBoundingClientRect().bottom;
+      if (below > 0) body.scrollTop += below;
     });
     // Ctrl/Cmd+Enter in the prompt starts the session.
-    $('launch-prompt').addEventListener('keydown', (ev) => {
+    prompt.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
         ev.preventDefault();
         $('launch-form').requestSubmit();
@@ -1978,7 +2201,9 @@
     });
     dlg.addEventListener('close', () => {
       launch.open = false;
-      launch.seq++;
+      launch.gen++;
+      launch.listSig = '';
+      launch.listView = '';
     });
     let downOutside = false;
     dlg.addEventListener('mousedown', (ev) => {
@@ -3443,9 +3668,7 @@
 
   // autosize grows the message box with its text, up to its max height.
   function autosize() {
-    const ta = $('chat-input');
-    ta.style.height = 'auto';
-    ta.style.height = ta.scrollHeight + 2 + 'px';
+    fitHeight($('chat-input'));
   }
 
   function renderChatScreen() {

@@ -217,9 +217,10 @@
   </form>
 </dialog>
 
-<dialog id="launch" aria-labelledby="launch-h" class="m-auto max-h-[calc(100dvh-1.5rem)] w-[min(720px,calc(100vw-1.5rem))] overflow-y-auto rounded-xl border border-ink-600 bg-ink-900 p-0 text-[14px] text-zinc-300 shadow-2xl shadow-black/60 backdrop:bg-black/70">
-  <form id="launch-form" class="flex flex-col" novalidate>
-    <div class="flex items-start justify-between gap-3 border-b border-ink-700 px-4 py-3">
+<!-- Phones: full screen, like the chat. Only the middle scrolls, so Start stays in reach. -->
+<dialog id="launch" aria-labelledby="launch-h" class="m-auto max-h-[calc(100dvh-1.5rem)] w-[min(720px,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-ink-600 bg-ink-900 p-0 text-[14px] text-zinc-300 shadow-2xl shadow-black/60 backdrop:bg-black/70 open:flex max-sm:h-dvh max-sm:max-h-none max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:border-0">
+  <form id="launch-form" class="flex min-h-0 flex-1 flex-col" novalidate>
+    <div class="flex shrink-0 items-start justify-between gap-3 border-b border-ink-700 px-4 py-3">
       <div class="min-w-0">
         <h2 id="launch-h" class="text-sm font-semibold text-zinc-100">Start a session</h2>
         <p class="mt-0.5 text-xs text-zinc-500">Runs an agent in tmux on <span id="launch-host" class="font-mono text-zinc-400">the server</span>. Follow it, answer it and stop it from here.</p>
@@ -227,76 +228,84 @@
       <button id="launch-close" type="button" aria-label="Close" class="touch:min-h-11 touch:min-w-11 -mr-1 rounded-md px-2 py-1 text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400">✕</button>
     </div>
 
-    <div class="flex flex-col gap-3 border-b border-ink-700 px-4 py-3">
-      <div class="flex flex-col gap-1.5">
-        <span id="launch-hosts-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Machine</span>
-        <div id="launch-hosts" role="radiogroup" aria-labelledby="launch-hosts-label" class="flex flex-wrap gap-1.5"></div>
-      </div>
-      <div class="flex flex-col gap-1.5">
-        <span id="launch-adapters-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Agent</span>
-        <div id="launch-adapters" role="radiogroup" aria-labelledby="launch-adapters-label" class="flex min-h-8 flex-wrap items-center gap-1.5"></div>
-      </div>
-    </div>
-
-    <div class="flex flex-col gap-2 border-b border-ink-700 px-4 py-3">
-      <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <label for="launch-root" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Folder</label>
-        <select id="launch-root" class="touch:min-h-11 min-w-0 max-w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20"></select>
-        <nav id="launch-crumbs" aria-label="Folder inside the root" class="flex min-w-0 flex-wrap items-center font-mono text-xs"></nav>
-      </div>
-      <ul id="launch-list" aria-label="Folders" class="max-h-[28dvh] min-h-24 overflow-y-auto rounded-md border border-ink-700 bg-ink-950/60 p-1 transition-opacity"></ul>
-    </div>
-
-    <div class="flex flex-col gap-3 px-4 py-3">
-      <label class="block">
-        <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Prompt <span class="normal-case tracking-normal text-zinc-600">· optional, the agent waits for your first message without one</span></span>
-        <textarea id="launch-prompt" rows="4" spellcheck="true" placeholder="What should the agent do?" class="mt-1 block w-full resize-y rounded-md border border-ink-600 bg-ink-950 px-2.5 py-2 text-[13px] leading-relaxed max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20"></textarea>
-      </label>
-      <div id="launch-model-row" hidden class="grid gap-3 sm:grid-cols-2">
-        <label class="block">
-          <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Model</span>
-          <select id="launch-model" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20"></select>
-        </label>
-        <label class="block">
-          <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Effort</span>
-          <select id="launch-effort" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20 disabled:opacity-50"></select>
-        </label>
-      </div>
-      <details class="group rounded-md border border-ink-700 bg-ink-850/40">
-        <summary class="touch:min-h-11 flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400">
-          <span class="inline-block transition-transform group-open:rotate-90 motion-reduce:transition-none">▸</span> Options <span id="launch-options-note" class="font-normal text-zinc-600"></span>
-        </summary>
-        <div class="grid gap-3 border-t border-ink-700 px-3 py-3 sm:grid-cols-2">
-          <label class="block">
-            <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Checkout</span>
-            <select id="launch-iso" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
-              <option value="">own worktree in git repos (default)</option>
-              <option value="worktree">own worktree</option>
-              <option value="pinned">the folder itself</option>
-            </select>
-          </label>
-          <label class="block">
-            <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Sandbox</span>
-            <select id="launch-sandbox" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
-              <option value="">server default</option>
-              <option value="docker">Docker container</option>
-              <option value="none">none, on the server</option>
-            </select>
-          </label>
-          <label class="block">
-            <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Name</span>
-            <input id="launch-name" type="text" spellcheck="false" autocomplete="off" maxlength="64" placeholder="generated" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
-          </label>
-          <label class="block">
-            <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Branch</span>
-            <input id="launch-branch" type="text" spellcheck="false" autocomplete="off" maxlength="200" placeholder="fleet/&lt;name&gt;" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
-          </label>
+    <div id="launch-body" class="min-h-0 flex-1 overflow-y-auto overscroll-contain">
+      <div class="flex flex-col gap-3 border-b border-ink-700 px-4 py-3 sm:gap-2.5">
+        <div class="flex flex-col gap-1.5 sm:grid sm:grid-cols-[4.5rem_1fr] sm:items-baseline sm:gap-3">
+          <span id="launch-hosts-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Machine</span>
+          <div id="launch-hosts" role="radiogroup" aria-labelledby="launch-hosts-label" class="flex flex-wrap gap-1.5"></div>
         </div>
-      </details>
-      <div id="launch-status" role="status" aria-live="polite" class="min-h-5 text-xs"></div>
+        <div class="flex flex-col gap-1.5 sm:grid sm:grid-cols-[4.5rem_1fr] sm:items-baseline sm:gap-3">
+          <span id="launch-adapters-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Agent</span>
+          <div id="launch-adapters" role="radiogroup" aria-labelledby="launch-adapters-label" class="flex min-h-8 flex-wrap items-center gap-1.5"></div>
+        </div>
+        <div id="launch-model-row" hidden class="flex flex-col gap-3 sm:gap-2.5">
+          <div class="flex flex-col gap-1.5 sm:grid sm:grid-cols-[4.5rem_1fr] sm:items-baseline sm:gap-3">
+            <span id="launch-model-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Model</span>
+            <div id="launch-model" role="radiogroup" aria-labelledby="launch-model-label" class="flex flex-wrap items-center gap-1.5"></div>
+          </div>
+          <div class="flex flex-col gap-1.5 sm:grid sm:grid-cols-[4.5rem_1fr] sm:items-baseline sm:gap-3">
+            <span id="launch-effort-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Effort</span>
+            <div id="launch-effort" role="radiogroup" aria-labelledby="launch-effort-label" class="flex min-h-8 flex-wrap items-center gap-1.5"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex flex-col gap-1.5 border-b border-ink-700 px-4 py-3">
+        <div class="flex min-w-0 items-baseline gap-3">
+          <label for="launch-search" class="shrink-0 text-[11px] font-medium uppercase tracking-wider text-zinc-500">Folder</label>
+          <span id="launch-folder" class="min-w-0 truncate font-mono text-xs text-zinc-200"></span>
+        </div>
+        <div class="flex h-80 flex-col overflow-hidden rounded-md border border-ink-700 bg-ink-950/60 focus-within:border-emerald-400/40 max-sm:h-auto">
+          <div class="flex shrink-0 items-center gap-2 border-b border-ink-700 px-2.5">
+            <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="size-3.5 shrink-0 text-zinc-600"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></svg>
+            <input id="launch-search" type="search" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="Search folders · ↓ to move · → to look inside" class="touch:min-h-11 min-w-0 flex-1 bg-transparent py-2 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:outline-none">
+          </div>
+          <nav id="launch-crumbs" hidden aria-label="Folder you are looking into" class="flex min-w-0 shrink-0 items-center gap-1 border-b border-ink-700 bg-ink-900/60 py-1 pl-1 pr-2.5 font-mono text-xs"></nav>
+          <ul id="launch-list" aria-label="Folders" class="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1 transition-opacity max-sm:max-h-[50dvh]"></ul>
+        </div>
+      </div>
+
+      <div class="flex flex-col gap-3 px-4 py-3">
+        <label class="block">
+          <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Prompt <span class="normal-case tracking-normal text-zinc-600">· optional, the agent waits for your first message without one</span></span>
+          <textarea id="launch-prompt" rows="3" spellcheck="true" placeholder="What should the agent do? · Ctrl+Enter starts" class="mt-1 block max-h-[40dvh] min-h-20 w-full resize-none rounded-md border border-ink-600 bg-ink-950 px-2.5 py-2 text-[13px] leading-relaxed max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20"></textarea>
+        </label>
+        <details class="group rounded-md border border-ink-700 bg-ink-850/40">
+          <summary class="touch:min-h-11 flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400">
+            <span class="inline-block transition-transform group-open:rotate-90 motion-reduce:transition-none">▸</span> Options <span id="launch-options-note" class="font-normal text-zinc-600"></span>
+          </summary>
+          <div class="grid gap-3 border-t border-ink-700 px-3 py-3 sm:grid-cols-2">
+            <label class="block">
+              <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Checkout</span>
+              <select id="launch-iso" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+                <option value="">own worktree in git repos (default)</option>
+                <option value="worktree">own worktree</option>
+                <option value="pinned">the folder itself</option>
+              </select>
+            </label>
+            <label class="block">
+              <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Sandbox</span>
+              <select id="launch-sandbox" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2 py-1.5 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+                <option value="">server default</option>
+                <option value="docker">Docker container</option>
+                <option value="none">none, on the server</option>
+              </select>
+            </label>
+            <label class="block">
+              <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Name</span>
+              <input id="launch-name" type="text" spellcheck="false" autocomplete="off" maxlength="64" placeholder="generated" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+            </label>
+            <label class="block">
+              <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Branch</span>
+              <input id="launch-branch" type="text" spellcheck="false" autocomplete="off" maxlength="200" placeholder="fleet/&lt;name&gt;" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+            </label>
+          </div>
+        </details>
+      </div>
     </div>
 
-    <div class="flex items-center justify-end gap-2 border-t border-ink-700 px-4 py-3">
+    <div class="flex shrink-0 flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t border-ink-700 px-4 py-3 max-sm:pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+      <div id="launch-status" role="status" aria-live="polite" class="min-h-5 min-w-0 basis-full text-xs sm:basis-0 sm:flex-1"></div>
       <button id="launch-cancel" type="button" class="touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Cancel</button>
       <button id="launch-start" type="submit" class="touch:min-h-11 rounded-md bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Start</button>
     </div>
