@@ -76,6 +76,23 @@
   summary::-webkit-details-marker {
     display: none;
   }
+
+  /* Pressed feedback on touch screens, in place of the grey tap box:
+     controls sink a little, wide rows dim. app.js adds a haptic tick. */
+  html {
+    -webkit-tap-highlight-color: transparent;
+  }
+  @media (pointer: coarse) {
+    button, select, a[href], summary, .cursor-pointer {
+      transition: scale 120ms ease-out, opacity 120ms ease-out;
+    }
+    :is(button:not(:disabled), select, a[href], label.cursor-pointer):active {
+      scale: 0.96;
+    }
+    :is(summary, li.cursor-pointer):active {
+      opacity: 0.7;
+    }
+  }
 }
 
 @layer components {

@@ -4931,6 +4931,37 @@
     });
   }
 
+  // Touch feedback. Safari has no navigator.vibrate, but since iOS 18 it
+  // ticks the Taptic Engine when a switch checkbox (<input switch>) is
+  // toggled, also through a click on its label: so a tap on anything
+  // clickable clicks a hidden one. Elsewhere navigator.vibrate stands in.
+  // A label click comes back as a click on its input: one tick for both.
+  const TAPPABLE = 'button, a[href], summary, select, input[type="checkbox"], input[type="radio"], .cursor-pointer';
+  const TYPING = 'textarea, input:not([type="checkbox"]):not([type="radio"])';
+  function wireTouch() {
+    // Without a touch listener iOS Safari skips :active (see input.css).
+    document.addEventListener('touchstart', () => {}, { passive: true });
+    const tick = h('label', 'hidden');
+    tick.setAttribute('aria-hidden', 'true');
+    const sw = h('input');
+    sw.type = 'checkbox';
+    sw.setAttribute('switch', '');
+    sw.tabIndex = -1;
+    tick.append(sw);
+    document.body.append(tick);
+    let last = 0;
+    document.addEventListener('click', (ev) => {
+      if (tick.contains(ev.target) || ev.target.closest(TYPING)) return;
+      const el = ev.target.closest(TAPPABLE);
+      if (!el || el.matches(':disabled') || matchMedia('(pointer: fine)').matches) return;
+      const now = Date.now();
+      if (now - last < 80) return;
+      last = now;
+      if (navigator.vibrate) navigator.vibrate(8);
+      else tick.click();
+    }, true);
+  }
+
   // ------------------------------------------------------------------- boot
 
   linkToken = takeLinkToken();
@@ -4940,6 +4971,7 @@
   wireChat();
   wireRoots();
   wireKeys();
+  wireTouch();
   // A `fleet web` link opened in a tab that already shows the dashboard.
   window.addEventListener('hashchange', () => {
     if (takeLinkToken()) checkSession(true);
