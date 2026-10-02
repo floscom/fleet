@@ -127,12 +127,17 @@
 
   <div class="grid grid-cols-1 gap-6 xl:grid-cols-3">
     <section id="agents" aria-labelledby="agents-h" class="min-w-0 rounded-xl border border-ink-700 bg-ink-900 xl:col-span-2 xl:self-start">
-      <div class="flex items-center justify-between gap-3 border-b border-ink-700 px-4 py-3">
+      <!-- On phones the card headers stick to the top while their list scrolls by. -->
+      <div class="rounded-t-xl border-b border-ink-700 bg-ink-900 max-sm:sticky max-sm:top-0 max-sm:z-10">
+      <div class="flex items-center justify-between gap-3 px-4 py-3">
         <div class="flex items-baseline gap-2">
           <h2 id="agents-h" class="text-sm font-semibold text-zinc-100">Agents</h2>
           <span id="agents-meta" class="font-mono text-xs tabular-nums text-zinc-500"></span>
         </div>
         <button id="agents-new" type="button" hidden aria-keyshortcuts="n" class="touch:min-h-11 inline-flex items-center gap-1 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-400/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"><span aria-hidden="true">+</span> New session<kbd aria-hidden="true" class="ml-1 inline rounded border border-emerald-400/30 px-1 font-mono text-[10px] leading-4 text-emerald-300/70 touch:hidden" title="press N">N</kbd></button>
+      </div>
+      <!-- Agents in more than one folder: one button per folder to show only its agents. -->
+      <div id="agents-folders" role="group" aria-label="Filter agents by folder" hidden class="-mt-1 flex gap-1.5 overflow-x-auto px-4 pb-2.5 max-sm:[scrollbar-width:none] sm:flex-wrap"></div>
       </div>
       <ul id="agents-live" class="divide-y divide-ink-700/70"></ul>
       <details id="history" class="group border-t border-ink-700">
@@ -147,7 +152,7 @@
 
     <div class="flex min-w-0 flex-col gap-6">
       <section aria-labelledby="peers-h" class="rounded-xl border border-ink-700 bg-ink-900">
-        <div class="flex items-center justify-between gap-3 border-b border-ink-700 px-4 py-3">
+        <div class="flex items-center justify-between gap-3 rounded-t-xl border-b border-ink-700 bg-ink-900 px-4 py-3 max-sm:sticky max-sm:top-0 max-sm:z-10">
           <h2 id="peers-h" class="text-sm font-semibold text-zinc-100">Fleet on the network</h2>
           <span class="text-xs text-zinc-500">mDNS</span>
         </div>
@@ -155,7 +160,7 @@
       </section>
 
       <section aria-labelledby="roots-h" class="rounded-xl border border-ink-700 bg-ink-900">
-        <div class="flex items-center justify-between gap-3 border-b border-ink-700 px-4 py-3">
+        <div class="flex items-center justify-between gap-3 rounded-t-xl border-b border-ink-700 bg-ink-900 px-4 py-3 max-sm:sticky max-sm:top-0 max-sm:z-10">
           <div class="flex items-baseline gap-2">
             <h2 id="roots-h" class="text-sm font-semibold text-zinc-100">Roots</h2>
             <span id="roots-meta" class="font-mono text-xs tabular-nums text-zinc-500"></span>
@@ -173,7 +178,7 @@
       </section>
 
       <section aria-labelledby="devices-h" class="rounded-xl border border-ink-700 bg-ink-900">
-        <div class="flex items-center justify-between gap-3 border-b border-ink-700 px-4 py-3">
+        <div class="flex items-center justify-between gap-3 rounded-t-xl border-b border-ink-700 bg-ink-900 px-4 py-3 max-sm:sticky max-sm:top-0 max-sm:z-10">
           <h2 id="devices-h" class="text-sm font-semibold text-zinc-100">Paired devices</h2>
           <span id="devices-meta" class="font-mono text-xs tabular-nums text-zinc-500"></span>
         </div>

@@ -302,10 +302,69 @@
     return out;
   }
 
+  // folderOf is the folder agent a was started in, the key of the folder filter.
+  const folderOf = (a) => a.path || a.cwd || '';
+
+  // agentFolder is the folder the agents list is narrowed to ('' = all),
+  // kept across reloads.
+  const AGENT_FOLDER = 'fleet.agentFolder';
+  let agentFolder = '';
+  try {
+    agentFolder = localStorage.getItem(AGENT_FOLDER) || '';
+  } catch {}
+
+  function setAgentFolder(f) {
+    agentFolder = f;
+    try {
+      if (f) localStorage.setItem(AGENT_FOLDER, f);
+      else localStorage.removeItem(AGENT_FOLDER);
+    } catch {}
+    invalidate('agents');
+  }
+
+  // renderFolderFilter fills the folder buttons under the agents heading:
+  // "All", then one per folder with its live count, the busiest first. It
+  // stays hidden while every agent works in the same folder.
+  function renderFolderFilter(all) {
+    const box = $('agents-folders');
+    const folders = new Map(); // folder -> live agents in it
+    for (const { a } of all) {
+      const f = folderOf(a);
+      if (f) folders.set(f, (folders.get(f) || 0) + (isFinished(a) ? 0 : 1));
+    }
+    // The picked folder keeps its button while it has no agents (or those of
+    // another fleet are still loading), so the filter can always be cleared.
+    if (agentFolder && !folders.has(agentFolder)) folders.set(agentFolder, 0);
+    box.hidden = folders.size < 2 && !agentFolder;
+    if (box.hidden) return box.replaceChildren();
+
+    const tail = (f) => f.split('/').filter(Boolean).pop() || f;
+    const names = new Map(); // tail -> how many folders end in it
+    for (const f of folders.keys()) names.set(tail(f), (names.get(tail(f)) || 0) + 1);
+    const button = (f, label, live) => {
+      const on = f === agentFolder;
+      const b = h('button', on
+        ? 'touch:min-h-11 inline-flex shrink-0 items-center gap-1.5 rounded-md border border-emerald-400/40 bg-emerald-400/15 px-2 py-0.5 font-mono text-xs text-emerald-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400'
+        : 'touch:min-h-11 inline-flex shrink-0 items-center gap-1.5 rounded-md border border-ink-600 bg-ink-850 px-2 py-0.5 font-mono text-xs text-zinc-400 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400',
+      label);
+      b.type = 'button';
+      b.setAttribute('aria-pressed', String(on));
+      if (f) b.title = shortPath(f);
+      if (live) b.append(h('span', on ? 'tabular-nums text-emerald-300/70' : 'tabular-nums text-zinc-600', String(live)));
+      b.addEventListener('click', () => setAgentFolder(on ? '' : f));
+      return b;
+    };
+    const sorted = [...folders].sort(([x, nx], [y, ny]) => ny - nx || tail(x).localeCompare(tail(y)));
+    box.replaceChildren(button('', 'All', 0),
+      ...sorted.map(([f, live]) => button(f, names.get(tail(f)) > 1 ? shortPath(f) : tail(f), live)));
+  }
+
   // ------------------------------------------------------------- renderers
 
   function renderAgents() {
-    const all = allAgents();
+    const every = allAgents();
+    renderFolderFilter(every);
+    const all = agentFolder ? every.filter((x) => folderOf(x.a) === agentFolder) : every;
     const live = all.filter((x) => !isFinished(x.a)).sort(({ a: x }, { a: y }) =>
       stateOf(x).rank - stateOf(y).rank || (y.updatedAtMs || 0) - (x.updatedAtMs || 0) || x.name.localeCompare(y.name));
     const hist = all.filter((x) => isFinished(x.a)).sort(({ a: x }, { a: y }) => (y.updatedAtMs || 0) - (x.updatedAtMs || 0));
@@ -332,7 +391,7 @@
       hl.replaceChildren(emptyRow('no finished agents'));
     }
     $('history-count').textContent = String(hist.length);
-    $('agents-meta').textContent = `${live.length} live · ${all.length} total`;
+    $('agents-meta').textContent = `${live.length} live · ${all.length} ${agentFolder ? 'here' : 'total'}`;
   }
 
   function renderPeers() {
