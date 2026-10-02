@@ -323,14 +323,14 @@
   }
 
   // renderFolderFilter fills the folder buttons under the agents heading:
-  // "All", then one per folder with its live count, the busiest first. It
-  // stays hidden while every agent works in the same folder.
+  // "All", then one per folder with live agents and their count, the
+  // busiest first. It stays hidden while they all work in the same folder.
   function renderFolderFilter(all) {
     const box = $('agents-folders');
     const folders = new Map(); // folder -> live agents in it
     for (const { a } of all) {
       const f = folderOf(a);
-      if (f) folders.set(f, (folders.get(f) || 0) + (isFinished(a) ? 0 : 1));
+      if (f && !isFinished(a)) folders.set(f, (folders.get(f) || 0) + 1);
     }
     // The picked folder keeps its button while it has no agents (or those of
     // another fleet are still loading), so the filter can always be cleared.
