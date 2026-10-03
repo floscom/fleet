@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SessionPrefix prefixes every fleet session name.
@@ -230,6 +231,11 @@ func parseList(out string) ([]PaneStatus, error) {
 // typing: tmux caps the size of a command, and so of send-keys arguments.
 const pasteOver = 2048
 
+// enterDelay is the pause between text and the Enter that submits it.
+// Codex takes keys arriving in a burst for a paste, and an Enter inside
+// one for a newline.
+const enterDelay = 150 * time.Millisecond
+
 // SendText types text into the session, then Enter if submit. Text with a
 // newline, or long text, is pasted (see Paste) so that each newline does
 // not act as Enter; the rest is typed literally (send-keys -l).
@@ -246,6 +252,13 @@ func (t *Tmux) SendText(ctx context.Context, session, text string, submit bool) 
 		}
 	}
 	if submit {
+		if text != "" {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(enterDelay):
+			}
+		}
 		if _, err := t.run(ctx, "send-keys", "-t", target, "Enter"); err != nil {
 			return err
 		}
