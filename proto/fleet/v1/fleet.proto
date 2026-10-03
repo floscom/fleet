@@ -59,6 +59,7 @@ message ClientMessage {
     KillAgentRequest kill_agent = 32;
     SendTextRequest send_text = 33;
     SubscribeRequest subscribe = 34;
+    AttachImageRequest attach_image = 36;
 
     // Terminal streaming
     AttachRequest attach = 40;
@@ -103,6 +104,7 @@ message ServerMessage {
     SubscribeResponse subscribe = 34;
     // Pushed after SubscribeRequest (id 0).
     Event event = 35;
+    AttachImageResponse attach_image = 36;
 
     AttachResponse attach = 40;
     // Pushed while attached (id 0).
@@ -496,6 +498,20 @@ message SendTextRequest {
   bool submit = 3;
 }
 message SendTextResponse {}
+
+// Attaches an image to the prompt the agent is composing, as if the user
+// had pasted it: the daemon saves it in the agent's state dir and pastes
+// its path, which agent TUIs (claude, codex) turn into an image
+// attachment. Send the text with SendTextRequest afterwards.
+message AttachImageRequest {
+  string agent = 1;
+  // PNG, JPEG, GIF or WebP, detected from the bytes. At most 3.5 MiB.
+  bytes data = 2;
+}
+message AttachImageResponse {
+  // Where the daemon saved the image (a path on the daemon's host).
+  string path = 1;
+}
 
 // Starts pushing Event messages on this connection. The daemon first sends
 // one AgentUpserted per current agent (snapshot), then SnapshotDone, then

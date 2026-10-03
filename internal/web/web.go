@@ -83,11 +83,12 @@ type Source interface {
 	RunAgent(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleetv1.Agent, error)
 	// StopAgent kills an agent's session.
 	StopAgent(ctx context.Context, req *fleetv1.KillAgentRequest) (*fleetv1.KillAgentResponse, error)
-	// SendInput types text into a live agent's terminal, then Enter if
-	// submit, then presses keys (tmux key names). While the agent shows a
-	// dialog, Enter after text is held back (it would pick the dialog's
-	// highlighted option), which held reports.
-	SendInput(ctx context.Context, agent, text string, submit bool, keys []string) (held bool, err error)
+	// SendInput attaches images to a live agent's prompt, types text into
+	// its terminal, then Enter if submit, then presses keys (tmux key
+	// names). While the agent shows a dialog, images are refused and Enter
+	// after text is held back (it would pick the dialog's highlighted
+	// option), which held reports.
+	SendInput(ctx context.Context, agent, text string, submit bool, keys []string, images [][]byte) (held bool, err error)
 	// Screen is the visible terminal screen of a live agent.
 	Screen(ctx context.Context, agent string) (string, error)
 	// Chat finds an agent's transcript.

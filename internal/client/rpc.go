@@ -81,6 +81,14 @@ func (c *Client) SendText(ctx context.Context, agent, text string, submit bool) 
 	return err
 }
 
+// AttachImage attaches an image to the prompt an agent is composing and
+// returns where the daemon saved it.
+func (c *Client) AttachImage(ctx context.Context, agent string, data []byte) (string, error) {
+	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_AttachImage{AttachImage: &fleetv1.AttachImageRequest{Agent: agent, Data: data}}},
+		(*fleetv1.ServerMessage).GetAttachImage)
+	return r.GetPath(), err
+}
+
 // CreatePairingCode issues a one-time pairing code. ttl <= 0 uses the
 // daemon default.
 func (c *Client) CreatePairingCode(ctx context.Context, ttl time.Duration) (*fleetv1.CreatePairingCodeResponse, error) {

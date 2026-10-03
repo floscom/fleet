@@ -142,6 +142,20 @@ func TestPinnedSharedAndKill(t *testing.T) {
 
 	c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_SendText{SendText: &fleetv1.SendTextRequest{Agent: "api-fix", Text: "x"}}})
 
+	// Images are saved in the agent's state dir; anything else is refused.
+	attach := func(data []byte) *fleetv1.ClientMessage {
+		return &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_AttachImage{AttachImage: &fleetv1.AttachImageRequest{Agent: "api-fix", Data: data}}}
+	}
+	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+	path := c.ok(attach(png)).GetAttachImage().GetPath()
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, png) ||
+		filepath.Dir(path) != config.Path("agents", a.GetId(), imagesDir) || filepath.Ext(path) != ".png" {
+		t.Fatalf("attached image at %q: %q, %v", path, got, err)
+	}
+	c.fails(attach([]byte("plain text")), codeInvalid)
+	c.fails(attach(nil), codeInvalid)
+	c.fails(attach(append(png, make([]byte, MaxImageSize)...)), codeInvalid)
+
 	r := c.ok(killReq(&fleetv1.KillAgentRequest{Agent: "api-fix"})).GetKillAgent()
 	if r.GetAgent().GetState() != stateExited || r.GetWorktreeKept() {
 		t.Fatalf("kill: %v", r)

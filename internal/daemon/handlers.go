@@ -137,6 +137,12 @@ func (c *conn) dispatch(id uint64, m *fleetv1.ClientMessage) error {
 			return err
 		}
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_SendText{SendText: &fleetv1.SendTextResponse{}}})
+	case *fleetv1.ClientMessage_AttachImage:
+		r, err := d.agents.attachImage(c.ctx, msg.AttachImage)
+		if err != nil {
+			return err
+		}
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_AttachImage{AttachImage: r}})
 	case *fleetv1.ClientMessage_Subscribe:
 		return c.handleSubscribe(id)
 

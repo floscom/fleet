@@ -93,7 +93,7 @@ address. Without it, commands talk to the local daemon.
 | `fleet run <adapter> [path] [flags] [-- agent args]` | Start an agent. `path` is `root:rel/path`, an absolute path, or (local only) a relative path; default `.`. Flags: `--name`, `--pinned`, `--worktree`, `--branch`, `--prompt`, `--model`, `--effort`, `--attach`, `--clone <repo>` (instead of a path), `--docker` / `--sandbox docker\|none`. |
 | `fleet ls [-a] [--json]` | List agents (`-a` includes exited and failed ones). |
 | `fleet attach <agent> [-r]` | Attach to an agent's terminal. Detach with Ctrl-\\. |
-| `fleet send <agent> <text...> [--no-enter]` | Type text into an agent's terminal and press Enter. |
+| `fleet send <agent> [text...] [--image FILE]... [--no-enter]` | Type text into an agent's terminal and press Enter; `--image` attaches image files first. |
 | `fleet kill <agent>... [--rm-worktree] [--force] [--forget]` | Stop agents; optionally remove their worktree or clone and history entry. |
 | `fleet sandbox build [--pull] [--tag T]` / `sandbox dockerfile` | Build the Docker image sandboxed agents run in (on the server) / print its Dockerfile. |
 | `fleet watch` | Print agent state changes as they happen. |
@@ -428,6 +428,13 @@ on a root, which picks that folder) starts one:
   Enter (Enter sends, Shift+Enter is a new line; text with several lines
   goes in as one paste). While the agent works, Claude Code and Codex queue
   it.
+- **Send images.** Attach images with the picture button, by pasting them
+  into the message box or by dropping them on the chat (up to 10 per
+  message). They go with the next message: the daemon saves each in the
+  agent's state dir and pastes its path, which Claude Code and Codex turn
+  into `[Image #n]`. Photos over 2000 px are scaled down in the browser
+  first; formats the agents cannot read (HEIC) become JPEG. From the CLI:
+  `fleet send <agent> --image a.png --image b.png "what changed?"`.
 - **Screen and keys.** Permission prompts, folder trust and menus are not
   part of the transcript. *Screen* shows the agent's terminal as text
   (refreshed every 1.5 seconds; it opens by itself when the agent needs

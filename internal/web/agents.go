@@ -8,7 +8,7 @@ package web
 //	POST /api/agents                  start one
 //	GET  /api/agents/{id}/chat        its conversation (see serveChat)
 //	GET  /api/agents/{id}/screen      its terminal screen, as text
-//	POST /api/agents/{id}/input       type text and/or press keys (see apiInput)
+//	POST /api/agents/{id}/input       attach images, type text and/or press keys (see apiInput)
 //	GET  /api/agents/{id}/image       an image of its conversation
 //	POST /api/agents/{id}/answer      answer the questions it asks
 //	POST /api/agents/{id}/model       switch its model and/or effort
@@ -42,6 +42,11 @@ const (
 	runTimeout = 75 * time.Second
 	// maxKeys caps the keys of one input request.
 	maxKeys = 32
+	// maxImages caps the images of one input request.
+	maxImages = 10
+	// maxInputBody caps an input request's body, images included (each
+	// image is limited again by the daemon).
+	maxInputBody = 40 << 20
 	// modelTimeout bounds switching a session's model: the daemon types
 	// into its terminal and waits for each step to show.
 	modelTimeout = 30 * time.Second
@@ -186,21 +191,26 @@ func (s *Server) apiStopAgent(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// apiInput types text, then presses Enter if submit, then keys. It answers
-// {"held": true} when the agent showed a dialog and Enter was not pressed
-// after the text: in a dialog Enter picks the highlighted option, whatever
-// was typed.
+// apiInput attaches images (base64; JSON decodes them), types text, then
+// presses Enter if submit, then keys. It answers {"held": true} when the
+// agent showed a dialog and Enter was not pressed after the text: in a
+// dialog Enter picks the highlighted option, whatever was typed.
 func (s *Server) apiInput(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Text   string   `json:"text"`
 		Submit bool     `json:"submit"`
 		Keys   []string `json:"keys"`
+		Images [][]byte `json:"images"`
 	}
-	if !decode(w, r, &req) {
+	if !decodeMax(w, r, &req, maxInputBody) {
 		return
 	}
 	if len(req.Keys) > maxKeys {
 		writeError(w, http.StatusBadRequest, "too many keys")
+		return
+	}
+	if len(req.Images) > maxImages {
+		writeError(w, http.StatusBadRequest, "too many images (at most "+strconv.Itoa(maxImages)+")")
 		return
 	}
 	keys := make([]string, 0, len(req.Keys))
@@ -212,7 +222,7 @@ func (s *Server) apiInput(w http.ResponseWriter, r *http.Request) {
 		}
 		keys = append(keys, name)
 	}
-	held, err := s.opts.Source.SendInput(r.Context(), r.PathValue("id"), req.Text, req.Submit, keys)
+	held, err := s.opts.Source.SendInput(r.Context(), r.PathValue("id"), req.Text, req.Submit, keys, req.Images)
 	if err != nil {
 		s.writeSourceError(w, err)
 		return
@@ -452,11 +462,31 @@ func fileKey(path string) string {
 
 // decode reads a JSON request body into v, or answers 400.
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(v); err != nil {
+	return decodeMax(w, r, v, maxBody)
+}
+
+// decodeMax is decode for bodies up to limit bytes; a larger one is
+// answered 413.
+func decodeMax(w http.ResponseWriter, r *http.Request, v any, limit int64) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit)).Decode(v); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request too large")
+			return false
+		}
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return false
 	}
 	return true
+}
+
+// bodyLimit is the largest request body accepted for an API path: input
+// requests carry images.
+func bodyLimit(path string) int64 {
+	if strings.HasSuffix(path, "/input") {
+		return maxInputBody
+	}
+	return maxBody
 }
 
 // fileSize is the size of the file at path, 0 if it cannot be read.

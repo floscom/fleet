@@ -117,7 +117,10 @@ func (s *webSource) StopAgent(ctx context.Context, req *fleetv1.KillAgentRequest
 	return r, webError(err)
 }
 
-func (s *webSource) SendInput(ctx context.Context, agent, text string, submit bool, keys []string) (bool, error) {
+func (s *webSource) SendInput(ctx context.Context, agent, text string, submit bool, keys []string, images [][]byte) (bool, error) {
+	if _, err := s.d.agents.attachImages(ctx, agent, images, true); err != nil {
+		return false, webError(err)
+	}
 	held, err := s.d.agents.sendInput(ctx, agent, text, submit, true, keys)
 	return held, webError(err)
 }

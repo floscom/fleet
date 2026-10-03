@@ -828,6 +828,19 @@ effort the adapter does not offer);
 - Errors: `INVALID_ARGUMENT` (empty `agent`, agent not running);
   `NOT_FOUND`.
 
+**`AttachImageRequest{agent, data}` → `AttachImageResponse{path}`**
+
+- Attaches an image to the prompt the agent is composing, as if pasted:
+  the daemon saves `data` in the agent's state dir and pastes the file's
+  path, which Claude Code and Codex show as `[Image #n]`. It answers once
+  the agent has taken the paste in (its screen changed and settled, at
+  most 3 s), so a `SendTextRequest` sent after the response lands after
+  the image. Send one request per image, then the text.
+- `data`: PNG, JPEG, GIF or WebP (detected from the bytes), at most
+  3.5 MiB, so a request fits a frame. `path` is on the daemon's host.
+- Errors: `INVALID_ARGUMENT` (empty `agent`, agent not running, not an
+  image, too large); `NOT_FOUND`.
+
 **`SubscribeRequest` → `SubscribeResponse`**, then pushed events. See
 section 12.
 

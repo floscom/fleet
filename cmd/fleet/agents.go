@@ -274,18 +274,49 @@ func newKillCmd() *cobra.Command {
 }
 
 func newSendCmd() *cobra.Command {
-	var noEnter bool
+	var (
+		noEnter bool
+		images  []string
+	)
 	cmd := &cobra.Command{
-		Use:   "send <agent> <text...>",
+		Use:   "send <agent> [text...]",
 		Short: "Type text into an agent's terminal and press Enter",
-		Args:  cobra.MinimumNArgs(2),
+		Long: `Type text into an agent's terminal and press Enter.
+
+--image attaches image files (PNG, JPEG, GIF or WebP, up to 3.5 MiB each)
+before the text, as if pasted into the agent's prompt. Claude and Codex
+show them as [Image #1], [Image #2], ...`,
+		Example: `  fleet send claude-api-1 "now run the tests"
+  fleet send claude-web-2 --image before.png --image after.png "what changed?"`,
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) < 2 && len(images) == 0 {
+				return errors.New("usage: fleet send <agent> <text...> (or --image FILE)")
+			}
+			// Read every file first, so a bad one attaches nothing.
+			data := make([][]byte, len(images))
+			for i, f := range images {
+				var err error
+				if data[i], err = os.ReadFile(f); err != nil {
+					return err
+				}
+			}
 			return withClient(cmd, func(ctx context.Context, c *client.Client) error {
-				return c.SendText(ctx, args[0], strings.Join(args[1:], " "), !noEnter)
+				for i, d := range data {
+					if _, err := c.AttachImage(ctx, args[0], d); err != nil {
+						return fmt.Errorf("%s: %w", images[i], err)
+					}
+				}
+				text := strings.Join(args[1:], " ")
+				if text == "" && noEnter {
+					return nil
+				}
+				return c.SendText(ctx, args[0], text, !noEnter)
 			})
 		},
 	}
 	cmd.Flags().BoolVar(&noEnter, "no-enter", false, "do not press Enter after the text")
+	cmd.Flags().StringArrayVar(&images, "image", nil, "attach an image file (repeatable)")
 	return cmd
 }
 

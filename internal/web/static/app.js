@@ -2427,6 +2427,7 @@
     asks: [], // questions the agent waits on, first shown first (see questions)
     answered: new Set(), // ids of questions answered here: late replies may still list them
     askForm: null, // the form of asks[0]
+    images: [], // {data (base64), url (data: URL), name} to send with the next message
   };
 
   const chatAPI = (rest) => {
@@ -2447,7 +2448,7 @@
     Object.assign(chat, {
       open: true, host, id, agent: agent || null, view,
       sending: false, held: false, confirmStop: false, stopping: false, screenAuto: true,
-      model: null, switching: false, switchedAt: 0, screenAutoOpened: false, asks: [], askForm: null,
+      model: null, switching: false, switchedAt: 0, screenAutoOpened: false, asks: [], askForm: null, images: [],
     });
     chat.answered.clear();
     Object.assign(wf, { runs: [], v: '', loaded: false, sub: null, hint: (S.workflows.get(agentKey(host, id)) || []).length });
@@ -2460,6 +2461,7 @@
     if (opts && opts.screen) Object.assign(chat, { screenOpen: true, screenAuto: false, screenAutoOpened: false });
     $('chat-input').value = '';
     autosize();
+    renderChatImages();
     $('chat-screen-pre').textContent = '';
     $('chat-ask').replaceChildren();
     $('chat-ask').hidden = true;
@@ -4102,6 +4104,7 @@
       : chatDialog() ? 'Type into the dialog (Enter is not pressed)'
       : touch() ? 'Message the agent' : 'Message the agent · Enter sends, Shift+Enter for a new line';
     $('chat-send').disabled = !live || chat.sending;
+    $('chat-attach').disabled = !live || chat.sending || askShown();
     renderChatModel();
     const keys = $('chat-keys');
     keys.hidden = !live;
@@ -4135,8 +4138,13 @@
     ev.preventDefault();
     const ta = $('chat-input');
     const text = ta.value;
-    if (!text.trim() || chat.sending || !chatLive()) return;
+    const images = chat.images;
+    if ((!text.trim() && !images.length) || chat.sending || !chatLive()) return;
     if (askShown() && chat.askForm) {
+      if (images.length) {
+        toast('answer the questions first, then send the images', 'warn');
+        return;
+      }
       // In place of answers: the agent gets the text instead.
       if (await sendAnswer(chat.askForm, { decline: text }) && ta.value === text) {
         ta.value = '';
@@ -4152,11 +4160,15 @@
     try {
       // The daemon holds Enter back if the agent shows a dialog, where
       // Enter picks the highlighted option whatever was typed.
-      const r = await api('POST', chatAPI('input'), { text, submit: true });
+      const body = { text, submit: true };
+      if (images.length) body.images = images.map((im) => im.data);
+      const r = await api('POST', chatAPI('input'), body);
       held = !!(r && r.held);
       if (seq === chat.seq) {
         ta.value = '';
         autosize();
+        chat.images = chat.images.filter((im) => !images.includes(im));
+        renderChatImages();
       }
     } catch (e) {
       toast(`could not send: ${e.message}`, 'error');
@@ -4172,6 +4184,90 @@
       } else setTimeout(refreshScreen, 150);
     }
     if (!touch()) ta.focus();
+  }
+
+  // Images sent with a message: the daemon pastes each into the agent's
+  // prompt, where Claude and Codex show it as [Image #n]. Big photos are
+  // scaled down here (the models shrink them anyway) to keep requests small;
+  // formats the agents cannot read (HEIC, …) are re-encoded as JPEG.
+  const MAX_IMAGES = 10;
+  const IMAGE_SIDE = 2000; // longest side, px
+  const IMAGE_BYTES = 3.5 * 1024 * 1024; // the daemon's limit per image
+  const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+
+  async function addChatImages(files) {
+    if (!chatLive() || chat.sending || askShown()) return;
+    const seq = chat.seq;
+    const imgs = [...files].filter((f) => f.type.startsWith('image/'));
+    for (const f of imgs) {
+      if (seq !== chat.seq) return;
+      if (chat.images.length >= MAX_IMAGES) {
+        toast(`at most ${MAX_IMAGES} images per message`, 'warn');
+        break;
+      }
+      try {
+        const blob = await fitImage(f);
+        const url = await blobURL(blob);
+        if (seq !== chat.seq) return;
+        chat.images.push({ data: url.slice(url.indexOf(',') + 1), url, name: f.name || 'pasted image' });
+      } catch (e) {
+        toast(`${f.name || 'image'}: ${e.message}`, 'error');
+      }
+    }
+    renderChatImages();
+  }
+
+  // fitImage returns f as is if the agents can read it and it is small
+  // enough, else scaled down and re-encoded (GIFs lose their animation).
+  async function fitImage(f) {
+    let bmp;
+    try {
+      bmp = await createImageBitmap(f);
+    } catch {
+      throw new Error('this browser cannot read the image');
+    }
+    try {
+      const scale = Math.min(1, IMAGE_SIDE / Math.max(bmp.width, bmp.height));
+      if (IMAGE_TYPES.includes(f.type) && scale === 1 && f.size <= IMAGE_BYTES) return f;
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(bmp.width * scale));
+      c.height = Math.max(1, Math.round(bmp.height * scale));
+      c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+      // PNG keeps screenshots sharp; photos (and PNGs too big) go JPEG.
+      for (const [type, q] of [['image/png'], ['image/jpeg', 0.9], ['image/jpeg', 0.75]]) {
+        if (type === 'image/png' && f.type !== 'image/png') continue;
+        const b = await new Promise((res) => c.toBlob(res, type, q));
+        if (b && b.size <= IMAGE_BYTES) return b;
+      }
+      throw new Error('too large, even scaled down');
+    } finally {
+      bmp.close();
+    }
+  }
+
+  function blobURL(blob) {
+    return new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.onerror = () => rej(new Error('cannot read the image'));
+      r.readAsDataURL(blob);
+    });
+  }
+
+  function renderChatImages() {
+    const ul = $('chat-images');
+    ul.hidden = !chat.images.length;
+    ul.replaceChildren(...chat.images.map((im, i) => {
+      const img = h('img', 'h-16 w-16 rounded-md border border-ink-600 bg-ink-950 object-cover touch:h-20 touch:w-20');
+      img.src = im.url;
+      img.alt = im.name;
+      img.title = im.name;
+      const x = h('button', 'touch:h-8 touch:w-8 absolute -right-1.5 -top-1.5 grid h-5 w-5 place-items-center rounded-full border border-ink-600 bg-ink-900 text-[11px] leading-none text-zinc-300 hover:border-rose-400/60 hover:text-rose-300 focus-visible:outline-2 focus-visible:outline-emerald-400', '✕');
+      x.type = 'button';
+      x.dataset.image = String(i);
+      x.setAttribute('aria-label', `Remove ${im.name}`);
+      return h('li', 'relative', img, x);
+    }));
   }
 
   // autosize grows the message box with its text, up to its max height.
@@ -4268,6 +4364,32 @@
         ev.preventDefault();
         $('chat-form').requestSubmit();
       }
+    });
+    ta.addEventListener('paste', (ev) => {
+      const files = [...(ev.clipboardData ? ev.clipboardData.files : [])].filter((f) => f.type.startsWith('image/'));
+      if (!files.length) return;
+      ev.preventDefault();
+      addChatImages(files);
+    });
+    $('chat-attach').addEventListener('click', () => $('chat-file').click());
+    $('chat-file').addEventListener('change', (ev) => {
+      addChatImages(ev.target.files);
+      ev.target.value = '';
+    });
+    $('chat-images').addEventListener('click', (ev) => {
+      const b = ev.target.closest('button[data-image]');
+      if (!b) return;
+      chat.images.splice(Number(b.dataset.image), 1);
+      renderChatImages();
+      if (!touch()) ta.focus();
+    });
+    dlg.addEventListener('dragover', (ev) => {
+      if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files') && chatLive()) ev.preventDefault();
+    });
+    dlg.addEventListener('drop', (ev) => {
+      if (!ev.dataTransfer || !ev.dataTransfer.files.length) return;
+      ev.preventDefault();
+      addChatImages(ev.dataTransfer.files);
     });
     $('chat-keys').addEventListener('click', (ev) => {
       const b = ev.target.closest('button[data-key]');

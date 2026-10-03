@@ -284,7 +284,7 @@ func (s *Server) apiHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, name+" has no dashboard on the network (web is off or loopback-only there)")
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, bodyLimit(r.URL.Path)))
 	if err != nil {
 		writeError(w, http.StatusRequestEntityTooLarge, "request too large")
 		return

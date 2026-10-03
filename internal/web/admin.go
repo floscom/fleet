@@ -202,7 +202,7 @@ func (s *Server) apiHandler() http.Handler {
 		token := s.hasToken(r)
 		peer := false
 		if !token && isPeerRequest(r) {
-			r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+			r.Body = http.MaxBytesReader(w, r.Body, bodyLimit(r.URL.Path))
 			peer = s.peerAuthed(r)
 		}
 		switch {

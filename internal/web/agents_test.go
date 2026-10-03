@@ -70,8 +70,23 @@ func TestRunStopInput(t *testing.T) {
 	if code := api(t, ts, "POST", "/api/agents/a1/input", tok, `{"text":"yes","submit":true,"keys":["escape","2","enter"]}`, &in); code != 200 || in.Held == nil || *in.Held {
 		t.Fatalf("input: %d %+v", code, in)
 	}
-	if want := []fakeInput{{"a1", "yes", true, []string{"Escape", "2", "Enter"}}}; !reflect.DeepEqual(src.inputs, want) {
+	if want := []fakeInput{{"a1", "yes", true, []string{"Escape", "2", "Enter"}, nil}}; !reflect.DeepEqual(src.inputs, want) {
 		t.Fatalf("inputs %+v, want %+v", src.inputs, want)
+	}
+	// Images arrive base64-encoded, in order.
+	if code := api(t, ts, "POST", "/api/agents/a1/input", tok, `{"text":"look","submit":true,"images":["aW1nMQ==","aW1nMg=="]}`, &in); code != 200 {
+		t.Fatalf("input with images: %d %+v", code, in)
+	}
+	if got := src.inputs[len(src.inputs)-1].images; !reflect.DeepEqual(got, [][]byte{[]byte("img1"), []byte("img2")}) {
+		t.Fatalf("images %q", got)
+	}
+	many := `{"images":[` + strings.TrimSuffix(strings.Repeat(`"eA==",`, maxImages+1), ",") + `]}`
+	if code := api(t, ts, "POST", "/api/agents/a1/input", tok, many, &e); code != 400 {
+		t.Fatalf("too many images: %d %+v", code, e)
+	}
+	huge := `{"images":["` + strings.Repeat("A", maxInputBody) + `"]}`
+	if code := api(t, ts, "POST", "/api/agents/a1/input", tok, huge, &e); code != 413 {
+		t.Fatalf("huge input: %d %+v", code, e)
 	}
 	src.mu.Lock()
 	src.dialog = true

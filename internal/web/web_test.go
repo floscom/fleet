@@ -59,6 +59,7 @@ type fakeInput struct {
 	agent, text string
 	submit      bool
 	keys        []string
+	images      [][]byte
 }
 
 func newFakeSource(agents ...*fleetv1.Agent) *fakeSource {
@@ -139,13 +140,13 @@ func (s *fakeSource) StopAgent(_ context.Context, req *fleetv1.KillAgentRequest)
 	return &fleetv1.KillAgentResponse{Agent: &fleetv1.Agent{Id: req.Agent, State: fleetv1.AgentState_AGENT_STATE_EXITED}}, nil
 }
 
-func (s *fakeSource) SendInput(_ context.Context, agent, text string, submit bool, keys []string) (bool, error) {
+func (s *fakeSource) SendInput(_ context.Context, agent, text string, submit bool, keys []string, images [][]byte) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if agent != "a1" {
 		return false, &Error{Status: 404, Msg: "no agent " + agent}
 	}
-	s.inputs = append(s.inputs, fakeInput{agent, text, submit, keys})
+	s.inputs = append(s.inputs, fakeInput{agent, text, submit, keys, images})
 	return s.dialog && submit && text != "", nil
 }
 
