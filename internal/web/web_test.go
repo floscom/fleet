@@ -114,6 +114,11 @@ func (s *fakeSource) Adapters(context.Context) []Adapter {
 	return []Adapter{{ID: "claude", Name: "Claude Code", Available: true}}
 }
 
+func (s *fakeSource) Usage(context.Context) []AgentUsage {
+	return []AgentUsage{{ID: "claude", Name: "Claude Code", Available: true, Plan: "max 20x",
+		Limits: []UsageLimit{{Label: "5h", Percent: 18, ResetsAtMs: 1}}}}
+}
+
 func (s *fakeSource) Agents() []*fleetv1.Agent {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -42,6 +42,8 @@ const (
 	maxBody = 64 << 10
 	// adaptersTimeout bounds adapter detection (it runs the CLIs).
 	adaptersTimeout = 5 * time.Second
+	// usageTimeout bounds detection plus asking the providers for usage.
+	usageTimeout = 10 * time.Second
 )
 
 // Error is a Source error shown to the user with an HTTP status.
@@ -80,6 +82,32 @@ type Adapter struct {
 	// when the adapter offers no choice.
 	Models  []ModelChoice  `json:"models"`
 	Efforts []EffortChoice `json:"efforts"`
+}
+
+// AgentUsage is an agent CLI on this machine and how much of its account's
+// plan limits is used.
+type AgentUsage struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Available bool   `json:"available"`
+	Version   string `json:"version,omitempty"`
+	// Reason explains why it is not available.
+	Reason string `json:"reason,omitempty"`
+	// Plan names the subscription, e.g. "max 20x".
+	Plan   string       `json:"plan,omitempty"`
+	Limits []UsageLimit `json:"limits"`
+	// Error is why the usage is unknown.
+	Error string `json:"error,omitempty"`
+	// AsOfMs is when the provider was asked (Unix ms); 0 if it was not.
+	AsOfMs int64 `json:"asOfMs,omitempty"`
+}
+
+// UsageLimit is one usage window of a plan, e.g. the 5-hour session.
+type UsageLimit struct {
+	Label   string  `json:"label"`
+	Percent float64 `json:"percent"`
+	// ResetsAtMs is when it starts over (Unix ms); 0 if unknown.
+	ResetsAtMs int64 `json:"resetsAtMs,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -169,6 +197,7 @@ func (s *Server) apiHandler() http.Handler {
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /api/fs", s.apiListDir)
 	admin.HandleFunc("GET /api/adapters", s.apiAdapters)
+	admin.HandleFunc("GET /api/usage", s.apiUsage)
 	admin.HandleFunc("GET /api/roots", s.apiRoots)
 	admin.HandleFunc("POST /api/roots", s.apiAddRoot)
 	admin.HandleFunc("DELETE /api/roots/{name}", s.apiRemoveRoot)
@@ -275,6 +304,12 @@ func (s *Server) apiAdapters(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), adaptersTimeout)
 	defer cancel()
 	writeJSON(w, http.StatusOK, map[string][]Adapter{"adapters": nonNil(s.opts.Source.Adapters(ctx))})
+}
+
+func (s *Server) apiUsage(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), usageTimeout)
+	defer cancel()
+	writeJSON(w, http.StatusOK, map[string][]AgentUsage{"agents": nonNil(s.opts.Source.Usage(ctx))})
 }
 
 func (s *Server) apiAddRoot(w http.ResponseWriter, r *http.Request) {

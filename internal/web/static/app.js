@@ -24,6 +24,7 @@
     agents: new Map(), // id -> agent
     remote: new Map(), // server id of another fleet -> {agents: Map(id -> agent), fails}
     workflows: new Map(), // agentKey -> workflow runs going on (see pollWorkflows)
+    usage: new Map(), // server id -> agent CLIs and their plan usage (see pollUsage)
     snapshotDone: false,
     peersSeen: false, // first complete (post-browse) peers list of this connection received
   };
@@ -434,6 +435,8 @@
         idEl.title = p.id;
         body.append(idEl);
       }
+      const u = usageNode(p.id);
+      if (u) body.append(u);
       row.append(body);
       if (url) row.append(h('span', 'mt-0.5 shrink-0 whitespace-nowrap text-xs text-zinc-500 group-hover:text-emerald-300', 'open ↗'));
       else if (!p.self) {
@@ -770,6 +773,7 @@
         if (msg.complete) S.peersSeen = true;
         S.peers = next;
         invalidate('peers', 'roots');
+        if (next.some((p) => p.id && !S.usage.has(p.id))) scheduleUsage(0);
         if (picker.open) {
           renderHosts();
           checkHosts();
@@ -901,13 +905,15 @@
       closeChat();
       S.remote.clear();
       S.workflows.clear();
+      S.usage.clear();
     } else {
       closeUnlock();
     }
     renderAccess();
-    invalidate('roots', 'agents');
+    invalidate('roots', 'agents', 'peers');
     scheduleRemote(0);
     scheduleWorkflows(0);
+    scheduleUsage(0);
   }
 
   // lostAdmin handles a rejected token (rotated, or from another server).
@@ -1680,6 +1686,89 @@
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) scheduleRemote(0);
   });
+
+  // ------------------------------------------------------------------ usage
+  //
+  // Each fleet's agent CLIs, installed or not, and how much of their
+  // account's plan limits (5h session, week, ...) is used, shown under the
+  // fleet in "Fleet on the network". Asked once a minute while the page is
+  // visible; the daemons cache the providers' answers.
+
+  const USAGE_POLL_MS = 60000;
+  let usageTimer = 0;
+  let usageBusy = false;
+  let usageAt = 0;
+
+  function scheduleUsage(delay) {
+    clearTimeout(usageTimer);
+    if (admin) usageTimer = setTimeout(pollUsage, delay);
+  }
+
+  async function pollUsage() {
+    if (!admin || usageBusy || document.hidden) return;
+    usageBusy = true;
+    usageAt = Date.now();
+    const self = S.server && S.server.id;
+    const ids = S.peers.filter((p) => p.id).map((p) => p.id);
+    for (const id of [...S.usage.keys()]) if (!ids.includes(id)) S.usage.delete(id);
+    await Promise.all(ids.map(async (id) => {
+      try {
+        const r = await api('GET', id === self ? '/api/usage' : `/api/hosts/${encodeURIComponent(id)}/usage`);
+        S.usage.set(id, (r && r.agents) || []);
+      } catch (e) {
+        // Not joined: nothing to show. Unreachable: keep the last answer.
+        if (e.notJoined || !S.usage.has(id)) S.usage.set(id, null);
+      }
+    }));
+    usageBusy = false;
+    invalidate('peers');
+    scheduleUsage(USAGE_POLL_MS);
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && Date.now() - usageAt >= USAGE_POLL_MS) scheduleUsage(0);
+  });
+
+  function usageNode(id) {
+    const list = admin && id && S.usage.get(id);
+    if (!list || !list.length) return null;
+    return h('div', 'mt-2 flex flex-col gap-1.5', ...list.map(agentUsageRow));
+  }
+
+  function agentUsageRow(a) {
+    const name = h('span', 'inline-flex w-16 shrink-0 items-center gap-1.5 font-mono ' + (a.available ? 'text-zinc-200' : 'text-zinc-600'),
+      h('span', 'size-1.5 shrink-0 rounded-full ' + (a.available ? 'bg-emerald-400' : 'bg-zinc-600')), a.id);
+    name.title = a.available ? `${a.name} ${a.version || ''}`.trim() : `${a.name}: ${a.reason || 'not installed'}`;
+    // Meters wrap under each other, not under the name.
+    const meters = h('div', 'flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1');
+    if (!a.available) meters.append(h('span', 'text-zinc-600', 'not installed'));
+    else {
+      for (const l of a.limits) meters.append(limitMeter(l));
+      if (a.plan) meters.append(h('span', 'font-mono text-[11px] text-zinc-500', a.plan));
+      if (a.error) {
+        const e = h('span', 'min-w-0 truncate text-zinc-500', 'usage unknown');
+        e.title = a.error;
+        meters.append(e);
+      }
+    }
+    return h('div', 'flex items-start gap-3 text-xs leading-4', name, meters);
+  }
+
+  // limitMeter is one usage window: label, a bar, percent used; the reset
+  // time is in its tooltip.
+  function limitMeter(l) {
+    const pct = Math.max(0, Math.min(100, l.percent));
+    const tone = pct >= 90 ? 'bg-rose-400' : pct >= 70 ? 'bg-amber-400' : 'bg-emerald-400';
+    const fill = h('span', 'absolute inset-y-0 left-0 rounded-full ' + tone);
+    fill.style.width = pct + '%';
+    const el = h('span', 'inline-flex items-center gap-1.5 whitespace-nowrap',
+      h('span', 'text-zinc-500', l.label),
+      h('span', 'relative h-1.5 w-10 overflow-hidden rounded-full bg-ink-700', fill),
+      h('span', 'font-mono tabular-nums ' + (pct >= 90 ? 'text-rose-300' : 'text-zinc-300'), Math.round(pct) + '%'));
+    el.title = `${l.label}: ${Math.round(pct)}% used` +
+      (l.resetsAtMs ? `, resets in ${dur(l.resetsAtMs - Date.now()).replace(/ \d+s$/, '')} (${new Date(l.resetsAtMs).toLocaleString()})` : '');
+    return el;
+  }
 
   // --------------------------------------------------------------- launcher
   //

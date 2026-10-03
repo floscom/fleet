@@ -75,6 +75,38 @@ func (s *webSource) Adapters(ctx context.Context) []web.Adapter {
 	return out
 }
 
+func (s *webSource) Usage(ctx context.Context) []web.AgentUsage {
+	var out []web.AgentUsage
+	for _, u := range s.d.agentUsages(ctx) {
+		a := u.adapter
+		if _, ok := a.(adapter.Usager); !ok {
+			continue
+		}
+		wu := web.AgentUsage{
+			ID: a.ID(), Name: a.DisplayName(), Available: u.det.Available,
+			Version: u.det.Version, Reason: u.det.Reason, Limits: []web.UsageLimit{},
+		}
+		if !u.at.IsZero() {
+			wu.AsOfMs = u.at.UnixMilli()
+		}
+		if u.err != nil {
+			wu.Error = u.err.Error()
+		}
+		if u.usage != nil {
+			wu.Plan = u.usage.Plan
+			for _, l := range u.usage.Limits {
+				wl := web.UsageLimit{Label: l.Label, Percent: l.Percent}
+				if !l.ResetsAt.IsZero() {
+					wl.ResetsAtMs = l.ResetsAt.UnixMilli()
+				}
+				wu.Limits = append(wu.Limits, wl)
+			}
+		}
+		out = append(out, wu)
+	}
+	return out
+}
+
 // webModel shows a session's model on the dashboard.
 func webModel(info ModelInfo) *web.Model {
 	m := &web.Model{

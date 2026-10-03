@@ -22,12 +22,14 @@
 //     ModelSwitcher to switch a running session.
 //   - questions answered in a form on the dashboard: implement Asker.
 //   - images in the chat: implement TranscriptImager.
+//   - how much of the account's plan limits is used: implement Usager.
 package adapter
 
 import (
 	"context"
 	"sort"
 	"sync"
+	"time"
 
 	fleetv1 "fleet/gen/fleetv1"
 	"fleet/internal/ask"
@@ -153,6 +155,33 @@ type ModelSwitcher interface {
 	// SwitchModel switches the session running in term. model and effort
 	// are IDs from Models; "" keeps the current one.
 	SwitchModel(ctx context.Context, term Terminal, model, effort string) error
+}
+
+// Usager is implemented by adapters whose CLI logs into a subscription
+// with usage limits (a 5-hour session, a week, ...): the dashboard shows
+// how much of each the daemon user's account has used.
+type Usager interface {
+	// Usage asks the provider for the current usage of the account the CLI
+	// is logged in with. Errors are shown to the user as the reason the
+	// usage is unknown.
+	Usage(ctx context.Context) (*Usage, error)
+}
+
+// Usage is how much of an account's plan limits is used.
+type Usage struct {
+	// Plan names the subscription, e.g. "max 20x"; may be empty.
+	Plan   string
+	Limits []UsageLimit
+}
+
+// UsageLimit is one usage window of a plan.
+type UsageLimit struct {
+	// Label names the window, e.g. "5h", "week" or "week Fable".
+	Label string
+	// Percent is how much of it is used, 0-100.
+	Percent float64
+	// ResetsAt is when the window starts over; zero if unknown.
+	ResetsAt time.Time
 }
 
 // Terminal is the terminal of a live agent.

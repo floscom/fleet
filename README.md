@@ -327,6 +327,13 @@ there needed. That browser then shows **admin** in the header and can:
   conversation, answer the agent, type into it and stop it (see
   [Sessions in the browser](#sessions-in-the-browser)), on this machine or
   on other fleets.
+- **See agent CLIs and plan usage per machine**: under *Fleet on the
+  network*, this daemon and every fleet holding the fleet key list Claude
+  Code and Codex: installed or not, and how much of the logged-in account's
+  plan limits (5-hour session, week, ...) is used, with the reset time on
+  hover. Each daemon asks the provider at most every 45 s with the token its
+  CLI stored (`~/.claude/.credentials.json`, `~/.codex/auth.json`) and never
+  refreshes it; a Claude login in the macOS Keychain shows as unknown.
 - **Add roots on other machines**: the folder picker starts with a
   *Machine* row listing this daemon and every fleet on the LAN with a
   dashboard. Pick one to browse its folders and add a root there (see

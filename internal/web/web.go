@@ -75,6 +75,9 @@ type Source interface {
 	RemoveRoot(name string) error
 	// Adapters lists the agent adapters.
 	Adapters(ctx context.Context) []Adapter
+	// Usage lists the agent CLIs whose account has plan limits, whether
+	// they are installed, and how much of the limits is used.
+	Usage(ctx context.Context) []AgentUsage
 
 	// Agents lists every agent, finished ones included.
 	Agents() []*fleetv1.Agent

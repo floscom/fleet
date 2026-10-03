@@ -70,6 +70,9 @@ type daemon struct {
 	sbProbed map[string]bool
 	sbFleet  map[string]string
 
+	// usage caches what the providers said about plan limits (usage.go).
+	usage usageCache
+
 	connsMu sync.Mutex
 	conns   map[*conn]struct{}
 	connWG  sync.WaitGroup

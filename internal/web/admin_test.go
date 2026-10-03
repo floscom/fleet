@@ -83,7 +83,7 @@ func TestAdminAuth(t *testing.T) {
 	}
 
 	// Every admin route refuses a missing or wrong token.
-	for _, rt := range [][2]string{{"GET", "/api/fs"}, {"GET", "/api/adapters"}, {"GET", "/api/roots"}, {"POST", "/api/roots"},
+	for _, rt := range [][2]string{{"GET", "/api/fs"}, {"GET", "/api/adapters"}, {"GET", "/api/usage"}, {"GET", "/api/roots"}, {"POST", "/api/roots"},
 		{"DELETE", "/api/roots/code"}, {"GET", "/api/join"}, {"GET", "/api/hosts/peer-id/fs"}} {
 		for _, bad := range []string{"", "wrong"} {
 			var e struct{ Error string }
@@ -227,6 +227,11 @@ func TestAdminRoots(t *testing.T) {
 	var ad struct{ Adapters []Adapter }
 	if code := api(t, ts, "GET", "/api/adapters", tok, "", &ad); code != 200 || len(ad.Adapters) != 1 || ad.Adapters[0].ID != "claude" {
 		t.Fatalf("adapters: %d %+v", code, ad)
+	}
+	var us struct{ Agents []AgentUsage }
+	if code := api(t, ts, "GET", "/api/usage", tok, "", &us); code != 200 || len(us.Agents) != 1 ||
+		us.Agents[0].Plan != "max 20x" || len(us.Agents[0].Limits) != 1 || us.Agents[0].Limits[0].Percent != 18 {
+		t.Fatalf("usage: %d %+v", code, us)
 	}
 }
 

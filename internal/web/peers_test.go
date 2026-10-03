@@ -234,6 +234,10 @@ func TestHostProxy(t *testing.T) {
 	if code := api(t, a, "GET", "/api/hosts/b-id/roots", tok, "", &roots); code != 200 || len(roots.Roots) != 1 {
 		t.Fatalf("b roots: %d %+v", code, roots)
 	}
+	var us struct{ Agents []AgentUsage }
+	if code := api(t, a, "GET", "/api/hosts/b-id/usage", tok, "", &us); code != 200 || len(us.Agents) != 1 || us.Agents[0].Plan != "max 20x" {
+		t.Fatalf("usage on b: %d %+v", code, us)
+	}
 	var listing Dir
 	if code := api(t, a, "GET", "/api/hosts/b-id/fs?path="+url.QueryEscape(dir), tok, "", &listing); code != 200 || listing.Path == "" {
 		t.Fatalf("b fs: %d %+v", code, listing)
