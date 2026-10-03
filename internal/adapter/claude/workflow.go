@@ -57,7 +57,8 @@ func (c *claude) Workflows(path string) []workflow.Run {
 	session := strings.TrimSuffix(path, ".jsonl")
 	runsDir := filepath.Join(session, "subagents", "workflows")
 	dirs := subdirs(runsDir)
-	if len(dirs) == 0 {
+	subs := agentFiles(session)
+	if len(dirs) == 0 && len(subs) == 0 {
 		return nil
 	}
 	c.wf.sweep()
@@ -97,6 +98,7 @@ func (c *claude) Workflows(path string) []workflow.Run {
 		}
 		runs = append(runs, r)
 	}
+	runs = append(runs, c.agentRuns(session, subs, ends)...)
 	sort.SliceStable(runs, func(i, j int) bool { return runs[i].StartedMs < runs[j].StartedMs })
 	return runs
 }
@@ -105,6 +107,10 @@ func (c *claude) Workflows(path string) []workflow.Run {
 func (c *claude) WorkflowTranscript(path, run, agent string) (string, transcript.Parser, bool) {
 	if !validID(run) || !validID(agent) {
 		return "", nil, false
+	}
+	if strings.HasPrefix(run, agentRunPrefix) {
+		p, ok := agentTranscript(strings.TrimSuffix(path, ".jsonl"), agent)
+		return p, parseSidechain, ok
 	}
 	dir := filepath.Join(strings.TrimSuffix(path, ".jsonl"), "subagents", "workflows", run)
 	p := filepath.Join(dir, "agent-"+agent+".jsonl")
@@ -426,6 +432,9 @@ func (c *workflowCache) agentMeta(path string) (label, phase string) {
 type sessionScan struct {
 	launches map[string]launch // run id -> its latest launch
 	ends     map[string]ending // task id -> how it ended
+	// agentEnds are the latest notifications of tasks: a subagent's task
+	// notifies each time it stops.
+	agentEnds map[string]ending
 }
 
 type launch struct {
@@ -513,7 +522,7 @@ func (s *sessionScan) add(line []byte) {
 func (s *sessionScan) note(text string, ms int64) {
 	task, _ := inner(text, "task-id")
 	status, _ := inner(text, "status")
-	if task = strings.TrimSpace(task); task == "" || s.ends[task].status != "" {
+	if task = strings.TrimSpace(task); task == "" {
 		return
 	}
 	summary, _ := inner(text, "summary")
@@ -533,6 +542,15 @@ func (s *sessionScan) note(text string, ms int64) {
 	default:
 		e.status = workflow.Stopped
 	}
+	if s.agentEnds == nil {
+		s.agentEnds = map[string]ending{}
+	}
+	if latest, ok := s.agentEnds[task]; !ok || e.ms >= latest.ms {
+		s.agentEnds[task] = e
+	}
+	if s.ends[task].status != "" {
+		return
+	}
 	if s.ends == nil {
 		s.ends = map[string]ending{}
 	}
@@ -540,7 +558,7 @@ func (s *sessionScan) note(text string, ms int64) {
 }
 
 func (s *sessionScan) snapshot() sessionScan {
-	return sessionScan{launches: clone(s.launches), ends: clone(s.ends)}
+	return sessionScan{launches: clone(s.launches), ends: clone(s.ends), agentEnds: clone(s.agentEnds)}
 }
 
 func clone[K comparable, V any](m map[K]V) map[K]V {
@@ -634,6 +652,8 @@ type agentScan struct {
 	toolUses        int
 	tool, activity  string
 	lastCall        string // id of the latest tool call counted
+	// ended: its latest message ended its turn.
+	ended bool
 }
 
 var (
@@ -664,7 +684,8 @@ func (s *agentScan) add(line []byte) {
 				CacheRead     int64 `json:"cache_read_input_tokens"`
 				CacheCreation int64 `json:"cache_creation_input_tokens"`
 			} `json:"usage"`
-			Content json.RawMessage `json:"content"`
+			StopReason string          `json:"stop_reason"`
+			Content    json.RawMessage `json:"content"`
 		} `json:"message"`
 	}
 	if !decode(line, &r) {
@@ -675,6 +696,9 @@ func (s *agentScan) add(line []byte) {
 		return
 	}
 	m := r.Message
+	// A message is written a line per content block, all but the last
+	// without a stop reason.
+	s.ended = m.StopReason != "" && m.StopReason != "tool_use" && m.StopReason != "pause_turn"
 	if m.Model != "" && m.Model != "<synthetic>" {
 		s.model = m.Model
 	}

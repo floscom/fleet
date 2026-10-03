@@ -63,7 +63,9 @@ type Agent struct {
 	Label  string `json:"label,omitempty"`
 	Phase  string `json:"phase,omitempty"`
 	Status string `json:"status"`
-	Model  string `json:"model,omitempty"`
+	// Call is the id of the tool call that started it, if known.
+	Call  string `json:"call,omitempty"`
+	Model string `json:"model,omitempty"`
 	// Tokens is the size of its conversation: the context of its latest
 	// message plus that message's output.
 	Tokens   int64 `json:"tokens"`

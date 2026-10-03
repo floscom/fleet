@@ -2738,6 +2738,11 @@
   // drawn when it is first opened: most never are.
   function toolNode(f, e) {
     if (e.name === 'Workflow' && f === chat.feed) return workflowNode(f, e);
+    if ((e.name === 'Agent' || e.name === 'Task') && f === chat.feed) return agentCallNode(f, e);
+    return plainToolNode(f, e);
+  }
+
+  function plainToolNode(f, e) {
     const d = h('details', 'group min-w-0 rounded-md border border-ink-700 bg-ink-850/50 open:bg-ink-850');
     const status = h('span', '');
     const sum = h('summary', 'touch:min-h-11 flex cursor-pointer list-none items-center gap-2 rounded-md px-2.5 py-1.5 font-mono text-[12px] hover:bg-ink-800/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400',
@@ -2752,6 +2757,57 @@
       if (d.open) buildTool(t);
     });
     trackTool(f, t, e);
+    return d;
+  }
+
+  // agentCallNode is an Agent call with the subagent it started, live from
+  // the Subagents tab's data: what it does now, and a way to its
+  // conversation. A subagent knows its call, or (a teammate) only its
+  // description.
+  function agentCallNode(f, e) {
+    const d = plainToolNode(f, e);
+    const sum = d.firstChild;
+    const live = h('span', 'ml-auto flex min-w-0 flex-1 items-center justify-end gap-2 font-sans');
+    sum.lastChild.classList.add('shrink-0', 'max-w-[50%]'); // its description goes first
+    sum.append(live);
+    const find = () => {
+      let byLabel = null;
+      for (const run of wf.runs) {
+        if (!run.id.startsWith('agents-')) continue;
+        for (const a of run.agents) {
+          if (a.call && a.call === e.id) return { run, a };
+          if (!a.call && !byLabel && a.label && a.label === e.text) byLabel = { run, a };
+        }
+      }
+      return byLabel;
+    };
+    let shown = '';
+    const paint = () => {
+      const m = find();
+      const sig = m ? JSON.stringify([m.run.id, m.a.status, m.a.tool, m.a.activity]) : '';
+      if (sig === shown) return;
+      shown = sig;
+      if (!m) {
+        live.replaceChildren();
+        return;
+      }
+      const st = wfStatus(m.a.status);
+      const open = h('button', 'touch:min-h-11 shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-fuchsia-300 hover:bg-fuchsia-400/10 hover:text-fuchsia-200 focus-visible:outline-2 focus-visible:outline-fuchsia-400', 'Open ›');
+      open.type = 'button';
+      open.setAttribute('aria-label', `Open the conversation of ${m.a.label || m.a.id}`);
+      open.addEventListener('click', (ev) => {
+        ev.preventDefault(); // not the details' toggle
+        ev.stopPropagation();
+        openSub(m.run.id, m.a.id);
+      });
+      const act = m.a.status === 'running'
+        ? h('span', 'min-w-0 truncate text-[11px] text-zinc-500 max-sm:hidden',
+          m.a.tool ? h('span', 'font-mono text-sky-300/80', m.a.tool + ' ') : null, m.a.activity || 'starting…')
+        : null;
+      live.replaceChildren(act || '', h('span', st.badge, h('span', st.dot), st.label), open);
+    };
+    paint();
+    f.watch.add(paint);
     return d;
   }
 
@@ -4636,7 +4692,7 @@
         h('span', 'font-mono text-fuchsia-400/70', '⧉'),
         h('span', 'truncate font-mono font-medium text-fuchsia-100', run.name)),
       run.phase ? h('span', 'shrink-0 text-zinc-400', run.phase,
-        at >= 0 && run.phases.length > 1 ? h('span', 'text-zinc-600', ` ${at + 1}/${run.phases.length}`) : null) : null,
+        at >= 0 && run.phases.length > 1 ? h('span', 'text-zinc-600', ` ${at + 1}/${run.phases.length}`) : null) : '',
       h('span', 'ml-auto flex min-w-0 items-center gap-3',
         agentBars(run.bars, 'w-20 sm:w-32'),
         h('span', 'shrink-0 font-mono tabular-nums text-zinc-500',
@@ -4718,7 +4774,7 @@
     if (!wf.loaded || !wf.runs.length) {
       wf.cards.clear();
       box.replaceChildren(h('div', 'py-10 text-center font-mono text-xs text-zinc-600',
-        !wf.loaded ? '// loading…' : '// This session has run no workflows.'));
+        !wf.loaded ? '// loading…' : '// This session has started no subagents.'));
       return;
     }
     const focus = box.contains(document.activeElement) ? document.activeElement.dataset.key : '';
@@ -4955,7 +5011,7 @@
       h('span', '', `${a.toolUses || 0} tool calls`),
       h('span', '', `${fmtTokens(a.tokens)} tokens`),
       elapsed(a.startedMs, a.status === 'running' ? 0 : a.updatedMs),
-      h('span', 'text-zinc-600', 'read-only: workflow agents take no input'));
+      h('span', 'text-zinc-600', 'read-only: subagents take no input here'));
   }
 
   // -------------------------------------------------------------- websocket
