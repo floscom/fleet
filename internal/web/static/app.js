@@ -4771,11 +4771,25 @@
     return el;
   }
 
-  // agentBars draws one bar per agent status.
+  // Up to this many agents get a bar each; more would not fit the row.
+  const BARS_MAX = 16;
+
+  // agentBars draws one bar per agent status. Many agents become one bar
+  // per stretch of agents with the same status, as wide as their share.
   function agentBars(statuses, cls) {
-    const row = h('span', 'flex h-1.5 min-w-0 gap-0.5 ' + (cls || ''));
+    const row = h('span', 'flex h-1.5 min-w-0 gap-0.5 overflow-hidden ' + (cls || ''));
     if (!statuses.length) row.append(h('span', 'flex-1 rounded-full bg-ink-700'));
-    for (const s of statuses) row.append(h('span', 'min-w-px flex-1 rounded-full ' + wfStatus(s).bar));
+    const runs = [];
+    for (const s of statuses) {
+      const last = runs[runs.length - 1];
+      if (statuses.length > BARS_MAX && last && last.s === s) last.n++;
+      else runs.push({ s, n: 1 });
+    }
+    for (const { s, n } of runs) {
+      const bar = h('span', 'min-w-px flex-1 rounded-full ' + wfStatus(s).bar);
+      bar.style.flexGrow = String(n);
+      row.append(bar);
+    }
     return row;
   }
 
