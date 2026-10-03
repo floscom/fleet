@@ -654,6 +654,7 @@ path and version, `unavailable_reason` when not found, and
 | `activity_state` (hooks report WORKING / IDLE / NEEDS_INPUT) | yes | yes | no |
 | `initial_prompt` (`RunAgentRequest.prompt` is used) | yes | yes | no |
 | `resume` | no | no | no |
+| `initial_images` (`RunAgentRequest.images` are used) | yes | yes | no |
 
 Adapters that offer a choice of model list `models` (`id`, `label`, and
 the `efforts` ids each runs at: none for a model without effort levels)
@@ -770,6 +771,11 @@ Other fields:
   be unique among live agents (and not equal a live agent's id). Cleaned
   like device names (64 bytes max).
 - `prompt`: initial prompt, used when the adapter has `initial_prompt`.
+- `images`: images (PNG, JPEG, GIF or WebP, up to 3.5 MiB each) attached
+  to `prompt`, which they need; only for adapters with `initial_images`
+  (`INVALID` otherwise). They are saved in the agent's state dir; Claude
+  Code gets them as `@<path>` mentions appended to the prompt, Codex as
+  `--image=<path>`. The whole request must still fit a frame (4 MiB).
 - `model`, `effort`: optional model and reasoning effort, ids from
   `AdapterInfo.models` and `.efforts` (`model` may also be any name the
   CLI takes, such as `claude-opus-5-5`). Empty leaves them to the CLI's own

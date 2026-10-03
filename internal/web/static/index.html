@@ -328,10 +328,18 @@
       </div>
 
       <div class="flex flex-col gap-3 px-4 py-3">
-        <label class="block">
-          <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Prompt <span class="normal-case tracking-normal text-zinc-600">· optional, the agent waits for your first message without one</span></span>
-          <textarea id="launch-prompt" rows="3" spellcheck="true" placeholder="What should the agent do? · Ctrl+Enter starts" class="mt-1 block max-h-[40dvh] min-h-20 w-full resize-none rounded-md border border-ink-600 bg-ink-950 px-2.5 py-2 text-[13px] leading-relaxed max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20"></textarea>
-        </label>
+        <div>
+          <label class="block">
+            <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Prompt <span class="normal-case tracking-normal text-zinc-600">· optional, the agent waits for your first message without one</span></span>
+            <textarea id="launch-prompt" rows="3" spellcheck="true" placeholder="What should the agent do? · Ctrl+Enter starts" class="mt-1 block max-h-[40dvh] min-h-20 w-full resize-none rounded-md border border-ink-600 bg-ink-950 px-2.5 py-2 text-[13px] leading-relaxed max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20"></textarea>
+          </label>
+          <!-- Images that go with the prompt, for agents that take them. -->
+          <div class="mt-1.5 flex flex-wrap items-start gap-2">
+            <input id="launch-file" type="file" accept="image/*" multiple hidden>
+            <button id="launch-attach" type="button" title="Attach images to the prompt (or paste / drop them)" class="touch:min-h-11 inline-flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-900 px-2 py-1 text-xs text-zinc-400 hover:border-zinc-500 hover:bg-ink-800 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-ink-600 disabled:hover:bg-ink-900 disabled:hover:text-zinc-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"><svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="size-4"><rect x="2.5" y="3.5" width="15" height="13" rx="2"/><circle cx="7" cy="8" r="1.5"/><path d="m17.5 13-4-4-7.5 7.5"/></svg>Images</button>
+            <ul id="launch-images" hidden aria-label="Images to send with the prompt" class="flex flex-wrap gap-2 pt-1.5"></ul>
+          </div>
+        </div>
         <div class="flex flex-col gap-3 sm:gap-2.5">
           <div class="flex flex-col gap-1.5 sm:grid sm:grid-cols-[4.5rem_1fr] sm:items-baseline sm:gap-3">
             <span id="launch-iso-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Checkout</span>

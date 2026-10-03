@@ -101,6 +101,8 @@ func TestRunValidation(t *testing.T) {
 		{"unknown root", &fleetv1.RunAgentRequest{Root: "nope"}, codeNotFound},
 		{"unavailable adapter", &fleetv1.RunAgentRequest{Adapter: "missing", Root: "code"}, codeUnavailable},
 		{"worktree outside git", &fleetv1.RunAgentRequest{Root: "code", Path: "plain", Isolation: isoWorktree}, codeInvalid},
+		{"images without prompt", &fleetv1.RunAgentRequest{Root: "code", Images: [][]byte{testPNG}}, codeInvalid},
+		{"not an image", &fleetv1.RunAgentRequest{Root: "code", Prompt: "look", Images: [][]byte{[]byte("text")}}, codeInvalid},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -111,6 +113,35 @@ func TestRunValidation(t *testing.T) {
 	c.t = t
 	if s := e.sessions(); len(s) != 0 {
 		t.Fatalf("sessions: %v", s)
+	}
+}
+
+var testPNG = []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+
+// Images sent with the initial prompt are saved in the agent's state dir
+// and handed to the adapter.
+func TestRunImages(t *testing.T) {
+	e := newEnv(t)
+	c := e.dialUnix()
+	out := filepath.Join(t.TempDir(), "images")
+	a := c.run(&fleetv1.RunAgentRequest{
+		Root: "code", Prompt: "what changed?", Images: [][]byte{testPNG, testPNG},
+		ExtraArgs: []string{`printf %s "$TEST_IMAGES" >` + out + `; sleep 60`},
+	})
+	var paths []string
+	waitFor(t, "the agent's images", func() bool {
+		data, err := os.ReadFile(out)
+		paths = strings.Split(string(data), "\n")
+		return err == nil && len(data) > 0
+	})
+	if len(paths) != 2 || paths[0] == paths[1] {
+		t.Fatalf("images %q", paths)
+	}
+	for _, p := range paths {
+		if got, err := os.ReadFile(p); err != nil || !bytes.Equal(got, testPNG) ||
+			filepath.Dir(p) != config.Path("agents", a.GetId(), imagesDir) {
+			t.Fatalf("image at %q: %q, %v", p, got, err)
+		}
 	}
 }
 
@@ -146,7 +177,7 @@ func TestPinnedSharedAndKill(t *testing.T) {
 	attach := func(data []byte) *fleetv1.ClientMessage {
 		return &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_AttachImage{AttachImage: &fleetv1.AttachImageRequest{Agent: "api-fix", Data: data}}}
 	}
-	png := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+	png := testPNG
 	path := c.ok(attach(png)).GetAttachImage().GetPath()
 	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, png) ||
 		filepath.Dir(path) != config.Path("agents", a.GetId(), imagesDir) || filepath.Ext(path) != ".png" {

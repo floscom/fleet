@@ -78,6 +78,8 @@ type Adapter struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	Available bool   `json:"available"`
+	// Images is set when images can be attached to the initial prompt.
+	Images bool `json:"images"`
 	// Models and Efforts are what an agent can be started with; empty
 	// when the adapter offers no choice.
 	Models  []ModelChoice  `json:"models"`

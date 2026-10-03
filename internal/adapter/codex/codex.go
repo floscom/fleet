@@ -62,7 +62,7 @@ func (c *codex) DisplayName() string { return "Codex" }
 
 // Capabilities: resume would need a session id in LaunchRequest.
 func (c *codex) Capabilities() adapter.Capabilities {
-	return adapter.Capabilities{ActivityState: true, InitialPrompt: true}
+	return adapter.Capabilities{ActivityState: true, InitialPrompt: true, InitialImages: true}
 }
 
 func (c *codex) Detect(ctx context.Context) adapter.Detection { return c.bin.Detect(ctx) }
@@ -98,6 +98,9 @@ func (c *codex) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapter
 	}
 	if req.Effort != "" {
 		argv = append(argv, "-c", "model_reasoning_effort="+tomlString(req.Effort))
+	}
+	for _, img := range req.Images {
+		argv = append(argv, "--image="+img)
 	}
 	if req.Prompt != "" {
 		// "--" keeps a prompt starting with "-" from being read as a flag.

@@ -246,6 +246,8 @@ type Capabilities struct {
 	ActivityState bool
 	InitialPrompt bool
 	Resume        bool
+	// InitialImages: LaunchRequest.Images are attached to the prompt.
+	InitialImages bool
 }
 
 // Proto converts to the wire type.
@@ -254,6 +256,7 @@ func (c Capabilities) Proto() *fleetv1.AdapterCapabilities {
 		ActivityState: c.ActivityState,
 		InitialPrompt: c.InitialPrompt,
 		Resume:        c.Resume,
+		InitialImages: c.InitialImages,
 	}
 }
 
@@ -276,6 +279,9 @@ type LaunchRequest struct {
 	Cwd string
 	// Prompt is the optional initial prompt.
 	Prompt string
+	// Images are paths of image files to attach to Prompt, for adapters
+	// with InitialImages.
+	Images []string
 	// Model and Effort are the model and reasoning effort to run at, for
 	// Modelers: IDs from Models (Model may also be any name the CLI takes).
 	// "" leaves it to the CLI's own default.

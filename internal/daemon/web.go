@@ -62,6 +62,7 @@ func (s *webSource) Adapters(ctx context.Context) []web.Adapter {
 	for _, a := range list {
 		wa := web.Adapter{
 			ID: a.Id, Name: a.DisplayName, Available: a.Available,
+			Images: a.GetCapabilities().GetInitialImages(),
 			Models: []web.ModelChoice{}, Efforts: []web.EffortChoice{},
 		}
 		for _, m := range a.Models {

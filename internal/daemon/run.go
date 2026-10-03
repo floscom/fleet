@@ -138,6 +138,14 @@ func (m *manager) run(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleet
 	if err := checkModel(ad, req.GetModel(), req.GetEffort()); err != nil {
 		return nil, err
 	}
+	if len(req.GetImages()) > 0 {
+		if !ad.Capabilities().InitialImages {
+			return nil, errf(codeInvalid, "%s takes no images at start", ad.DisplayName())
+		}
+		if req.GetPrompt() == "" {
+			return nil, errf(codeInvalid, "images need a prompt")
+		}
+	}
 
 	// Reserve the agent so concurrent requests see its name and directory.
 	m.mu.Lock()
@@ -236,6 +244,14 @@ func (m *manager) launch(ctx context.Context, ad adapter.Adapter, a agentRec, re
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return res, err
 	}
+	images := make([]string, 0, len(req.GetImages()))
+	for _, data := range req.GetImages() {
+		p, err := saveImage(stateDir, data)
+		if err != nil {
+			return res, err
+		}
+		images = append(images, p)
+	}
 	if a.Isolation == isoWorktree {
 		wt := worktreeDir(base, repo, a.Name, a.ID)
 		if err := worktree.Add(ctx, worktree.AddOptions{Repo: repo, Path: wt, Branch: a.Branch}); err != nil {
@@ -283,6 +299,7 @@ func (m *manager) launch(ctx context.Context, ad adapter.Adapter, a agentRec, re
 		AgentName:   a.Name,
 		Cwd:         res.cwd,
 		Prompt:      req.GetPrompt(),
+		Images:      images,
 		Model:       a.Model,
 		Effort:      a.Effort,
 		ExtraArgs:   extra,

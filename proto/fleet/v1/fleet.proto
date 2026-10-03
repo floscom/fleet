@@ -281,6 +281,8 @@ message AdapterCapabilities {
   bool initial_prompt = 2;
   // A previous session can be resumed.
   bool resume = 3;
+  // Images can be attached to the initial prompt (RunAgentRequest.images).
+  bool initial_images = 4;
 }
 
 message Root {
@@ -467,6 +469,10 @@ message RunAgentRequest {
   // leaves them to the CLI's defaults; adapters without models reject them.
   string model = 14;
   string effort = 15;
+  // Optional images (PNG, JPEG, GIF or WebP, up to 3.5 MiB each) attached
+  // to the initial prompt, which they need; for adapters with
+  // initial_images. The request must still fit a frame.
+  repeated bytes images = 16;
 }
 message RunAgentResponse {
   Agent agent = 1;

@@ -44,18 +44,18 @@ func TestRunStopInput(t *testing.T) {
 	}
 
 	var run struct{ Agent Agent }
-	body := `{"adapter":"claude","root":"code","path":"/api/","prompt":"fix it","name":" x ","isolation":"pinned","sandbox":"docker"}`
+	body := `{"adapter":"claude","root":"code","path":"/api/","prompt":"fix it","name":" x ","isolation":"pinned","sandbox":"docker","images":["aW1nMQ=="]}`
 	if code := api(t, ts, "POST", "/api/agents", tok, body, &run); code != 201 || run.Agent.ID != "a1" {
 		t.Fatalf("run: %d %+v", code, run)
 	}
 	want := &fleetv1.RunAgentRequest{Adapter: "claude", Root: "code", Path: "api", Prompt: "fix it", Name: "x",
-		Isolation: fleetv1.Isolation_ISOLATION_PINNED, Sandbox: fleetv1.Sandbox_SANDBOX_DOCKER}
+		Isolation: fleetv1.Isolation_ISOLATION_PINNED, Sandbox: fleetv1.Sandbox_SANDBOX_DOCKER, Images: [][]byte{[]byte("img1")}}
 	if len(src.runs) != 1 || src.runs[0].String() != want.String() {
 		t.Fatalf("run request %v, want %v", src.runs, want)
 	}
 	var e struct{ Error string }
 	for _, bad := range []string{`{"adapter":"claude","root":"code","isolation":"clone"}`, `{"adapter":"claude","root":"code","sandbox":"vm"}`,
-		`{"root":"code"}`, `not json`} {
+		`{"root":"code"}`, `not json`, `{"adapter":"claude","root":"code","images":[` + strings.TrimSuffix(strings.Repeat(`"eA==",`, maxImages+1), ",") + `]}`} {
 		if code := api(t, ts, "POST", "/api/agents", tok, bad, &e); code != 400 {
 			t.Fatalf("run %s: %d %+v", bad, code, e)
 		}

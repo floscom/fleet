@@ -65,7 +65,7 @@ func (c *claude) DisplayName() string { return "Claude Code" }
 
 // Capabilities: resume would need a session id in LaunchRequest.
 func (c *claude) Capabilities() adapter.Capabilities {
-	return adapter.Capabilities{ActivityState: true, InitialPrompt: true}
+	return adapter.Capabilities{ActivityState: true, InitialPrompt: true, InitialImages: true}
 }
 
 func (c *claude) Detect(ctx context.Context) adapter.Detection { return c.bin.Detect(ctx) }
@@ -129,9 +129,15 @@ func (c *claude) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapte
 	if req.Effort != "" {
 		argv = append(argv, "--effort", req.Effort)
 	}
-	if req.Prompt != "" {
+	prompt := req.Prompt
+	for _, img := range req.Images {
+		// Claude Code attaches a file @-mentioned in the prompt; a plain
+		// path it leaves to the model.
+		prompt += " @" + img
+	}
+	if prompt != "" {
 		// "--" keeps a prompt starting with "-" from being read as a flag.
-		argv = append(argv, "--", req.Prompt)
+		argv = append(argv, "--", prompt)
 	}
 	return &adapter.LaunchSpec{
 		Argv:      argv,

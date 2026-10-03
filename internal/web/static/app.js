@@ -1773,12 +1773,13 @@
   // --------------------------------------------------------------- launcher
   //
   // Start a session: machine, agent CLI, a folder inside one of its roots,
-  // an optional prompt. Other machines are reached through /api/hosts/.
+  // an optional prompt, with images. Other machines are reached through
+  // /api/hosts/.
 
   const launch = {
     open: false,
     host: '', // server id; '' = this daemon
-    adapters: null, // [{id, name, available, models, efforts}] of the machine
+    adapters: null, // [{id, name, available, images, models, efforts}] of the machine
     roots: null, // roots of another machine (this one's are S.roots)
     root: '', // chosen folder: a root name
     sub: '', // and a folder inside it, relative, '' = the root itself
@@ -1793,6 +1794,8 @@
     listShown: false, // the chosen folder was scrolled into view in it
     modelSig: '', // what the model pickers show (see renderLaunchModel)
     then: '', // what to show once started, if a shortcut says so
+    images: [], // {data, url, name} to send with the prompt (see readImages)
+    seq: 0, // bumped on each opening: images read for an earlier one are dropped
   };
 
   const launchAPI = (path) => (launch.host ? `/api/hosts/${encodeURIComponent(launch.host)}/${path}` : '/api/' + path);
@@ -1814,6 +1817,9 @@
       launch.sub = opts.sub || '';
     }
     if (launch.host && !pickerHosts().some((x) => x.id === launch.host)) launch.host = '';
+    launch.seq++;
+    launch.images = [];
+    renderThumbs($('launch-images'), launch.images);
     $('launch-prompt').value = '';
     $('launch-search').value = '';
     // Key hints only where there are keys.
@@ -2080,6 +2086,30 @@
     renderLaunch();
   }
 
+  // launchImages reports whether the chosen agent CLI takes images with
+  // its first prompt (daemons older than that say nothing).
+  function launchImages() {
+    const ad = (launch.adapters || []).find((a) => a.id === launch.adapter);
+    return !!(ad && ad.images);
+  }
+
+  // launchImagesProblem says why the images cannot go with the session.
+  function launchImagesProblem() {
+    if (!launch.images.length) return '';
+    if (!launchImages()) return `${launch.adapter || 'this agent'} takes no images at start: remove them, or choose another agent.`;
+    if (!$('launch-prompt').value.trim()) return 'Images go with a prompt: write one.';
+    return '';
+  }
+
+  async function addLaunchImages(files) {
+    if (!launch.open || launch.busy || !launchImages()) return;
+    const seq = launch.seq;
+    if (await readImages(files, launch.images, () => launch.open && seq === launch.seq)) {
+      renderThumbs($('launch-images'), launch.images);
+      renderLaunch();
+    }
+  }
+
   // pickAdapter keeps the chosen adapter if the root allows it and it is
   // installed, else takes Claude Code, Codex or the first one that is.
   function pickAdapter(list) {
@@ -2125,6 +2155,12 @@
     renderLaunchCrumbs();
     renderLaunchList(notJoined);
 
+    $('launch-attach').disabled = !launchImages() || launch.busy;
+    $('launch-attach').title = launchImages() || !launch.adapter
+      ? 'Attach images to the prompt (or paste / drop them)'
+      : `${launch.adapter} takes no images at start`;
+    const problem = launchImagesProblem();
+
     const st = $('launch-status');
     const roots = launchRoots();
     if (notJoined) {
@@ -2133,19 +2169,23 @@
     } else if (launch.error) {
       st.className = 'min-h-5 min-w-0 basis-full text-xs text-rose-300 sm:basis-0 sm:flex-1';
       st.textContent = launch.error;
+    } else if (problem) {
+      st.className = 'min-h-5 min-w-0 basis-full text-xs text-amber-200/90 sm:basis-0 sm:flex-1';
+      st.textContent = problem;
     } else if (root) {
       st.className = 'min-h-5 min-w-0 basis-full break-words text-xs text-zinc-500 sm:basis-0 sm:flex-1';
       const p = launchPick();
       const runs = p && [p.model && p.model.label, p.effort && p.effort.label + ' effort'].filter(Boolean).join(' · ');
+      const n = launch.images.length;
       st.replaceChildren(h('span', '', 'starts ', h('span', 'font-mono text-zinc-200', launch.adapter || '…'),
-        runs ? h('span', 'text-zinc-400', ` (${runs})`) : null, ' in ',
+        runs ? h('span', 'text-zinc-400', ` (${runs})`) : null, n ? ` with ${n} image${n > 1 ? 's' : ''}` : '', ' in ',
         h('span', 'font-mono text-zinc-200', ...pathBreaks(shortPath(inRoot(root, launch.sub))))));
     } else {
       st.className = 'min-h-5 min-w-0 basis-full text-xs text-zinc-500 sm:basis-0 sm:flex-1';
       st.textContent = launch.adapters && !roots.length ? 'Add a root folder on this machine first (Roots → Add folder).' : '';
     }
     const start = $('launch-start');
-    start.disabled = !root || !launch.adapter || launch.busy || notJoined;
+    start.disabled = !root || !launch.adapter || launch.busy || notJoined || !!problem;
     start.textContent = launch.busy ? 'Starting…' : 'Start';
   }
 
@@ -2349,7 +2389,7 @@
   async function startSession(ev) {
     ev.preventDefault();
     const root = launchRoot();
-    if (!root || !launch.adapter || launch.busy) return;
+    if (!root || !launch.adapter || launch.busy || launchImagesProblem()) return;
     const host = launch.host;
     const then = launch.then || checkedValue('launch-then') || 'chat';
     launch.then = '';
@@ -2369,6 +2409,7 @@
         branch: $('launch-branch').value.trim(),
         isolation: checkedValue('launch-iso'),
         sandbox: checkedValue('launch-sandbox'),
+        images: launch.images.map((im) => im.data),
       });
       launch.busy = false;
       closeLaunch();
@@ -2451,6 +2492,7 @@
     // The prompt grows as it is typed into; keep its end in view.
     prompt.addEventListener('input', () => {
       fitHeight(prompt);
+      if (launch.images.length) renderLaunch(); // images need a prompt
       const body = $('launch-body');
       const below = prompt.getBoundingClientRect().bottom + 12 - body.getBoundingClientRect().bottom;
       if (below > 0) body.scrollTop += below;
@@ -2472,8 +2514,38 @@
         renderLaunch();
       }
     });
+    prompt.addEventListener('paste', (ev) => {
+      const files = imageFiles(ev.clipboardData);
+      if (!files.length || !launchImages()) return;
+      ev.preventDefault();
+      addLaunchImages(files);
+    });
+    $('launch-attach').addEventListener('click', () => $('launch-file').click());
+    $('launch-file').addEventListener('change', (ev) => {
+      addLaunchImages(ev.target.files);
+      ev.target.value = '';
+    });
+    $('launch-images').addEventListener('click', (ev) => {
+      const b = ev.target.closest('button[data-image]');
+      if (!b || launch.busy) return;
+      launch.images.splice(Number(b.dataset.image), 1);
+      renderThumbs($('launch-images'), launch.images);
+      renderLaunch();
+      if (!touch()) prompt.focus();
+    });
+    // A file dropped anywhere on the dialog must not open in the tab.
+    dlg.addEventListener('dragover', (ev) => {
+      if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files')) ev.preventDefault();
+    });
+    dlg.addEventListener('drop', (ev) => {
+      if (!ev.dataTransfer || !ev.dataTransfer.files.length) return;
+      ev.preventDefault();
+      if (launchImages()) addLaunchImages(ev.dataTransfer.files);
+      else if (imageFiles(ev.dataTransfer).length) toast(`${launch.adapter || 'this agent'} takes no images at start`, 'warn');
+    });
     dlg.addEventListener('close', () => {
       launch.open = false;
+      launch.images = [];
       launch.gen++;
       launch.listSig = '';
       launch.listView = '';
@@ -4343,24 +4415,33 @@
   async function addChatImages(files) {
     if (!chatLive() || chat.sending || askShown()) return;
     const seq = chat.seq;
-    const imgs = [...files].filter((f) => f.type.startsWith('image/'));
-    for (const f of imgs) {
-      if (seq !== chat.seq) return;
-      if (chat.images.length >= MAX_IMAGES) {
+    if (await readImages(files, chat.images, () => seq === chat.seq)) renderChatImages();
+  }
+
+  // readImages adds the image files among files to images, ready to send,
+  // up to MAX_IMAGES in all. It stops, answering false, once alive() is
+  // false: the message they were for is gone.
+  async function readImages(files, images, alive) {
+    for (const f of [...files].filter((f) => f.type.startsWith('image/'))) {
+      if (images.length >= MAX_IMAGES) {
         toast(`at most ${MAX_IMAGES} images per message`, 'warn');
         break;
       }
       try {
         const blob = await fitImage(f);
         const url = await blobURL(blob);
-        if (seq !== chat.seq) return;
-        chat.images.push({ data: url.slice(url.indexOf(',') + 1), url, name: f.name || 'pasted image' });
+        if (!alive()) return false;
+        if (images.length < MAX_IMAGES) images.push({ data: url.slice(url.indexOf(',') + 1), url, name: f.name || 'pasted image' });
       } catch (e) {
+        if (!alive()) return false;
         toast(`${f.name || 'image'}: ${e.message}`, 'error');
       }
     }
-    renderChatImages();
+    return alive();
   }
+
+  // imageFiles is the image files pasted or dropped, if any.
+  const imageFiles = (dt) => [...(dt ? dt.files : [])].filter((f) => f.type.startsWith('image/'));
 
   // fitImage returns f as is if the agents can read it and it is small
   // enough, else scaled down and re-encoded (GIFs lose their animation).
@@ -4400,9 +4481,14 @@
   }
 
   function renderChatImages() {
-    const ul = $('chat-images');
-    ul.hidden = !chat.images.length;
-    ul.replaceChildren(...chat.images.map((im, i) => {
+    renderThumbs($('chat-images'), chat.images);
+  }
+
+  // renderThumbs shows images to send in list ul, each with a button to
+  // remove it (data-image is its index).
+  function renderThumbs(ul, images) {
+    ul.hidden = !images.length;
+    ul.replaceChildren(...images.map((im, i) => {
       const img = h('img', 'h-16 w-16 rounded-md border border-ink-600 bg-ink-950 object-cover touch:h-20 touch:w-20');
       img.src = im.url;
       img.alt = im.name;
@@ -4511,7 +4597,7 @@
       }
     });
     ta.addEventListener('paste', (ev) => {
-      const files = [...(ev.clipboardData ? ev.clipboardData.files : [])].filter((f) => f.type.startsWith('image/'));
+      const files = imageFiles(ev.clipboardData);
       if (!files.length) return;
       ev.preventDefault();
       addChatImages(files);

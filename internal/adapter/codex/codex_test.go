@@ -113,6 +113,19 @@ func TestLaunch(t *testing.T) {
 	}
 }
 
+func TestLaunchImages(t *testing.T) {
+	spec, err := New(fakeCodex(t), nil).Launch(context.Background(), adapter.LaunchRequest{
+		AgentID: "a", FleetBinary: "/f", Prompt: "what changed?", Images: []string{"/s/a.png", "/s/b.jpg"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// One --image=<path> per image.
+	if tail := spec.Argv[len(spec.Argv)-4:]; !slices.Equal(tail, []string{"--image=/s/a.png", "--image=/s/b.jpg", "--", "what changed?"}) {
+		t.Errorf("tail %q", tail)
+	}
+}
+
 func TestLaunchNoPrompt(t *testing.T) {
 	spec, err := New(fakeCodex(t), nil).Launch(context.Background(), adapter.LaunchRequest{AgentID: "a", FleetBinary: "/f"})
 	if err != nil {

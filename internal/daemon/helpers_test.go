@@ -27,7 +27,8 @@ import (
 )
 
 // testAdapter runs `sh -c <extra args joined>` (default: sleep 60), with
-// $TEST_TRUST_DIR set to LaunchRequest.TrustDir. Its DetectPrompt matches
+// $TEST_TRUST_DIR set to LaunchRequest.TrustDir and $TEST_IMAGES to its
+// Images, one per line. Its DetectPrompt matches
 // testDialog on the screen, and DialogOpen testQuestion.
 type testAdapter struct{}
 
@@ -39,7 +40,7 @@ const (
 func (testAdapter) ID() string          { return "test" }
 func (testAdapter) DisplayName() string { return "Test" }
 func (testAdapter) Capabilities() adapter.Capabilities {
-	return adapter.Capabilities{ActivityState: true}
+	return adapter.Capabilities{ActivityState: true, InitialImages: true}
 }
 func (testAdapter) Detect(context.Context) adapter.Detection {
 	return adapter.Detection{Available: true, Path: "/bin/sh"}
@@ -52,7 +53,7 @@ func (testAdapter) Launch(_ context.Context, req adapter.LaunchRequest) (*adapte
 	}
 	return &adapter.LaunchSpec{
 		Argv:      []string{"/bin/sh", "-c", script},
-		Env:       map[string]string{"TEST_TRUST_DIR": req.TrustDir},
+		Env:       map[string]string{"TEST_TRUST_DIR": req.TrustDir, "TEST_IMAGES": strings.Join(req.Images, "\n")},
 		SessionID: "sess-" + req.AgentID,
 	}, nil
 }

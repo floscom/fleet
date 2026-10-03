@@ -43,18 +43,21 @@ func TestLaunch(t *testing.T) {
 	tests := []struct {
 		name   string
 		prompt string
+		images []string
 		extra  []string
 		tail   []string
 	}{
-		{"no prompt", "", nil, []string{"--model", "opus"}},
-		{"prompt and extra", "fix the tests", []string{"--effort", "high"},
+		{"no prompt", "", nil, nil, []string{"--model", "opus"}},
+		{"prompt and extra", "fix the tests", nil, []string{"--effort", "high"},
 			[]string{"--model", "opus", "--effort", "high", "--", "fix the tests"}},
-		{"dash prompt", "-v is broken", nil, []string{"--model", "opus", "--", "-v is broken"}},
+		{"dash prompt", "-v is broken", nil, nil, []string{"--model", "opus", "--", "-v is broken"}},
+		{"images", "what changed?", []string{"/s/a.png", "/s/b.jpg"}, nil,
+			[]string{"--model", "opus", "--", "what changed? @/s/a.png @/s/b.jpg"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			spec, err := a.Launch(context.Background(), adapter.LaunchRequest{
-				AgentID: "a1", Cwd: "/work", Prompt: tt.prompt, ExtraArgs: tt.extra,
+				AgentID: "a1", Cwd: "/work", Prompt: tt.prompt, Images: tt.images, ExtraArgs: tt.extra,
 				FleetBinary: "/usr/bin/fleet", StateDir: state,
 			})
 			if err != nil {

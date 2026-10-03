@@ -5,7 +5,7 @@ package web
 // to other fleets holding the same fleet key (see peers.go).
 //
 //	GET  /api/agents                  every agent, finished ones included
-//	POST /api/agents                  start one
+//	POST /api/agents                  start one, images attached to its prompt
 //	GET  /api/agents/{id}/chat        its conversation (see serveChat)
 //	GET  /api/agents/{id}/screen      its terminal screen, as text
 //	POST /api/agents/{id}/input       attach images, type text and/or press keys (see apiInput)
@@ -44,8 +44,8 @@ const (
 	maxKeys = 32
 	// maxImages caps the images of one input request.
 	maxImages = 10
-	// maxInputBody caps an input request's body, images included (each
-	// image is limited again by the daemon).
+	// maxInputBody caps the body of an input or start request, images
+	// included (each image is limited again by the daemon).
 	maxInputBody = 40 << 20
 	// modelTimeout bounds switching a session's model: the daemon types
 	// into its terminal and waits for each step to show.
@@ -120,18 +120,23 @@ func (s *Server) apiAgents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiRunAgent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Adapter   string `json:"adapter"`
-		Root      string `json:"root"`
-		Path      string `json:"path"`
-		Prompt    string `json:"prompt"`
-		Name      string `json:"name"`
-		Branch    string `json:"branch"`
-		Isolation string `json:"isolation"` // "", "worktree" or "pinned"
-		Sandbox   string `json:"sandbox"`   // "", "docker" or "none"
-		Model     string `json:"model"`     // "" for the CLI's default
-		Effort    string `json:"effort"`    // "" for the CLI's default
+		Adapter   string   `json:"adapter"`
+		Root      string   `json:"root"`
+		Path      string   `json:"path"`
+		Prompt    string   `json:"prompt"`
+		Name      string   `json:"name"`
+		Branch    string   `json:"branch"`
+		Isolation string   `json:"isolation"` // "", "worktree" or "pinned"
+		Sandbox   string   `json:"sandbox"`   // "", "docker" or "none"
+		Model     string   `json:"model"`     // "" for the CLI's default
+		Effort    string   `json:"effort"`    // "" for the CLI's default
+		Images    [][]byte `json:"images"`    // attached to the prompt
 	}
-	if !decode(w, r, &req) {
+	if !decodeMax(w, r, &req, maxInputBody) {
+		return
+	}
+	if len(req.Images) > maxImages {
+		writeError(w, http.StatusBadRequest, "too many images (at most "+strconv.Itoa(maxImages)+")")
 		return
 	}
 	iso, ok := map[string]fleetv1.Isolation{
@@ -161,6 +166,7 @@ func (s *Server) apiRunAgent(w http.ResponseWriter, r *http.Request) {
 		Name: strings.TrimSpace(req.Name), Branch: strings.TrimSpace(req.Branch),
 		Prompt: req.Prompt, Isolation: iso, Sandbox: sb,
 		Model: strings.TrimSpace(req.Model), Effort: strings.TrimSpace(req.Effort),
+		Images: req.Images,
 	})
 	if err != nil {
 		s.writeSourceError(w, err)
@@ -481,9 +487,9 @@ func decodeMax(w http.ResponseWriter, r *http.Request, v any, limit int64) bool 
 }
 
 // bodyLimit is the largest request body accepted for an API path: input
-// requests carry images.
+// and start requests carry images.
 func bodyLimit(path string) int64 {
-	if strings.HasSuffix(path, "/input") {
+	if strings.HasSuffix(path, "/input") || strings.HasSuffix(path, "/agents") {
 		return maxInputBody
 	}
 	return maxBody
