@@ -202,10 +202,12 @@
   function agentRow({ a, host }) {
     const st = stateOf(a);
     const done = isFinished(a);
+    const key = agentKey(host, a.id);
     const li = h('li', admin
-      ? 'relative flex cursor-pointer flex-col gap-1.5 px-4 py-3 transition-colors hover:bg-ink-850 sm:flex-row sm:gap-3'
+      ? 'relative flex cursor-pointer touch-pan-y flex-col gap-1.5 px-4 py-3 transition-colors hover:bg-ink-850 sm:flex-row sm:gap-3'
       : 'relative flex flex-col gap-1.5 px-4 py-3 transition-colors hover:bg-ink-850 sm:flex-row sm:gap-3');
     li.dataset.id = a.id;
+    li.dataset.key = key;
     li.append(h('span', 'absolute inset-y-2 left-0 w-0.5 rounded-r ' + st.edge));
     if (admin) li.addEventListener('click', (ev) => {
       if (!ev.target.closest('button') && !getSelection().toString()) openChat(host, a.id, a);
@@ -281,7 +283,171 @@
     }
 
     li.append(body, side);
-    return flash(li, 'agent:' + agentKey(host, a.id));
+    if (admin) {
+      li.append(swipeAction(host, a));
+      if (swipe.open === key) li.style.translate = `${-SWIPE_W}px 0`;
+    }
+    return flash(li, 'agent:' + key);
+  }
+
+  // endAction is what ending agent a does: a live session is archived
+  // (killed, kept under History with its chat and files), a finished one
+  // deleted (forgotten, and its worktree or clone removed unless it holds
+  // work that would be lost; a worktree's branch stays).
+  function endAction(a) {
+    const iso = a.isolation === 'worktree' || a.isolation === 'clone' ? a.isolation : '';
+    return isFinished(a)
+      ? { label: 'Delete', busy: 'Deleting…', forget: true,
+        note: 'It leaves History' + (iso ? `; its ${iso} is removed unless it holds unsaved work.` : '.') }
+      : { label: 'Archive', busy: 'Archiving…', forget: false,
+        note: 'The agent is ended and moves to History; its chat and files are kept.' };
+  }
+
+  // endAgent archives or deletes agent id on machine host (see endAction).
+  // It returns {agent, forgot}, or null when it failed.
+  async function endAgent(host, id, a) {
+    const act = endAction(a || {});
+    const name = (a && a.name) || id;
+    const base = host ? `/api/hosts/${encodeURIComponent(host)}/agents/` : '/api/agents/';
+    try {
+      const r = await api('POST', base + encodeURIComponent(id) + '/stop', act.forget ? { forget: true, removeWorktree: true } : {});
+      const rem = host && S.remote.get(host);
+      if (act.forget) {
+        if (rem) rem.agents.delete(id);
+        else if (!host) S.agents.delete(id);
+        if (r && r.worktreeKept) toast(`deleted ${name}; kept ${(a && a.cwd) || 'its worktree'}: ${r.reason}`, 'warn');
+        else toast(`deleted ${name}`);
+      } else {
+        if (rem && r && r.agent) rem.agents.set(id, r.agent);
+        toast(`archived ${name}`);
+      }
+      invalidate('agents');
+      return { agent: r && r.agent, forgot: act.forget };
+    } catch (e) {
+      toast(`could not ${act.label.toLowerCase()} ${name}: ${e.message}`, 'error');
+      return null;
+    }
+  }
+
+  // ------------------------------------------------------------ row swipes
+  //
+  // On a touch screen an agent row swiped to the left uncovers its end
+  // action (Archive or Delete, see endAction), done by a tap on it. One
+  // row is open at a time; a tap elsewhere or a scroll closes it. The
+  // agent lists are not re-rendered while a finger drags a row.
+
+  const SWIPE_W = 96; // px, the width of the action (w-24)
+  const swipe = {
+    open: '', // agent key of the open row
+    g: null, // the gesture: {li, key, id, x0, y0, base, x, drag}
+    tapClose: false, // the finger came down while a row was open
+    quiet: 0, // clicks are dropped until then: they end a gesture
+    stale: false, // a render was skipped during a drag
+  };
+
+  function swipeAction(host, a) {
+    const act = endAction(a);
+    const b = h('button', act.forget
+      ? 'absolute inset-y-0 left-full w-24 bg-rose-600 text-xs font-semibold text-white disabled:opacity-60'
+      : 'absolute inset-y-0 left-full w-24 bg-amber-500 text-xs font-semibold text-ink-950 disabled:opacity-60',
+    act.label);
+    b.type = 'button';
+    b.tabIndex = -1; // Archive and Delete are in the session for keyboards
+    b.dataset.swipeAction = '';
+    b.setAttribute('aria-label', `${act.label} ${a.name || a.id}`);
+    b.addEventListener('click', async () => {
+      b.disabled = true;
+      b.textContent = act.busy;
+      await endAgent(host, a.id, a);
+      if (swipe.open === agentKey(host, a.id)) closeSwipe();
+    });
+    return b;
+  }
+
+  const swipeRow = (key) => document.querySelector(`li[data-key="${CSS.escape(key)}"]`);
+  const swipeEase = () => (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'translate 200ms ease-out');
+
+  function setSwipe(li, x, animate) {
+    li.style.transition = animate ? swipeEase() : 'none';
+    li.style.translate = x ? `${x}px 0` : '';
+  }
+
+  function closeSwipe() {
+    const li = swipe.open && swipeRow(swipe.open);
+    swipe.open = '';
+    if (li) setSwipe(li, 0, true);
+  }
+
+  function wireSwipe() {
+    // Capture: before the lists' handlers and the row's click.
+    document.addEventListener('pointerdown', (ev) => {
+      swipe.tapClose = !!swipe.open && !ev.target.closest(`li[data-key="${CSS.escape(swipe.open)}"] [data-swipe-action]`);
+    }, true);
+    document.addEventListener('click', (ev) => {
+      if (Date.now() >= swipe.quiet) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+    }, true);
+
+    const down = (ev) => {
+      if (ev.pointerType !== 'touch' || !ev.isPrimary || !admin) return;
+      const li = ev.target.closest('li[data-key]');
+      if (!li || ev.target.closest('[data-swipe-action]')) return;
+      swipe.g = { li, key: li.dataset.key, id: ev.pointerId, x0: ev.clientX, y0: ev.clientY,
+        base: swipe.open === li.dataset.key ? -SWIPE_W : 0, x: 0, drag: false };
+    };
+    const move = (ev) => {
+      const g = swipe.g;
+      if (!g || ev.pointerId !== g.id) return;
+      const dx = ev.clientX - g.x0, dy = ev.clientY - g.y0;
+      if (!g.drag) {
+        if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) return end(ev); // a scroll
+        if (Math.abs(dx) < 10) return;
+        g.drag = true;
+        g.li.setPointerCapture(g.id);
+        if (swipe.open && swipe.open !== g.key) closeSwipe();
+      }
+      // Past the action the row follows the finger at half speed.
+      let x = Math.min(0, g.base + dx);
+      if (x < -SWIPE_W) x = -SWIPE_W + (x + SWIPE_W) / 2;
+      g.x = x;
+      setSwipe(g.li, x, false);
+    };
+    const end = (ev) => {
+      const g = swipe.g;
+      if (!g || ev.pointerId !== g.id) return;
+      swipe.g = null;
+      if (g.drag) {
+        swipe.quiet = Date.now() + 250;
+        const open = ev.type === 'pointerup' && g.x < -SWIPE_W / 2;
+        swipe.open = open ? g.key : '';
+        setSwipe(g.li, open ? -SWIPE_W : 0, true);
+      } else if (swipe.tapClose) {
+        // A tap or scroll beside the open row only closes it.
+        if (ev.type === 'pointerup') swipe.quiet = Date.now() + 250;
+        closeSwipe();
+      }
+      swipe.tapClose = false;
+      if (swipe.stale) {
+        swipe.stale = false;
+        invalidate('agents');
+      }
+    };
+    for (const ul of [$('agents-live'), $('agents-history')]) {
+      ul.addEventListener('pointerdown', down);
+      ul.addEventListener('pointermove', move);
+      ul.addEventListener('pointerup', end);
+      ul.addEventListener('pointercancel', end);
+    }
+    // A tap or scroll anywhere else closes the open row too.
+    const outside = (ev) => {
+      if (swipe.g || !swipe.tapClose) return;
+      swipe.tapClose = false;
+      if (ev.type === 'pointerup') swipe.quiet = Date.now() + 250;
+      closeSwipe();
+    };
+    document.addEventListener('pointerup', outside);
+    document.addEventListener('pointercancel', outside);
   }
 
   // agentKey identifies an agent across machines.
@@ -363,7 +529,12 @@
   // ------------------------------------------------------------- renderers
 
   function renderAgents() {
+    if (swipe.g && swipe.g.drag) {
+      swipe.stale = true;
+      return;
+    }
     const every = allAgents();
+    if (swipe.open && !every.some(({ a, host }) => agentKey(host, a.id) === swipe.open)) swipe.open = '';
     renderFolderFilter(every);
     const all = agentFolder ? every.filter((x) => folderOf(x.a) === agentFolder) : every;
     const live = all.filter((x) => !isFinished(x.a)).sort(({ a: x }, { a: y }) =>
@@ -4065,17 +4236,19 @@
     renderChatStop();
   }
 
-  // renderChatStop draws Stop, and its confirmation in a bar under the
-  // header rather than in Stop's place, where a double tap would land on it.
+  // renderChatStop draws Archive (a live session) or Delete (a finished
+  // one), and its confirmation in a bar under the header rather than in
+  // the button's place, where a double tap would land on it.
   function renderChatStop() {
     const box = $('chat-stop-box');
     const bar = $('chat-confirm');
-    if (!chatLive()) {
+    if (!chat.agent) {
       box.replaceChildren();
       bar.hidden = true;
       return;
     }
-    const b = h('button', 'touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-2 py-1 text-xs font-medium text-zinc-300 hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-200 aria-expanded:border-rose-500/40 aria-expanded:bg-rose-500/10 aria-expanded:text-rose-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400', 'Stop');
+    const act = endAction(chat.agent);
+    const b = h('button', 'touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-2 py-1 text-xs font-medium text-zinc-300 hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-200 aria-expanded:border-rose-500/40 aria-expanded:bg-rose-500/10 aria-expanded:text-rose-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400', act.label);
     b.type = 'button';
     b.setAttribute('aria-expanded', String(chat.confirmStop));
     b.setAttribute('aria-controls', 'chat-confirm');
@@ -4093,30 +4266,27 @@
       chat.confirmStop = false;
       renderChatStop();
     });
-    const yes = h('button', 'touch:min-h-11 rounded-md border border-rose-500/40 bg-rose-500/15 px-3 py-1 text-xs font-medium text-rose-200 hover:bg-rose-500/25 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-rose-400', chat.stopping ? 'Stopping…' : 'Stop session');
+    const yes = h('button', 'touch:min-h-11 rounded-md border border-rose-500/40 bg-rose-500/15 px-3 py-1 text-xs font-medium text-rose-200 hover:bg-rose-500/25 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-rose-400', chat.stopping ? act.busy : act.label + ' session');
     yes.type = 'button';
     yes.disabled = chat.stopping;
     yes.dataset.focus = 'chat-stop-yes';
     yes.addEventListener('click', stopChat);
     bar.replaceChildren(
-      h('p', 'min-w-48 flex-1 text-xs text-rose-100/90', h('span', 'font-semibold', 'Stop this session?'), ' The agent is killed; its files are kept.'),
+      h('p', 'min-w-48 flex-1 text-xs text-rose-100/90', h('span', 'font-semibold', act.label + ' this session?'), ' ' + act.note),
       h('div', 'ml-auto flex items-center gap-2', keep, yes));
   }
 
   async function stopChat() {
     const seq = chat.seq;
+    const { host, id } = chat;
     chat.stopping = true;
     renderChatStop();
-    try {
-      const r = await api('POST', chatAPI('stop'), {});
-      if (seq === chat.seq && r && r.agent) chatAgent(chat.host, r.agent);
-      toast(`stopped ${(r && r.agent && r.agent.name) || chat.id}`);
-    } catch (e) {
-      toast(`could not stop: ${e.message}`, 'error');
-    }
+    const done = await endAgent(host, id, chat.agent);
     if (seq !== chat.seq) return;
     chat.stopping = false;
     chat.confirmStop = false;
+    if (done && done.forgot) return closeChat();
+    if (done && done.agent) chatAgent(host, done.agent);
     renderChatHead();
     renderChatInput();
   }
@@ -5447,6 +5617,64 @@
     });
   }
 
+  // Swiping the session to the right on a touch screen does what Esc
+  // does: steps back from a workflow agent, or closes it. The swipe starts
+  // anywhere but in a text field or a box scrolled sideways, which the
+  // finger scrolls back instead.
+  function wireChatSwipe() {
+    const dlg = $('chat');
+    let g = null; // {el, x0, y0, dx, on, t, v}
+    const scrolledLeft = (el) => {
+      for (; el && el !== dlg; el = el.parentElement) if (el.scrollLeft > 0) return true;
+      return false;
+    };
+    dlg.addEventListener('touchstart', (ev) => {
+      g = null;
+      if (ev.touches.length !== 1 || !touch()) return;
+      const t = ev.touches[0];
+      if (ev.target.closest('input, textarea, select, [contenteditable]') || scrolledLeft(ev.target)) return;
+      g = { el: chat.view === 'sub' ? $('sub-view') : dlg, x0: t.clientX, y0: t.clientY, dx: 0, on: false, t: ev.timeStamp, v: 0 };
+    }, { passive: true });
+    dlg.addEventListener('touchmove', (ev) => {
+      if (!g) return;
+      const t = ev.touches[0];
+      const dx = t.clientX - g.x0, dy = t.clientY - g.y0;
+      if (!g.on) {
+        // Up, down or left: not this gesture. The page may scroll already.
+        if (Math.abs(dy) > 10 || dx < -10 || !ev.cancelable) return (g = null);
+        if (dx < 12 || dx < 2 * Math.abs(dy)) return;
+        g.on = true;
+        g.el.style.transition = 'none';
+      }
+      ev.preventDefault();
+      const x = Math.max(0, dx);
+      g.v = (x - g.dx) / Math.max(1, ev.timeStamp - g.t); // px/ms
+      g.t = ev.timeStamp;
+      g.dx = x;
+      g.el.style.translate = `${x}px 0`;
+    }, { passive: false });
+    const end = (ev) => {
+      const s = g;
+      g = null;
+      if (!s || !s.on) return;
+      const w = s.el.getBoundingClientRect().width;
+      const go = ev.type === 'touchend' && (s.dx > w / 3 || (s.dx > 40 && s.v > 0.5));
+      const done = () => {
+        s.el.style.transition = '';
+        s.el.style.translate = '';
+        if (!go) return;
+        if (s.el === dlg) closeChat();
+        else setView('wf');
+      };
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) return done();
+      s.el.style.transition = 'translate 180ms ease-out';
+      s.el.style.translate = go ? `${w}px 0` : '';
+      setTimeout(done, 190);
+    };
+    dlg.addEventListener('touchend', end);
+    dlg.addEventListener('touchcancel', end);
+  }
+
   // Touch feedback. Safari has no navigator.vibrate, but it ticks the
   // Taptic Engine when the user toggles a switch checkbox (<input switch>),
   // also through its label. Since iOS 26.5 a label.click() from script no
@@ -5562,6 +5790,8 @@
   wireRoots();
   wireKeys();
   wireTouch();
+  wireSwipe();
+  wireChatSwipe();
   // A `fleet web` link opened in a tab that already shows the dashboard.
   window.addEventListener('hashchange', () => {
     if (takeLinkToken()) checkSession(true);

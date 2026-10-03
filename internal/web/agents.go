@@ -12,7 +12,7 @@ package web
 //	GET  /api/agents/{id}/image       an image of its conversation
 //	POST /api/agents/{id}/answer      answer the questions it asks
 //	POST /api/agents/{id}/model       switch its model and/or effort
-//	POST /api/agents/{id}/stop        kill it
+//	POST /api/agents/{id}/stop        kill it; forget drops it from the list too
 
 import (
 	"context"
@@ -175,16 +175,20 @@ func (s *Server) apiRunAgent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]Agent{"agent": agentOf(a)})
 }
 
+// apiStopAgent ends a session (the dashboard's Archive) and with forget
+// also removes the agent from the list (Delete), which works for finished
+// agents too.
 func (s *Server) apiStopAgent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		RemoveWorktree bool `json:"removeWorktree"`
 		Force          bool `json:"force"`
+		Forget         bool `json:"forget"`
 	}
 	if !decode(w, r, &req) {
 		return
 	}
 	resp, err := s.opts.Source.StopAgent(r.Context(), &fleetv1.KillAgentRequest{
-		Agent: r.PathValue("id"), RemoveWorktree: req.RemoveWorktree, Force: req.Force,
+		Agent: r.PathValue("id"), RemoveWorktree: req.RemoveWorktree, Force: req.Force, Forget: req.Forget,
 	})
 	if err != nil {
 		s.writeSourceError(w, err)

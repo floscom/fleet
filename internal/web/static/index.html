@@ -140,14 +140,14 @@
       <!-- Agents in more than one folder: one button per folder to show only its agents. -->
       <div id="agents-folders" role="group" aria-label="Filter agents by folder" hidden class="-mt-1 flex gap-1.5 overflow-x-auto px-4 pb-2.5 max-sm:[scrollbar-width:none] sm:flex-wrap"></div>
       </div>
-      <ul id="agents-live" class="divide-y divide-ink-700/70"></ul>
+      <ul id="agents-live" class="divide-y divide-ink-700/70 overflow-x-clip"></ul>
       <details id="history" class="group border-t border-ink-700">
         <summary class="touch:min-h-11 flex cursor-pointer list-none items-center gap-2 px-4 py-2.5 text-xs font-medium text-zinc-500 hover:text-zinc-300 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400">
           <span class="inline-block transition-transform group-open:rotate-90 motion-reduce:transition-none">▸</span>
           <span>History</span>
           <span id="history-count" class="rounded-full bg-ink-800 px-1.5 font-mono tabular-nums text-zinc-400">0</span>
         </summary>
-        <ul id="agents-history" class="divide-y divide-ink-700/70 border-t border-ink-700/70"></ul>
+        <ul id="agents-history" class="divide-y divide-ink-700/70 overflow-x-clip border-t border-ink-700/70"></ul>
       </details>
     </section>
 

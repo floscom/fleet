@@ -116,6 +116,9 @@ func TestRunStopInput(t *testing.T) {
 	if len(src.stops) != 1 || src.stops[0].Agent != "a1" || !src.stops[0].RemoveWorktree || src.stops[0].Force {
 		t.Fatalf("stop request %v", src.stops)
 	}
+	if code := api(t, ts, "POST", "/api/agents/a1/stop", tok, `{"forget":true}`, &stop); code != 200 || len(src.stops) != 2 || !src.stops[1].Forget {
+		t.Fatalf("forget: %d %v", code, src.stops)
+	}
 }
 
 // lineParser makes each line a note, for chat tests.
