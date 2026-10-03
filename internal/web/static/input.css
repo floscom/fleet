@@ -93,6 +93,29 @@
       opacity: 0.7;
     }
   }
+
+  /* iOS haptics (app.js): a clear label over the control takes the tap
+     and toggles a hidden switch inside it. The switch is never under the
+     finger, or a drag starting there would not scroll. */
+  [data-haptic-host],
+  [data-haptic-host] :is(input, select, textarea) {
+    position: relative;
+  }
+  [data-haptic] {
+    position: absolute;
+    inset: 0;
+    touch-action: manipulation;
+  }
+  [data-haptic] > input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    visibility: hidden;
+  }
+  :disabled > [data-haptic] {
+    display: none;
+  }
 }
 
 @layer components {

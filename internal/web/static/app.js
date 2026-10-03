@@ -5109,34 +5109,107 @@
     });
   }
 
-  // Touch feedback. Safari has no navigator.vibrate, but since iOS 18 it
-  // ticks the Taptic Engine when a switch checkbox (<input switch>) is
-  // toggled, also through a click on its label: so a tap on anything
-  // clickable clicks a hidden one. Elsewhere navigator.vibrate stands in.
-  // A label click comes back as a click on its input: one tick for both.
+  // Touch feedback. Safari has no navigator.vibrate, but it ticks the
+  // Taptic Engine when the user toggles a switch checkbox (<input switch>),
+  // also through its label. Since iOS 26.5 a label.click() from script no
+  // longer does, only a real tap: so on iOS each control gets a clear label
+  // over it with a hidden switch inside (see input.css), the way
+  // github.com/tijnjh/ios-haptics does. The tap lands on the label and
+  // bubbles to the control's handlers as before, but the label's default
+  // action (toggling the switch) displaces the control's own: links,
+  // summaries and submit buttons get theirs back below. Elsewhere
+  // navigator.vibrate stands in.
   const TAPPABLE = 'button, a[href], summary, select, input[type="checkbox"], input[type="radio"], .cursor-pointer';
   const TYPING = 'textarea, input:not([type="checkbox"]):not([type="radio"])';
-  function wireTouch() {
-    // Without a touch listener iOS Safari skips :active (see input.css).
-    document.addEventListener('touchstart', () => {}, { passive: true });
-    const tick = h('label', 'hidden');
-    tick.setAttribute('aria-hidden', 'true');
+  const HAPTIC_HOST = 'button, a[href], summary, .cursor-pointer:not(label, input, select)';
+  const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+  function addHaptic(el) {
+    for (const c of el.children) if (c.hasAttribute('data-haptic')) return;
     const sw = h('input');
     sw.type = 'checkbox';
     sw.setAttribute('switch', '');
     sw.tabIndex = -1;
-    tick.append(sw);
-    document.body.append(tick);
+    // The label passes its click on to the switch: keep that copy from
+    // reaching the control's handlers a second time.
+    sw.addEventListener('click', (ev) => ev.stopPropagation());
+    const lab = h('label', '', sw);
+    lab.setAttribute('data-haptic', '');
+    lab.setAttribute('aria-hidden', 'true');
+    el.setAttribute('data-haptic-host', '');
+    // First, so that controls nested in el paint over its label.
+    el.prepend(lab);
+  }
+
+  function wireHaptics() {
+    const scan = (root) => {
+      if (root.matches(HAPTIC_HOST)) addHaptic(root);
+      for (const el of root.querySelectorAll(HAPTIC_HOST)) addHaptic(el);
+    };
+    scan(document.body);
+    // New controls, and controls whose content (label too) was replaced.
+    new MutationObserver((recs) => {
+      for (const r of recs) {
+        if (r.target.matches(HAPTIC_HOST)) addHaptic(r.target);
+        for (const n of r.addedNodes) if (n.nodeType === Node.ELEMENT_NODE) scan(n);
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+    // Whether the control's own default still runs differs between
+    // engines, so see after the click what it did and do the rest. A link
+    // cannot tell, so it loses its href for the click and is followed here.
+    let submits = 0;
+    document.addEventListener('submit', () => submits++, true);
+    let link = null;
+    window.addEventListener('click', (ev) => {
+      const lab = ev.target;
+      link = null;
+      if (!(lab instanceof HTMLLabelElement) || !lab.hasAttribute('data-haptic')) return;
+      const el = lab.parentElement;
+      if (el.matches('a[href]')) {
+        link = el.getAttribute('href');
+        el.removeAttribute('href');
+        const href = link;
+        setTimeout(() => el.setAttribute('href', href));
+        return;
+      }
+      const details = el.matches('summary') && el.parentElement.matches('details') && el.parentElement;
+      const open = details && details.open;
+      const n = submits;
+      setTimeout(() => {
+        if (ev.defaultPrevented) return;
+        if (details) {
+          if (details.open === open) details.open = !open;
+        } else if (el.matches('button') && el.type === 'submit' && el.form && submits === n) {
+          el.form.requestSubmit(el);
+        }
+      });
+    }, true);
+    // On window, so after the page's handlers: a prevented default stays
+    // so. Still in the tap, so a new tab is no popup.
+    window.addEventListener('click', (ev) => {
+      const href = link;
+      link = null;
+      if (href == null || ev.defaultPrevented) return;
+      if (ev.target.parentElement.target === '_blank') window.open(href, '_blank', 'noopener,noreferrer');
+      else location.assign(href);
+    });
+  }
+
+  function wireTouch() {
+    // Without a touch listener iOS Safari skips :active (see input.css).
+    document.addEventListener('touchstart', () => {}, { passive: true });
+    if (IOS) return wireHaptics();
+    if (!navigator.vibrate) return;
     let last = 0;
     document.addEventListener('click', (ev) => {
-      if (tick.contains(ev.target) || ev.target.closest(TYPING)) return;
+      if (ev.target.closest(TYPING)) return;
       const el = ev.target.closest(TAPPABLE);
       if (!el || el.matches(':disabled') || matchMedia('(pointer: fine)').matches) return;
+      // A label click comes back as a click on its input: one tick for both.
       const now = Date.now();
       if (now - last < 80) return;
       last = now;
-      if (navigator.vibrate) navigator.vibrate(8);
-      else tick.click();
+      navigator.vibrate(8);
     }, true);
   }
 
