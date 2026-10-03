@@ -598,7 +598,7 @@
     const s = S.server;
     if (!s) return;
     $('srv-name').textContent = s.name || s.hostname || 'fleet';
-    $('srv-version').textContent = s.version || 'dev';
+    $('srv-version').textContent = $('srv-version').title = s.version || 'dev';
     $('srv-host').textContent = s.hostname || '–';
     $('srv-platform').textContent = `${s.os || '?'}/${s.arch || '?'}`;
     $('srv-listen').textContent = (s.listen || '–') + (s.mdns ? ' · mdns' : '');
@@ -808,6 +808,7 @@
       case 'snapshotDone':
         S.snapshotDone = true;
         invalidate('agents');
+        tryOpenPending();
         break;
       default:
         // unknown message types are ignored for forward compatibility
@@ -911,6 +912,8 @@
     }
     renderAccess();
     invalidate('roots', 'agents', 'peers');
+    syncPush();
+    tryOpenPending();
     scheduleRemote(0);
     scheduleWorkflows(0);
     scheduleUsage(0);
@@ -950,6 +953,8 @@
   }
 
   function signOut() {
+    // The api call takes the token before it goes.
+    if (push.on) stopPush();
     setToken('');
     setAdmin(false);
     toast('signed out: this browser is read-only again');
@@ -970,10 +975,154 @@
     $('unlock-host').textContent = where;
     $('unlock-open').hidden = admin;
     $('signout').hidden = !admin;
+    renderNotify();
     $('roots-add').hidden = !admin;
     $('agents-new').hidden = !admin;
     $('roots-hint').hidden = admin;
     $('footer-mode').textContent = admin ? 'admin' : 'read-only view';
+  }
+
+  // ------------------------------------------------------------------- push
+  //
+  // Notifications when an agent needs input, finishes or fails (push.go).
+  // Browsers offer push to secure contexts only, and iOS only to the web
+  // app added to the Home Screen, so the button says what is missing
+  // instead of failing. Subscribing needs the admin token; the service
+  // worker (sw.js) shows the notifications.
+
+  const PUSH_OK = window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const push = { key: '', on: false, busy: false, reg: null, endpoint: '' };
+  // openPending is an agent to show once it is known: a tapped notification.
+  let openPending = '';
+
+  function pushHint() {
+    if (!window.isSecureContext) return `Notifications need HTTPS: open this dashboard over https (e.g. tailscale serve), not http://${location.host}.`;
+    if (IOS && !navigator.standalone) return 'On iPhone, add the dashboard to the Home Screen (Share › Add to Home Screen) and open it from there to get notifications.';
+    return 'This browser does not support push notifications.';
+  }
+
+  function renderNotify() {
+    const b = $('notify');
+    b.hidden = !admin;
+    b.disabled = push.busy;
+    b.setAttribute('aria-pressed', String(push.on));
+    b.setAttribute('aria-label', push.on ? 'notifications on' : 'notifications off');
+    b.querySelector('svg').setAttribute('fill', push.on ? 'currentColor' : 'none');
+    // Pill-sized like its neighbours; ::after widens the tap area on touch.
+    b.className = 'relative inline-flex items-center rounded-full border px-2 py-1 pointer-coarse:after:absolute pointer-coarse:after:-inset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 ' +
+      (push.on ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300 hover:bg-emerald-400/20' : 'border-ink-600 bg-ink-850 text-zinc-500 hover:bg-ink-800 hover:text-zinc-200');
+    b.title = !PUSH_OK ? pushHint()
+      : push.on ? 'Notifications on: this device hears when an agent needs you, finishes or fails. Click to turn them off.'
+      : 'Notifications off: click to hear on this device when an agent needs you, finishes or fails.';
+  }
+
+  // b64url decodes base64url into bytes.
+  function b64url(str) {
+    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((str.length + 3) % 4));
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  }
+
+  // sameKey reports whether sub was made for the daemon's VAPID key.
+  function sameKey(sub, key) {
+    const k = sub.options && sub.options.applicationServerKey;
+    if (!k) return true; // not exposed: assume it is ours
+    const a = new Uint8Array(k);
+    const b = b64url(key);
+    return a.length === b.length && a.every((x, i) => x === b[i]);
+  }
+
+  // syncPush registers the service worker and checks this browser's
+  // subscription with the daemon: one the daemon lost is sent again, one
+  // made for another key is dropped.
+  async function syncPush() {
+    if (!PUSH_OK || !admin) return renderNotify();
+    try {
+      await navigator.serviceWorker.register('/sw.js');
+      push.reg = await navigator.serviceWorker.ready;
+      const sub = await push.reg.pushManager.getSubscription();
+      const r = await api('GET', '/api/push' + (sub ? '?endpoint=' + encodeURIComponent(sub.endpoint) : ''));
+      push.key = r.key;
+      push.on = false;
+      if (sub && sameKey(sub, r.key) && Notification.permission === 'granted') {
+        if (!r.subscribed) await api('POST', '/api/push/subscribe', sub.toJSON());
+        Object.assign(push, { on: true, endpoint: sub.endpoint });
+      } else if (sub) {
+        await sub.unsubscribe();
+      }
+    } catch (e) {
+      // e.g. 404: notifications are off on this daemon
+    }
+    renderNotify();
+  }
+
+  async function toggleNotify() {
+    if (!PUSH_OK) return toast(pushHint(), 'warn');
+    if (push.busy) return;
+    push.busy = true;
+    renderNotify();
+    try {
+      if (push.on) {
+        await stopPush();
+        toast('notifications off on this device');
+      } else {
+        if (!push.reg || !push.key) throw new Error('not ready yet, try again in a moment');
+        // Straight from the click: Safari asks for permission only from
+        // a user gesture.
+        const sub = await push.reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64url(push.key) });
+        await api('POST', '/api/push/subscribe', sub.toJSON());
+        Object.assign(push, { on: true, endpoint: sub.endpoint });
+        try {
+          await api('POST', '/api/push/test', { endpoint: sub.endpoint });
+        } catch (e) {
+          // The push service refused this subscription: the daemon dropped it.
+          if (e.status === 410) await stopPush();
+          throw e;
+        }
+        toast('notifications on: a test notification is on its way');
+      }
+    } catch (e) {
+      if (window.Notification && Notification.permission === 'denied') toast('notifications are blocked for this site in the browser or system settings', 'warn');
+      else toast(`notifications: ${e.message}`, 'error');
+    }
+    push.busy = false;
+    renderNotify();
+  }
+
+  // stopPush ends this browser's subscription here and at the push service.
+  async function stopPush() {
+    const endpoint = push.endpoint;
+    push.on = false;
+    push.endpoint = '';
+    if (endpoint) await api('POST', '/api/push/unsubscribe', { endpoint }).catch(() => {});
+    const sub = push.reg && (await push.reg.pushManager.getSubscription());
+    if (sub) await sub.unsubscribe();
+  }
+
+  // openFromPush shows the agent of a tapped notification once the agent
+  // list and admin rights are in.
+  function openFromPush(id) {
+    openPending = id || '';
+    tryOpenPending();
+  }
+
+  function tryOpenPending() {
+    if (!openPending || !admin || !S.snapshotDone) return;
+    const a = S.agents.get(openPending);
+    openPending = '';
+    if (a) openChat('', a.id, a);
+  }
+
+  function wirePush() {
+    $('notify').addEventListener('click', toggleNotify);
+    const id = new URLSearchParams(location.search).get('agent');
+    if (id) {
+      history.replaceState(null, '', location.pathname + location.hash);
+      openFromPush(id);
+    }
+    if (!PUSH_OK) return;
+    navigator.serviceWorker.addEventListener('message', (ev) => {
+      if (ev.data && ev.data.type === 'openAgent') openFromPush(ev.data.agent);
+    });
   }
 
   // ----------------------------------------------------------------- unlock
@@ -5406,6 +5555,7 @@
 
   linkToken = takeLinkToken();
   wireUnlock();
+  wirePush();
   wirePicker();
   wireLaunch();
   wireChat();

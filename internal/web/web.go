@@ -122,7 +122,11 @@ type Options struct {
 	// KeyPath is the fleet key file: daemons holding the same key manage
 	// each other through their dashboards (see peers.go). Empty disables it.
 	KeyPath string
-	Log     *slog.Logger
+	// PushKeyPath (the VAPID key) and PushSubsPath (the browsers'
+	// subscriptions) enable Web Push (push.go). Empty disables it.
+	PushKeyPath  string
+	PushSubsPath string
+	Log          *slog.Logger
 	// Browse defaults to discovery.Browse. Tests replace it.
 	Browse BrowseFunc
 }
@@ -140,6 +144,8 @@ type Server struct {
 	// nonces and peerHTTP serve requests between daemons (peers.go).
 	nonces   nonces
 	peerHTTP *http.Client
+	// push sends notifications; nil when disabled.
+	push *pusher
 }
 
 // CheckAddr returns an error unless addr is host:port.
@@ -167,6 +173,9 @@ func New(opts Options) (*Server, error) {
 		s.hostname = firstLabel(hn)
 	}
 	s.hub = newHub(opts.Source, opts.Browse, opts.Log)
+	if s.push = newPusher(opts.PushKeyPath, opts.PushSubsPath, opts.Log); s.push != nil {
+		s.hub.notify = s.push.notify
+	}
 	return s, nil
 }
 
@@ -425,6 +434,7 @@ type client struct {
 
 type agentEntry struct {
 	createdAtMs int64
+	state       string
 	msg         []byte
 }
 
@@ -458,6 +468,8 @@ type hub struct {
 	// carry it as "complete" so the browser does not take the LAN list
 	// arriving after a self-only list for newly added fleets.
 	browsed bool
+	// notify, if set, is told about agents that need the user (notice).
+	notify func(Notice)
 }
 
 func newHub(src Source, browse BrowseFunc, log *slog.Logger) *hub {
@@ -526,9 +538,17 @@ func (h *hub) follow(ctx context.Context, events <-chan *fleetv1.Event) {
 				seen[a.ID] = true
 			}
 			msg := encode("agent", "agent", a)
-			if prev, ok := h.agents[a.ID]; !ok || !bytes.Equal(prev.msg, msg) {
-				h.agents[a.ID] = agentEntry{createdAtMs: a.CreatedAtMs, msg: msg}
+			prev, ok := h.agents[a.ID]
+			if !ok || !bytes.Equal(prev.msg, msg) {
+				h.agents[a.ID] = agentEntry{createdAtMs: a.CreatedAtMs, state: a.State, msg: msg}
 				h.broadcastLocked(msg)
+			}
+			// Only changes seen live count: a (re)subscription's snapshot
+			// replays states the user may have seen long ago.
+			if ok && seen == nil && h.notify != nil {
+				if n, send := notice(prev.state, a); send {
+					h.notify(n)
+				}
 			}
 		case *fleetv1.Event_AgentRemoved:
 			h.removeAgentLocked(k.AgentRemoved)

@@ -218,6 +218,10 @@ func (s *Server) apiHandler() http.Handler {
 	admin.HandleFunc("GET /api/agents/{id}/workflows/{run}/agents/{sub}/image", s.apiWorkflowImage)
 	browser := http.NewServeMux()
 	browser.HandleFunc("GET /api/join", s.apiJoin)
+	browser.HandleFunc("GET /api/push", s.apiPushKey)
+	browser.HandleFunc("POST /api/push/subscribe", s.apiPushSubscribe)
+	browser.HandleFunc("POST /api/push/unsubscribe", s.apiPushUnsubscribe)
+	browser.HandleFunc("POST /api/push/test", s.apiPushTest)
 	browser.HandleFunc("/api/hosts/{id}/{rest...}", s.apiHost)
 	browser.Handle("/", admin)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -139,6 +139,7 @@ func Run(ctx context.Context, opts Options) error {
 		ws, err = web.New(web.Options{
 			Addr: webAddr, Source: wsrc, Log: d.log,
 			TokenPath: config.Path("web-token"), KeyPath: config.Path("fleet-key"),
+			PushKeyPath: config.Path("push-key"), PushSubsPath: config.Path("push.json"),
 		})
 		if err != nil {
 			return err

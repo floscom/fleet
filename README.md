@@ -380,6 +380,27 @@ Changes apply at once, rewrite `config.toml` and show up in the CLI
   image per screen size and orientation, so `make icons` draws 44 of them
   into `static/splash/` and writes their links into `index.html`.
 
+### Notifications
+
+*notify* (next to *sign out*) subscribes the browser to Web Push: the
+daemon then sends a notification when one of its agents needs input,
+finishes a turn or fails, and tapping it opens that session. It is the
+standard Push API, so it works with Safari (macOS 13+, and iOS/iPadOS
+16.4+ once the dashboard is added to the Home Screen and opened from
+there), Chrome, Edge and Firefox. No Apple developer account or relay is
+needed: the daemon signs with its own VAPID key (`~/.fleet/push-key`) and
+posts the encrypted message straight to the browser's push service
+(`*.push.apple.com`, FCM, Mozilla), so the server needs outbound HTTPS.
+Subscriptions live in `~/.fleet/push.json`; ones the push service reports
+gone are dropped.
+
+Browsers only offer push to **HTTPS** pages (or `localhost`), so the plain
+HTTP port is not enough. With Tailscale, enable HTTPS certificates for the
+tailnet and run `tailscale serve --bg 7421` on the server, then open
+`https://SERVER.TAILNET.ts.net/`. On iPhone: open that URL in Safari,
+Share › Add to Home Screen, open the app, unlock it (a Home Screen app has
+its own storage), and tap *notify*.
+
 ### Sessions in the browser
 
 With the admin link, every agent row has an **open** button (**answer** when

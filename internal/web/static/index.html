@@ -85,9 +85,10 @@
           <span id="conn-dot" class="size-2 rounded-full bg-zinc-500"></span>
           <span id="conn-text">connecting</span>
         </span>
-        <span id="srv-version" class="rounded-full border border-ink-600 bg-ink-850 px-2.5 py-1 font-mono text-xs text-zinc-400">–</span>
+        <span id="srv-version" class="max-w-28 truncate max-sm:max-w-20 rounded-full border border-ink-600 bg-ink-850 px-2.5 py-1 font-mono text-xs text-zinc-400">–</span>
         <span id="access" class="inline-flex items-center gap-1.5 rounded-full border border-ink-600 bg-ink-850 px-2.5 py-1 text-xs font-medium text-zinc-500">read-only</span>
         <button id="unlock-open" type="button" class="touch:min-h-11 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-400/20 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">unlock</button>
+        <button id="notify" type="button" hidden aria-pressed="false" aria-label="notifications" class="rounded-full border border-ink-600 bg-ink-850 px-2 py-1 text-zinc-500"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="size-4"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg></button>
         <button id="signout" type="button" hidden class="touch:min-h-11 rounded-full px-2 py-1 text-xs text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400">sign out</button>
       </div>
       <h1 id="srv-name" class="truncate font-mono text-2xl font-semibold tracking-tight text-zinc-50 sm:text-3xl">fleet</h1>
