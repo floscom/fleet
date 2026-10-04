@@ -209,8 +209,11 @@
     li.dataset.id = a.id;
     li.dataset.key = key;
     li.append(h('span', 'absolute inset-y-2 left-0 w-0.5 rounded-r ' + st.edge));
+    // By the event's path: a button's handler may have replaced the
+    // clicked node (its iOS haptic label) before the click gets here.
     if (admin) li.addEventListener('click', (ev) => {
-      if (!ev.target.closest('button') && !getSelection().toString()) openChat(host, a.id, a);
+      const onButton = ev.composedPath().some((n) => n instanceof HTMLButtonElement);
+      if (!onButton && !getSelection().toString()) openChat(host, a.id, a);
     });
 
     const body = h('div', 'min-w-0 flex-1');
@@ -4285,8 +4288,7 @@
     if (seq !== chat.seq) return;
     chat.stopping = false;
     chat.confirmStop = false;
-    if (done && done.forgot) return closeChat();
-    if (done && done.agent) chatAgent(host, done.agent);
+    if (done) return closeChat();
     renderChatHead();
     renderChatInput();
   }
