@@ -285,6 +285,11 @@ auth = ["claude", "codex"]       # share the server's logins with sandboxes (def
 network = ""                     # docker run --network; default: Docker's bridge
 args = ["--memory=8g", "--cpus=4"]   # extra docker run flags, e.g. limits
 docker = "docker"                # the docker CLI
+
+# Agents stopped by a usage limit (see "Usage limits"). Every key is optional.
+[limits]
+auto_resume = true               # resume them once the limit resets (default true)
+message = "continue"             # what is typed into the session to resume it
 ```
 
 The daemon reads `config.toml` at startup. Changes made through the CLI
@@ -403,6 +408,27 @@ tailnet and run `tailscale serve --bg 7421` on the server, then open
 `https://SERVER.TAILNET.ts.net/`. On iPhone: open that URL in Safari,
 Share › Add to Home Screen, open the app, unlock it (a Home Screen app has
 its own storage), and tap *notify*.
+
+### Usage limits
+
+When a Claude Code or Codex session stops because the account ran out of
+a plan limit (the 5-hour window, the week, ...), the daemon notices, finds
+out when the limit resets, and types `continue` into the session a minute
+after that. The agent shows *idle* with a **limit** chip (`limit 5h ·
+resumes 22:58`), its session a bar with **Resume now** and **Turn
+auto-resume off** (per agent; `[limits] auto_resume = false` turns it off
+for all), and a notification says the agent hit the limit.
+
+How it knows: Claude Code writes the refused turn to the transcript with
+the limit and its reset time (`"error":"rate_limit"`, `quotaLimits.resetsAt`).
+Codex writes the window that ran out with its `resets_at` (`token_count`),
+and its refusal (`error`, or the message on the screen). When neither says
+when it resets, the account's usage (the meters under *Fleet on the
+network*) does. Before typing, the daemon asks the account's usage again
+and waits longer if the limit is still used up; it does nothing while the
+agent is working (Claude Code can wait out a limit by itself), closes a
+dialog first (Esc), and gives up, with a notification, after 3 resumes the
+session did not react to, or 4 limits within an hour.
 
 ### Sessions in the browser
 

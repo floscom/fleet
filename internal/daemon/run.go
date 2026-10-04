@@ -40,6 +40,8 @@ const (
 
 	stateStarting   = fleetv1.AgentState_AGENT_STATE_STARTING
 	stateRunning    = fleetv1.AgentState_AGENT_STATE_RUNNING
+	stateWorking    = fleetv1.AgentState_AGENT_STATE_WORKING
+	stateIdle       = fleetv1.AgentState_AGENT_STATE_IDLE
 	stateNeedsInput = fleetv1.AgentState_AGENT_STATE_NEEDS_INPUT
 	stateExited     = fleetv1.AgentState_AGENT_STATE_EXITED
 	stateFailed     = fleetv1.AgentState_AGENT_STATE_FAILED

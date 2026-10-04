@@ -60,6 +60,35 @@ type Config struct {
 	Adapters map[string]AdapterConfig `toml:"adapter"`
 	// Sandbox configures Docker sandboxes ([sandbox]).
 	Sandbox SandboxConfig `toml:"sandbox,omitempty"`
+	// Limits configures what happens to agents stopped by a usage limit
+	// ([limits]).
+	Limits LimitsConfig `toml:"limits,omitempty"`
+}
+
+// DefaultResumeMessage is what is typed into a session to resume it once
+// the usage limit that stopped it resets.
+const DefaultResumeMessage = "continue"
+
+// LimitsConfig is the [limits] table.
+type LimitsConfig struct {
+	// AutoResume: an agent stopped by a usage limit of its account is
+	// resumed once the limit resets. Default true; the dashboard switches
+	// it per agent.
+	AutoResume *bool `toml:"auto_resume,omitempty"`
+	// Message is typed into the session to resume it. Default
+	// DefaultResumeMessage.
+	Message string `toml:"message,omitempty"`
+}
+
+// AutoResumeOn reports the effective auto_resume setting.
+func (l LimitsConfig) AutoResumeOn() bool { return l.AutoResume == nil || *l.AutoResume }
+
+// MessageOrDefault returns Message or DefaultResumeMessage.
+func (l LimitsConfig) MessageOrDefault() string {
+	if strings.TrimSpace(l.Message) == "" {
+		return DefaultResumeMessage
+	}
+	return l.Message
 }
 
 // DefaultSandboxImage is the image `fleet sandbox build` creates.

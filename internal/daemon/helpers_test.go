@@ -219,7 +219,7 @@ func (e *env) start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel, e.done = cancel, make(chan error, 1)
 	opts := Options{
-		Adapters:    adapter.NewRegistry(testAdapter{}, unavailableAdapter{}, modelAdapter{}),
+		Adapters:    adapter.NewRegistry(testAdapter{}, unavailableAdapter{}, modelAdapter{}, limitAdapter{}),
 		Version:     "test",
 		FleetBinary: "/bin/true",
 		Listen:      e.listen,

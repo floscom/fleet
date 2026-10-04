@@ -426,6 +426,27 @@ message Agent {
   Sandbox sandbox = 18;
   // Set for CLONE isolation: the repository that was cloned.
   string clone_url = 19;
+  // Set while the agent's last turn was stopped by a usage limit of its
+  // account (5-hour, weekly, ...). The agent is IDLE meanwhile.
+  UsageLimit usage_limit = 20;
+}
+
+// UsageLimit is a usage limit that stopped an agent, and when the daemon
+// resumes it.
+message UsageLimit {
+  // The window that ran out, e.g. "5h", "week"; empty if unknown.
+  string window = 1;
+  // When it resets; 0 if unknown.
+  int64 resets_at_ms = 2;
+  // The daemon types a message ("continue") into the session at
+  // resume_at_ms: shortly after the reset, or after the next check of the
+  // account's usage when the reset time is unknown. 0 while auto-resume is
+  // off for the agent, or it gave up (see detail).
+  int64 resume_at_ms = 3;
+  // Whether auto-resume is on for the agent.
+  bool auto_resume = 4;
+  // Why it is not resumed, if it is not, e.g. "auto-resume gave up after 3 tries".
+  string detail = 5;
 }
 
 message ListAgentsRequest {

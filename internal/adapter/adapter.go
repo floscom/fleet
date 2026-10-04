@@ -23,6 +23,8 @@
 //   - questions answered in a form on the dashboard: implement Asker.
 //   - images in the chat: implement TranscriptImager.
 //   - how much of the account's plan limits is used: implement Usager.
+//   - resuming sessions stopped by a usage limit once it resets: implement
+//     Limiter.
 package adapter
 
 import (
@@ -181,6 +183,36 @@ type UsageLimit struct {
 	// Percent is how much of it is used, 0-100.
 	Percent float64
 	// ResetsAt is when the window starts over; zero if unknown.
+	ResetsAt time.Time
+}
+
+// Limiter is implemented by Transcripters whose CLI ends a turn when the
+// account runs out of its plan's usage limits, and goes on with a new
+// prompt once they reset. The daemon then types a message to resume the
+// session (see config.LimitsConfig).
+type Limiter interface {
+	// LimitLine updates l from one line of a session's transcript: a turn
+	// stopped by a usage limit sets it, anything showing the session went
+	// on after it (a prompt, a reply) clears it. It is given every line, in
+	// order, starting from a zero Limit.
+	LimitLine(line []byte, l *Limit)
+}
+
+// ScreenLimiter is implemented by Limiters whose CLI may not write a turn
+// stopped by a usage limit to its transcript, but shows it on the screen.
+type ScreenLimiter interface {
+	// LimitsOnScreen counts the turns stopped by a usage limit that screen
+	// shows. One more than before means another turn was stopped.
+	LimitsOnScreen(screen string) int
+}
+
+// Limit is whether a session's last turn was stopped by a usage limit.
+type Limit struct {
+	Hit bool
+	// Window names the limit that ran out as Usage does ("5h", "week");
+	// empty if unknown.
+	Window string
+	// ResetsAt is when it resets; zero if unknown.
 	ResetsAt time.Time
 }
 

@@ -76,6 +76,12 @@ type agentRec struct {
 	// switched to from fleet, "" for the CLI's default (adapter.Modeler).
 	Model  string `json:"model,omitempty"`
 	Effort string `json:"effort,omitempty"`
+	// AutoResume switches resuming the agent after a usage limit for this
+	// agent; nil follows [limits] auto_resume.
+	AutoResume *bool `json:"auto_resume,omitempty"`
+
+	// limit is the usage limit that stopped the agent (limits.go).
+	limit *fleetv1.UsageLimit
 
 	attached int32
 	// dialogGone counts the screens in a row that showed none of Dialogs
@@ -116,6 +122,7 @@ func (a *agentRec) proto() *fleetv1.Agent {
 		AttachedClients: a.attached,
 		Sandbox:         a.sandbox(),
 		CloneUrl:        a.CloneURL,
+		UsageLimit:      a.limit,
 	}
 }
 
@@ -174,6 +181,10 @@ type manager struct {
 	// asks are the hooks waiting for answers to questions, by id (asks.go);
 	// guarded by mu.
 	asks map[string]*pendingAsk
+
+	// limits follow each live agent's session for usage limits (limits.go).
+	limitMu sync.Mutex
+	limits  map[string]*limitWatch
 }
 
 // readyLocked clears a's busy flag and stamps it with a new ready generation.

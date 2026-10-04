@@ -32,7 +32,7 @@ type payload struct {
 //	Notification idle_prompt          -> IDLE
 //	Notification permission_prompt    -> ignored (see below)
 //	Notification (other)              -> NEEDS_INPUT (message)
-//	Stop, StopFailure                 -> IDLE
+//	Stop, StopFailure                 -> IDLE (StopFailure: the error as detail)
 //	PostToolUseFailure is_interrupt   -> IDLE (Esc: no Stop hook follows)
 //	PostToolUseFailure, PermissionDenied -> WORKING (the turn goes on)
 //	SubagentStop                      -> WORKING, from that subagent
@@ -93,7 +93,11 @@ func (c *claude) HandleHook(ev adapter.HookEvent) (adapter.StateUpdate, bool) {
 		u.State = fleetv1.AgentState_AGENT_STATE_IDLE
 		u.Detail = "turn ended with an API error"
 		var msg string
-		if json.Unmarshal(p.Error, &msg) == nil && msg != "" {
+		switch {
+		case json.Unmarshal(p.Error, &msg) != nil || msg == "":
+		case msg == "rate_limit":
+			u.Detail = "Usage limit reached"
+		default:
 			u.Detail = hookcmd.Truncate(msg)
 		}
 	default:

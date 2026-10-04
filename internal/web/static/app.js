@@ -198,6 +198,31 @@
     return b;
   }
 
+  // limitClock is the time ms as the time of day, with the weekday when it
+  // is not today.
+  function limitClock(ms) {
+    const d = new Date(ms);
+    const t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return d.toDateString() === new Date().toDateString() ? t : d.toLocaleDateString([], { weekday: 'short' }) + ' ' + t;
+  }
+
+  // limitNext says what happens next to an agent a usage limit l stopped.
+  function limitNext(l) {
+    if (l.detail) return l.detail;
+    if (l.resumeAtMs) return 'resumes ' + limitClock(l.resumeAtMs);
+    if (l.resetsAtMs) return 'resets ' + limitClock(l.resetsAtMs) + ', auto-resume off';
+    return 'auto-resume off';
+  }
+
+  // limitChip marks an agent a usage limit stopped.
+  function limitChip(l) {
+    const c = chip('limit' + (l.window ? ' ' + l.window : '') + ' · ' + limitNext(l),
+      'inline-flex max-w-full items-center truncate rounded border border-orange-500/30 bg-orange-500/10 px-1.5 py-px font-mono text-[11px] text-orange-300');
+    c.title = 'A usage limit' + (l.window ? ` (${l.window})` : '') + ' stopped this agent'
+      + (l.resetsAtMs ? '; it resets ' + new Date(l.resetsAtMs).toLocaleString() : '');
+    return c;
+  }
+
   // agentRow is the row of agent a, running on machine host ('' = here).
   function agentRow({ a, host }) {
     const st = stateOf(a);
@@ -223,6 +248,7 @@
     const name = h('span', done ? 'truncate font-mono text-[13px] font-semibold text-zinc-400' : 'truncate font-mono text-[13px] font-semibold text-zinc-100', a.name || a.id);
     name.title = a.id;
     top.append(name, stateBadge(a));
+    if (a.usageLimit && !done) top.append(limitChip(a.usageLimit));
     if (S.remote.size) top.append(hostChip(host));
     if (a.adapter) top.append(chip(a.adapter));
     if (a.sandbox === 'docker') {
@@ -254,7 +280,7 @@
       c.title = a.cloneUrl;
       meta.append(c);
     }
-    if (a.stateDetail && !done) meta.append(h('span', 'truncate text-amber-200/70', a.stateDetail));
+    if (a.stateDetail && !done && !a.usageLimit) meta.append(h('span', 'truncate text-amber-200/70', a.stateDetail));
     body.append(meta);
 
     // line 3: its workflow runs going on, the latest first
@@ -4242,6 +4268,9 @@
     const det = $('chat-detail');
     if (askShown()) {
       det.hidden = true; // the form says it
+    } else if (a.usageLimit && !isFinished(a)) {
+      det.hidden = false;
+      det.replaceChildren(...limitDetail(a.usageLimit));
     } else if (a.state === 'needs_input') {
       det.hidden = false;
       det.replaceChildren(h('span', 'font-semibold', 'Needs input'), a.stateDetail ? ': ' + a.stateDetail : '',
@@ -4253,6 +4282,48 @@
       det.hidden = true;
     }
     renderChatStop();
+  }
+
+  // limitDetail is the bar under the session's header while a usage limit
+  // stopped it: when it resets, when the daemon resumes it, and buttons to
+  // resume it now or switch auto-resume.
+  function limitDetail(l) {
+    const text = h('span', 'min-w-0', h('span', 'font-semibold', 'Usage limit reached'), l.window ? ` (${l.window})` : '');
+    if (l.resetsAtMs) text.append(' · resets ' + limitClock(l.resetsAtMs));
+    if (l.detail) text.append(' · ', h('span', 'text-orange-300', l.detail));
+    else if (l.resumeAtMs) text.append(h('span', 'text-amber-200/60', ` · fleet types “continue” at ${limitClock(l.resumeAtMs)}`));
+    else if (!l.autoResume) text.append(h('span', 'text-amber-200/60', ' · auto-resume is off'));
+    const btn = 'touch:min-h-11 rounded-md border border-amber-400/30 px-2 py-0.5 text-xs font-medium text-amber-200 hover:bg-amber-400/15 focus-visible:outline-2 focus-visible:outline-amber-400 disabled:opacity-50';
+    const now = h('button', btn, 'Resume now');
+    now.type = 'button';
+    now.title = 'Type “continue” into the session now';
+    now.addEventListener('click', () => limitAction(now, { now: true }, 'resumed'));
+    const auto = h('button', btn, l.autoResume ? 'Turn auto-resume off' : 'Turn auto-resume on');
+    auto.type = 'button';
+    auto.addEventListener('click', () => limitAction(auto, { auto: !l.autoResume }, l.autoResume ? 'auto-resume off' : 'auto-resume on'));
+    return [h('div', 'flex flex-wrap items-center gap-x-3 gap-y-1.5', text, h('span', 'flex gap-2', now, auto))];
+  }
+
+  // limitAction posts body to the session's resume route.
+  async function limitAction(btn, body, done) {
+    const host = chat.host, id = chat.id;
+    const base = host ? `/api/hosts/${encodeURIComponent(host)}/agents/` : '/api/agents/';
+    btn.disabled = true;
+    try {
+      const r = await api('POST', base + encodeURIComponent(id) + '/resume', body);
+      if (r && r.agent) {
+        const rem = host && S.remote.get(host);
+        if (rem) rem.agents.set(id, r.agent);
+        else if (!host) S.agents.set(id, r.agent);
+        if (chat.open && chat.host === host && chat.id === id) chat.agent = r.agent;
+        invalidate('agents');
+        renderChatHead();
+      }
+      toast(`${(r && r.agent && r.agent.name) || id}: ${done}`);
+    } catch (e) {
+      btn.disabled = false;
+      toast(`could not resume: ${e.message}`, 'error');
+    }
   }
 
   // renderChatStop draws Archive (a live session) or Delete (a finished

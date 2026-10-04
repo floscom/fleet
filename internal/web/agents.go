@@ -261,6 +261,30 @@ func (s *Server) apiSwitchModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]*Model{"model": m})
 }
 
+// apiResume switches auto-resume after a usage limit for an agent
+// ({"auto": bool}) and/or resumes it now ({"now": true}).
+func (s *Server) apiResume(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Auto *bool `json:"auto"`
+		Now  bool  `json:"now"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Auto == nil && !req.Now {
+		writeError(w, http.StatusBadRequest, "auto or now is required")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), modelTimeout)
+	defer cancel()
+	a, err := s.opts.Source.SetAutoResume(ctx, r.PathValue("id"), req.Auto, req.Now)
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]Agent{"agent": agentOf(a)})
+}
+
 func (s *Server) apiScreen(w http.ResponseWriter, r *http.Request) {
 	screen, err := s.opts.Source.Screen(r.Context(), r.PathValue("id"))
 	if err != nil {

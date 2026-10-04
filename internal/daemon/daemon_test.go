@@ -21,10 +21,6 @@ import (
 	"fleet/internal/tmux"
 )
 
-const (
-	stateWorking = fleetv1.AgentState_AGENT_STATE_WORKING
-)
-
 func TestUnixHandshakeRunAndExit(t *testing.T) {
 	e := newEnv(t)
 	c := e.dialUnix()
@@ -540,9 +536,9 @@ func TestInfoAdaptersRoots(t *testing.T) {
 		t.Fatalf("info: %v", info)
 	}
 	ads := c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_ListAdapters{ListAdapters: &fleetv1.ListAdaptersRequest{}}}).GetListAdapters().GetAdapters()
-	if len(ads) != 3 || ads[0].GetId() != "missing" || ads[0].GetAvailable() || ads[0].GetUnavailableReason() == "" ||
-		ads[1].GetId() != "modeled" || len(ads[1].GetModels()) != 2 || len(ads[1].GetEfforts()) != 2 ||
-		ads[2].GetId() != "test" || !ads[2].GetAvailable() || !ads[2].GetCapabilities().GetActivityState() || len(ads[2].GetModels()) != 0 {
+	if len(ads) != 4 || ads[0].GetId() != "limited" || ads[1].GetId() != "missing" || ads[1].GetAvailable() || ads[1].GetUnavailableReason() == "" ||
+		ads[2].GetId() != "modeled" || len(ads[2].GetModels()) != 2 || len(ads[2].GetEfforts()) != 2 ||
+		ads[3].GetId() != "test" || !ads[3].GetAvailable() || !ads[3].GetCapabilities().GetActivityState() || len(ads[3].GetModels()) != 0 {
 		t.Fatalf("adapters: %v", ads)
 	}
 

@@ -100,6 +100,7 @@ type event struct {
 	Reason   string          `json:"reason"`    // turn_aborted
 	NumTurns int             `json:"num_turns"` // thread_rolled_back
 	Item     json.RawMessage `json:"item"`      // item_completed
+	Message  string          `json:"message"`   // error
 }
 
 // parseLine maps one rollout line to chat entries:
@@ -113,7 +114,7 @@ type event struct {
 //	ImageView         -> Tool "view_image"
 //	ContextCompaction -> Note
 //	SubAgentActivity  -> Note when a subagent starts or finishes
-//	turn_aborted, thread_rolled_back -> Note
+//	turn_aborted, thread_rolled_back, error -> Note
 //
 // Tool entries have no ID: their output is part of the item, no Result
 // follows. Reasoning and collaboration tool calls are skipped.
@@ -138,6 +139,10 @@ func parseLine(line []byte) []transcript.Entry {
 		out = note(text)
 	case "thread_rolled_back":
 		out = note(fmt.Sprintf("rolled back %s", plural(max(ev.NumTurns, 1), "turn")))
+	case "error":
+		if ev.Message != "" {
+			out = note(ev.Message)
+		}
 	}
 	if t, err := time.Parse(time.RFC3339Nano, l.Timestamp); err == nil {
 		for i := range out {

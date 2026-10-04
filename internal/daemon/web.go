@@ -138,6 +138,11 @@ func (s *webSource) SwitchModel(ctx context.Context, agent, model, effort string
 	return webModel(info), nil
 }
 
+func (s *webSource) SetAutoResume(ctx context.Context, agent string, auto *bool, now bool) (*fleetv1.Agent, error) {
+	a, err := s.d.agents.setAutoResume(ctx, agent, auto, now)
+	return a, webError(err)
+}
+
 func (s *webSource) Agents() []*fleetv1.Agent { return s.d.agents.list(true) }
 
 func (s *webSource) RunAgent(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleetv1.Agent, error) {

@@ -106,6 +106,9 @@ type Source interface {
 	SwitchModel(ctx context.Context, agent, model, effort string) (*Model, error)
 	// Answer answers the questions id the agent waits on (Chat.Asks).
 	Answer(agent, id string, a ask.Answer) error
+	// SetAutoResume switches resuming a live agent after a usage limit
+	// (auto non-nil) and/or resumes it now, and returns it.
+	SetAutoResume(ctx context.Context, agent string, auto *bool, now bool) (*fleetv1.Agent, error)
 }
 
 // BrowseFunc finds fleet daemons on the LAN (discovery.Browse).
@@ -368,6 +371,17 @@ type Agent struct {
 	AttachedClients int32  `json:"attachedClients"`
 	Sandbox         string `json:"sandbox"`
 	CloneURL        string `json:"cloneUrl"`
+	// UsageLimit is set while a usage limit stopped the agent.
+	UsageLimit *AgentLimit `json:"usageLimit,omitempty"`
+}
+
+// AgentLimit is a usage limit that stopped an agent (fleetv1.UsageLimit).
+type AgentLimit struct {
+	Window     string `json:"window"`
+	ResetsAtMs int64  `json:"resetsAtMs"`
+	ResumeAtMs int64  `json:"resumeAtMs"`
+	AutoResume bool   `json:"autoResume"`
+	Detail     string `json:"detail"`
 }
 
 // enumName turns AGENT_STATE_NEEDS_INPUT into "needs_input".
@@ -390,6 +404,12 @@ func agentOf(a *fleetv1.Agent) Agent {
 	if a.HasExitCode {
 		code := a.ExitCode
 		out.ExitCode = &code
+	}
+	if l := a.UsageLimit; l != nil {
+		out.UsageLimit = &AgentLimit{
+			Window: l.Window, ResetsAtMs: l.ResetsAtMs, ResumeAtMs: l.ResumeAtMs,
+			AutoResume: l.AutoResume, Detail: l.Detail,
+		}
 	}
 	return out
 }
@@ -435,6 +455,7 @@ type client struct {
 type agentEntry struct {
 	createdAtMs int64
 	state       string
+	limit       *AgentLimit
 	msg         []byte
 }
 
@@ -546,13 +567,13 @@ func (h *hub) follow(ctx context.Context, events <-chan *fleetv1.Event) {
 			msg := encode("agent", "agent", a)
 			prev, ok := h.agents[a.ID]
 			if !ok || !bytes.Equal(prev.msg, msg) {
-				h.agents[a.ID] = agentEntry{createdAtMs: a.CreatedAtMs, state: a.State, msg: msg}
+				h.agents[a.ID] = agentEntry{createdAtMs: a.CreatedAtMs, state: a.State, limit: a.UsageLimit, msg: msg}
 				h.broadcastLocked(msg)
 			}
 			// Only changes seen live count: a (re)subscription's snapshot
 			// replays states the user may have seen long ago.
 			if ok && seen == nil && h.notify != nil {
-				h.noticeLocked(prev.state, a)
+				h.noticeLocked(prev, a)
 			}
 		case *fleetv1.Event_AgentRemoved:
 			h.removeAgentLocked(k.AgentRemoved)

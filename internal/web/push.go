@@ -492,18 +492,25 @@ func hkdf(salt, ikm, info []byte, n int) []byte {
 // ---------------------------------------------------------------------------
 // Notices
 
-// noticeLocked tells the user about a's change from state prev (see
-// notice). "Needs you" and "failed" go out at once; "is done" is held
-// (holdDoneLocked), and any later change of the agent's state drops it.
-func (h *hub) noticeLocked(prev string, a Agent) {
-	if a.State != prev {
+// noticeLocked tells the user about a's change from prev (see notice and
+// limitNotice). "Needs you", "failed" and usage limits go out at once; "is
+// done" is held (holdDoneLocked), and any later change of the agent's
+// state drops it. An agent a usage limit stopped is not done.
+func (h *hub) noticeLocked(prev agentEntry, a Agent) {
+	if a.State != prev.state || a.UsageLimit != nil {
 		h.dropDoneLocked(a.ID)
 	}
-	n, ok := notice(prev, a)
+	if n, ok := limitNotice(prev.limit, a); ok {
+		h.notify(n)
+		return
+	}
+	n, ok := notice(prev.state, a)
 	switch {
 	case !ok:
 	case a.State == "idle":
-		h.holdDoneLocked(a.ID, n)
+		if a.UsageLimit == nil {
+			h.holdDoneLocked(a.ID, n)
+		}
 	default:
 		h.notify(n)
 	}
@@ -573,10 +580,7 @@ func notice(prev string, a Agent) (Notice, bool) {
 	if name == "" {
 		name = a.Adapter
 	}
-	where := filepath.Base(a.Cwd)
-	if where == "." || where == "/" {
-		where = a.Root
-	}
+	where := noticeWhere(a)
 	n := Notice{Tag: "agent:" + a.ID, Agent: a.ID}
 	switch {
 	case a.State == "needs_input":
@@ -598,6 +602,52 @@ func notice(prev string, a Agent) (Notice, bool) {
 		n.Body = n.Body[:300] + "…"
 	}
 	return n, true
+}
+
+// noticeWhere names where agent a works, for a notice.
+func noticeWhere(a Agent) string {
+	where := filepath.Base(a.Cwd)
+	if where == "." || where == "/" {
+		where = a.Root
+	}
+	return where
+}
+
+// limitNotice says what to tell the user when a usage limit stops agent a
+// (prev: what stopped it before, nil if nothing), or auto-resume gives up.
+func limitNotice(prev *AgentLimit, a Agent) (Notice, bool) {
+	l := a.UsageLimit
+	if l == nil || (prev != nil && (l.Detail == "" || l.Detail == prev.Detail)) {
+		return Notice{}, false
+	}
+	n := Notice{Tag: "agent:" + a.ID, Agent: a.ID, Title: firstNonEmpty(a.Name, a.Adapter) + " hit a usage limit"}
+	var parts []string
+	if where := noticeWhere(a); where != "" {
+		parts = append(parts, where)
+	}
+	if l.Window != "" {
+		parts = append(parts, l.Window+" limit")
+	}
+	switch {
+	case l.Detail != "":
+		parts = append(parts, l.Detail)
+	case l.ResumeAtMs > 0:
+		parts = append(parts, "resumes "+clock(time.UnixMilli(l.ResumeAtMs)))
+	case l.ResetsAtMs > 0:
+		parts = append(parts, "resets "+clock(time.UnixMilli(l.ResetsAtMs))+", auto-resume off")
+	default:
+		parts = append(parts, "auto-resume off")
+	}
+	n.Body = strings.Join(parts, " · ")
+	return n, true
+}
+
+// clock is t as the time of day, with the weekday if not today.
+func clock(t time.Time) string {
+	if y, m, d := t.Date(); y == time.Now().Year() && m == time.Now().Month() && d == time.Now().Day() {
+		return t.Format("15:04")
+	}
+	return t.Format("Mon 15:04")
 }
 
 func firstNonEmpty(s ...string) string {

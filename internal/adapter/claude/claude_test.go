@@ -227,7 +227,7 @@ func TestHandleHook(t *testing.T) {
 		{"Stop", `{"session_id":"` + sid + `","hook_event_name":"Stop","stop_hook_active":false}`,
 			true, fleetv1.AgentState_AGENT_STATE_IDLE, "", sid},
 		{"StopFailure", `{"session_id":"` + sid + `","error":"rate_limit"}`,
-			true, fleetv1.AgentState_AGENT_STATE_IDLE, "rate_limit", sid},
+			true, fleetv1.AgentState_AGENT_STATE_IDLE, "Usage limit reached", sid},
 		{"StopFailure", `{"error":{"type":"overloaded"}}`,
 			true, fleetv1.AgentState_AGENT_STATE_IDLE, "turn ended with an API error", ""},
 		{"Stop", ``, true, fleetv1.AgentState_AGENT_STATE_IDLE, "", ""},
