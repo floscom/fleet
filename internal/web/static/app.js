@@ -316,6 +316,7 @@
       const r = await api('POST', base + encodeURIComponent(id) + '/stop', act.forget ? { forget: true, removeWorktree: true } : {});
       const rem = host && S.remote.get(host);
       if (act.forget) {
+        saveDraft(host, id, '');
         if (rem) rem.agents.delete(id);
         else if (!host) S.agents.delete(id);
         if (r && r.worktreeKept) toast(`deleted ${name}; kept ${(a && a.cwd) || 'its worktree'}: ${r.reason}`, 'warn');
@@ -2922,6 +2923,21 @@
   const chatLive = () => chat.agent && !isFinished(chat.agent);
   const chatDialog = () => chatLive() && chat.agent.state === 'needs_input';
 
+  // A session's draft: what is typed into its message box stays in
+  // localStorage until it is sent, so notes outlive closing the session
+  // or reloading the page.
+  const draftKey = (host, id) => 'fleet.draft.' + agentKey(host, id);
+  const loadDraft = (host, id) => localStorage.getItem(draftKey(host, id)) || '';
+
+  function saveDraft(host, id, text) {
+    try {
+      if (text) localStorage.setItem(draftKey(host, id), text);
+      else localStorage.removeItem(draftKey(host, id));
+    } catch (e) {
+      // Storage full or blocked: the draft lives only in the box.
+    }
+  }
+
   // openChat shows a session. opts.view 'wf' opens its Workflows tab, with
   // run opts.run unfolded.
   function openChat(host, id, agent, opts) {
@@ -2943,8 +2959,7 @@
     chat.screenOpen = !!agent && (agent.state === 'needs_input' || agent.adapter === 'shell');
     chat.screenAutoOpened = chat.screenOpen && agent.adapter !== 'shell';
     if (opts && opts.screen) Object.assign(chat, { screenOpen: true, screenAuto: false, screenAutoOpened: false });
-    $('chat-input').value = '';
-    autosize();
+    $('chat-input').value = loadDraft(host, id);
     renderChatImages();
     $('chat-screen-pre').textContent = '';
     $('chat-ask').replaceChildren();
@@ -2952,6 +2967,7 @@
     $('wf-list').replaceChildren();
     const d = $('chat');
     if (!d.open) d.showModal();
+    autosize();
     renderChatHead();
     renderChatView();
     renderChatInput();
@@ -4677,6 +4693,7 @@
     const ta = $('chat-input');
     const text = ta.value;
     const images = chat.images;
+    const { host, id } = chat;
     if ((!text.trim() && !images.length) || chat.sending || !chatLive()) return;
     if (askShown() && chat.askForm) {
       if (images.length) {
@@ -4687,6 +4704,7 @@
       if (await sendAnswer(chat.askForm, { decline: text }) && ta.value === text) {
         ta.value = '';
         autosize();
+        saveDraft(host, id, '');
       }
       return;
     }
@@ -4702,6 +4720,7 @@
       if (images.length) body.images = images.map((im) => im.data);
       const r = await api('POST', chatAPI('input'), body);
       held = !!(r && r.held);
+      if (seq === chat.seq || loadDraft(host, id) === text) saveDraft(host, id, '');
       if (seq === chat.seq) {
         ta.value = '';
         autosize();
@@ -4910,7 +4929,10 @@
     $('chat-close').addEventListener('click', closeChat);
     $('chat-form').addEventListener('submit', sendMessage);
     const ta = $('chat-input');
-    ta.addEventListener('input', autosize);
+    ta.addEventListener('input', () => {
+      autosize();
+      if (chat.open) saveDraft(chat.host, chat.id, ta.value);
+    });
     ta.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing && !touch()) {
         ev.preventDefault();
