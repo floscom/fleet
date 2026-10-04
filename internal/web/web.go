@@ -470,15 +470,21 @@ type hub struct {
 	browsed bool
 	// notify, if set, is told about agents that need the user (notice).
 	notify func(Notice)
+	// done holds the "is done" notices waiting for the agent to stay
+	// idle (holdDoneLocked), by agent id; doneWait is how long.
+	done     map[string]*time.Timer
+	doneWait time.Duration
 }
 
 func newHub(src Source, browse BrowseFunc, log *slog.Logger) *hub {
 	return &hub{
 		src: src, browse: browse, log: log,
-		ready:   make(chan struct{}),
-		clients: map[*client]struct{}{},
-		agents:  map[string]agentEntry{},
-		peerSet: map[string]*peerEntry{},
+		ready:    make(chan struct{}),
+		clients:  map[*client]struct{}{},
+		agents:   map[string]agentEntry{},
+		peerSet:  map[string]*peerEntry{},
+		done:     map[string]*time.Timer{},
+		doneWait: doneWait,
 	}
 }
 
@@ -546,9 +552,7 @@ func (h *hub) follow(ctx context.Context, events <-chan *fleetv1.Event) {
 			// Only changes seen live count: a (re)subscription's snapshot
 			// replays states the user may have seen long ago.
 			if ok && seen == nil && h.notify != nil {
-				if n, send := notice(prev.state, a); send {
-					h.notify(n)
-				}
+				h.noticeLocked(prev.state, a)
 			}
 		case *fleetv1.Event_AgentRemoved:
 			h.removeAgentLocked(k.AgentRemoved)
@@ -569,6 +573,7 @@ func (h *hub) follow(ctx context.Context, events <-chan *fleetv1.Event) {
 }
 
 func (h *hub) removeAgentLocked(id string) {
+	h.dropDoneLocked(id)
 	if _, ok := h.agents[id]; ok {
 		delete(h.agents, id)
 		h.broadcastLocked(encode("agentRemoved", "id", id))

@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	fleetv1 "fleet/gen/fleetv1"
+	"fleet/internal/workflow"
 )
 
 func unb64(t *testing.T, s string) []byte {
@@ -122,6 +124,7 @@ func TestPushFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.push.client = svc.Client()
+	s.hub.doneWait = time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	s.start(ctx)
 	ts := httptest.NewServer(s.handler())
@@ -233,6 +236,79 @@ func TestPushFlow(t *testing.T) {
 		t.Fatalf("unexpected extra push: %v", p.header)
 	default:
 	}
+}
+
+// TestHoldDone: "is done" waits until the agent stayed idle and its
+// session runs nothing in the background; "needs you" does not wait.
+func TestHoldDone(t *testing.T) {
+	agent := func(state fleetv1.AgentState) *fleetv1.Agent {
+		return &fleetv1.Agent{Id: "a1", Name: "claude-1", State: state}
+	}
+	src := newFakeSource(agent(fleetv1.AgentState_AGENT_STATE_WORKING))
+	src.agent = agent(fleetv1.AgentState_AGENT_STATE_WORKING)
+	h := newHub(src, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h.doneWait = 50 * time.Millisecond
+	got := make(chan Notice, 8)
+	h.notify = func(n Notice) { got <- n }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.run(ctx)
+	<-h.ready
+
+	set := func(state fleetv1.AgentState) {
+		src.events <- &fleetv1.Event{Kind: &fleetv1.Event_AgentUpserted{AgentUpserted: agent(state)}}
+	}
+	expect := func(title string) {
+		t.Helper()
+		select {
+		case n := <-got:
+			if n.Title != title {
+				t.Fatalf("got %q, want %q", n.Title, title)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("no %q", title)
+		}
+	}
+	quiet := func(d time.Duration) {
+		t.Helper()
+		select {
+		case n := <-got:
+			t.Fatalf("unexpected %q", n.Title)
+		case <-time.After(d):
+		}
+	}
+
+	// A turn that ends and another that starts soon after: nothing.
+	set(fleetv1.AgentState_AGENT_STATE_IDLE)
+	set(fleetv1.AgentState_AGENT_STATE_WORKING)
+	quiet(150 * time.Millisecond)
+
+	// A dialog is told at once.
+	set(fleetv1.AgentState_AGENT_STATE_NEEDS_INPUT)
+	expect("claude-1 needs you")
+	set(fleetv1.AgentState_AGENT_STATE_WORKING)
+
+	// Idle while a background workflow runs: held until it ended.
+	now := time.Now().UnixMilli()
+	src.mu.Lock()
+	src.wfRuns = []workflow.Run{{ID: "wf_1", Status: workflow.Running, StartedMs: now, UpdatedMs: now}}
+	src.mu.Unlock()
+	set(fleetv1.AgentState_AGENT_STATE_IDLE)
+	quiet(200 * time.Millisecond)
+	src.mu.Lock()
+	src.wfRuns[0].Status = workflow.Completed
+	src.mu.Unlock()
+	expect("claude-1 is done")
+
+	// A run quiet for long does not hold it back.
+	set(fleetv1.AgentState_AGENT_STATE_WORKING)
+	src.mu.Lock()
+	old := time.Now().Add(-2 * staleRun).UnixMilli()
+	src.wfRuns = []workflow.Run{{ID: "wf_2", Status: workflow.Running, StartedMs: old, UpdatedMs: old}}
+	src.mu.Unlock()
+	set(fleetv1.AgentState_AGENT_STATE_IDLE)
+	expect("claude-1 is done")
+	quiet(150 * time.Millisecond)
 }
 
 func TestNotice(t *testing.T) {

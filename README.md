@@ -383,8 +383,11 @@ Changes apply at once, rewrite `config.toml` and show up in the CLI
 ### Notifications
 
 *notify* (next to *sign out*) subscribes the browser to Web Push: the
-daemon then sends a notification when one of its agents needs input,
-finishes a turn or fails, and tapping it opens that session. It is the
+daemon then sends a notification when one of its agents needs input, is
+done or fails, and tapping it opens that session. *Done* means the agent
+stayed idle for 20 seconds and its session runs no background subagents or
+workflows: those start another turn when they end, so the turns in between
+send nothing. It is the
 standard Push API, so it works with Safari (macOS 13+, and iOS/iPadOS
 16.4+ once the dashboard is added to the Home Screen and opened from
 there), Chrome, Edge and Firefox. No Apple developer account or relay is

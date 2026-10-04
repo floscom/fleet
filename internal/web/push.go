@@ -2,7 +2,8 @@ package web
 
 // Web Push: the dashboard, installed as a web app (on iOS 16.4+ added to
 // the Home Screen), subscribes to notifications, and the daemon sends one
-// when one of its agents needs input, finishes a turn or fails.
+// when one of its agents needs input, is done (its turn ended and nothing
+// goes on in its background) or fails.
 //
 // This is the standard Push API, so it works the same with Apple's push
 // service (web.push.apple.com), FCM and Mozilla's: the daemon signs each
@@ -47,6 +48,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"fleet/internal/workflow"
 )
 
 const (
@@ -66,6 +69,13 @@ const (
 	recordSize = 4096
 	// maxPushPayload is what fits one record (Apple allows 4 KB).
 	maxPushPayload = 3000
+	// doneWait is how long an agent must stay idle before "is done" is
+	// sent, and how often it is looked at again while its session works
+	// in the background (see holdDoneLocked).
+	doneWait = 20 * time.Second
+	// staleRun is how long a background run may show no activity and
+	// still hold back "is done".
+	staleRun = 30 * time.Minute
 )
 
 var b64 = base64.RawURLEncoding
@@ -481,6 +491,77 @@ func hkdf(salt, ikm, info []byte, n int) []byte {
 
 // ---------------------------------------------------------------------------
 // Notices
+
+// noticeLocked tells the user about a's change from state prev (see
+// notice). "Needs you" and "failed" go out at once; "is done" is held
+// (holdDoneLocked), and any later change of the agent's state drops it.
+func (h *hub) noticeLocked(prev string, a Agent) {
+	if a.State != prev {
+		h.dropDoneLocked(a.ID)
+	}
+	n, ok := notice(prev, a)
+	switch {
+	case !ok:
+	case a.State == "idle":
+		h.holdDoneLocked(a.ID, n)
+	default:
+		h.notify(n)
+	}
+}
+
+// holdDoneLocked sends n, the "is done" of agent id, once the agent stayed
+// idle for doneWait and its session runs nothing in the background. A
+// turn's end is not the end of the work: a background subagent or workflow
+// that ends starts the next turn, and so does a background shell command
+// (not looked for: dev servers never end, but most commands end soon).
+func (h *hub) holdDoneLocked(id string, n Notice) {
+	var t *time.Timer
+	t = time.AfterFunc(h.doneWait, func() {
+		h.mu.Lock()
+		due := h.done[id] == t && !h.closed && h.agents[id].state == "idle"
+		h.mu.Unlock()
+		if !due {
+			return
+		}
+		busy := h.backgroundWork(id)
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		switch {
+		case h.done[id] != t || h.closed:
+			// Changed while looking.
+		case busy:
+			h.holdDoneLocked(id, n)
+		default:
+			delete(h.done, id)
+			h.notify(n)
+		}
+	})
+	h.done[id] = t
+}
+
+func (h *hub) dropDoneLocked(id string) {
+	if t, ok := h.done[id]; ok {
+		t.Stop()
+		delete(h.done, id)
+	}
+}
+
+// backgroundWork reports whether the session of agent id runs subagents or
+// workflows in the background. Runs quiet for staleRun are not counted:
+// one whose agents died with the session never ends.
+func (h *hub) backgroundWork(id string) bool {
+	_, runs, err := h.src.Workflows(id)
+	if err != nil {
+		return false
+	}
+	since := time.Now().Add(-staleRun).UnixMilli()
+	for _, r := range runs {
+		if r.Status == workflow.Running && max(r.UpdatedMs, r.StartedMs) >= since {
+			return true
+		}
+	}
+	return false
+}
 
 // notice says what to tell the user when an agent goes from state prev to
 // a.State: it needs input, finished its turn, or failed.
