@@ -10,6 +10,7 @@ package web
 //	GET  /api/agents/{id}/screen      its terminal screen, as text
 //	POST /api/agents/{id}/input       attach images, type text and/or press keys (see apiInput)
 //	GET  /api/agents/{id}/image       an image of its conversation
+//	GET  /api/agents/{id}/media       all the images of its conversation (see media.go)
 //	POST /api/agents/{id}/answer      answer the questions it asks
 //	POST /api/agents/{id}/model       switch its model and/or effort
 //	POST /api/agents/{id}/stop        kill it; forget drops it from the list too

@@ -286,6 +286,7 @@ func TestForwardable(t *testing.T) {
 		{"POST", "agents/a1/stop", true},
 		{"POST", "agents/a1/answer", true},
 		{"GET", "agents/a1/image", true},
+		{"GET", "agents/a1/media", true},
 		{"GET", "agents/a1/workflows/wf_1/agents/s1/image", true},
 		{"GET", "agents/a1/workflows/wf_1/agents/s1/screen", false},
 		{"GET", "agents/a1/answer", false},

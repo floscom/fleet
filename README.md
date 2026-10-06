@@ -470,7 +470,12 @@ on a root, which picks that folder) starts one:
   `Read` of a PNG, a browser screenshot), show in the chat as thumbnails;
   click one for full size. They stay in the transcript: the page fetches
   each as it scrolls into view (`GET /api/agents/{id}/image`, the data as
-  JSON). Claude Code only for now.
+  JSON). The *Media* tab, shown once a session holds an image, has all of
+  them in a grid, newest first, labelled with the file a tool read (or "sent
+  by you"); in the full-size view the arrow keys, a sideways swipe or ‹ ›
+  step through them. It lists them with `GET /api/agents/{id}/media` (the
+  whole transcript, then what follows an offset) and asks again whenever the
+  chat shows a new image. Claude Code only for now.
 - **Questions.** When Claude asks you something with choices (its
   AskUserQuestion tool), the questions show as a form above the message box:
   pick one option, or several where it allows, type your own answer, add a

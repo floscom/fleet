@@ -2981,6 +2981,7 @@
     wf.shown.clear();
     wf.known.clear();
     wf.cards.clear();
+    resetMedia();
     if (opts && opts.run) wf.shown.add(opts.run);
     chat.screenOpen = !!agent && (agent.state === 'needs_input' || agent.adapter === 'shell');
     chat.screenAutoOpened = chat.screenOpen && agent.adapter !== 'shell';
@@ -3461,9 +3462,187 @@
   }
 
   function openImage(src) {
-    $('img-view-img').src = src;
+    viewer.list = null;
+    viewer.seq++;
+    $('img-view-bar').hidden = true;
+    showImage(src);
+  }
+
+  function showImage(src) {
+    const img = $('img-view-img');
+    img.src = src;
+    delete img.dataset.loading;
+    img.classList.toggle('max-h-[94dvh]', !viewer.list);
+    img.classList.toggle('max-h-[calc(94dvh-3.5rem)]', !!viewer.list);
     const d = $('img-view');
-    if (!d.open) d.showModal();
+    if (d.open) return;
+    d.showModal();
+    d.focus(); // not its first button: the arrow keys step from anywhere
+  }
+
+  // ---- the Media tab: every image of the session's conversation
+  //
+  // GET .../media lists them (offsets into the transcript, like the
+  // chat); the page asks again for newer ones whenever the chat shows an
+  // image, and loads each as it scrolls into view.
+
+  const media = {
+    items: [], // {line, n, type, ts, from, tool, text}, oldest first
+    file: '', // transcript the offsets belong to
+    end: 0, // offset after the last read
+    loaded: false,
+    error: '',
+    busy: false, // a request is in flight
+    again: false, // ask once more after it: the chat showed newer images
+    els: new Map(), // file:line:n -> grid button, kept across renders
+  };
+
+  // viewer is what the full-size view steps through: the Media tab's
+  // images, newest first; null for a single image of the chat.
+  const viewer = { list: null, i: 0, seq: 0 };
+
+  const mediaKey = (m) => `${media.file}:${m.line}:${m.n}`;
+  const mediaURL = (m) => chatAPI('image?' + new URLSearchParams({ file: media.file, line: String(m.line), n: String(m.n) }));
+
+  function mediaLabel(m) {
+    if (m.from === 'user') return 'sent by you';
+    const t = m.text || m.tool || 'tool output';
+    return /^\S+$/.test(t) ? t.split('/').pop() : t; // a path: its file name
+  }
+
+  function resetMedia() {
+    Object.assign(media, { items: [], file: '', end: 0, loaded: false, error: '', busy: false, again: false });
+    media.els.clear();
+    $('media-grid').replaceChildren();
+  }
+
+  // loadMedia reads the images the page does not know yet.
+  async function loadMedia() {
+    if (media.busy) {
+      media.again = true;
+      return;
+    }
+    const seq = chat.seq;
+    media.busy = true;
+    try {
+      for (;;) {
+        media.again = false;
+        const q = new URLSearchParams();
+        if (media.file) {
+          q.set('file', media.file);
+          q.set('after', String(media.end));
+        }
+        const r = await api('GET', chatAPI('media?' + q));
+        if (seq !== chat.seq) return;
+        if (r.reset) {
+          media.items = [];
+          media.els.clear();
+        }
+        media.items.push(...(r.media || []));
+        Object.assign(media, { file: r.file || '', end: r.end || 0, loaded: true, error: '' });
+        renderTabs();
+        if (chat.view === 'media') renderMedia();
+        if (!r.more && !media.again) break;
+      }
+    } catch (e) {
+      if (seq !== chat.seq) return;
+      // A fleet without the media route has none to show.
+      Object.assign(media, { loaded: true, error: e.status === 404 ? '' : e.message });
+      if (chat.view === 'media') renderMedia();
+    } finally {
+      if (seq === chat.seq) media.busy = false;
+    }
+  }
+
+  // renderMedia draws the grid, newest first. Thumbnails already drawn are
+  // kept, with their images.
+  function renderMedia() {
+    const grid = $('media-grid');
+    if (!media.items.length) {
+      grid.replaceChildren(h('div', 'col-span-full py-10 text-center font-mono text-xs text-zinc-600',
+        !media.loaded ? '// loading…' : media.error ? '// ' + media.error : '// No images in this conversation yet.'));
+      return;
+    }
+    const list = [...media.items].reverse();
+    grid.replaceChildren(...list.map((m, i) => {
+      const key = mediaKey(m);
+      let b = media.els.get(key);
+      if (!b) {
+        b = mediaThumb(m);
+        media.els.set(key, b);
+      }
+      b.dataset.i = String(i);
+      return b;
+    }));
+  }
+
+  function mediaThumb(m) {
+    const label = mediaLabel(m);
+    const when = m.ts ? new Date(m.ts).toLocaleString() : '';
+    const b = h('button', 'group relative grid aspect-square min-w-0 place-items-center overflow-hidden rounded-md border border-ink-600 bg-ink-950 hover:border-zinc-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400',
+      h('span', 'font-mono text-[11px] text-zinc-600', 'image…'),
+      h('span', 'pointer-events-none absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/85 to-transparent px-1.5 pb-1 pt-5 text-left font-mono text-[10px] text-zinc-200', label));
+    b.type = 'button';
+    b.title = [m.from === 'user' ? 'sent by you' : [m.tool, m.text].filter(Boolean).join(': '), when].filter(Boolean).join('\n');
+    b.setAttribute('aria-label', `${label}${when ? ', ' + when : ''}. Open full size`);
+    b.loadImage = () => loadImage(mediaURL(m)).then((src) => {
+      const img = h('img', 'absolute inset-0 size-full object-cover');
+      img.alt = '';
+      img.src = src;
+      b.firstChild.replaceWith(img);
+    }, (e) => {
+      b.firstChild.replaceWith(h('span', 'px-2 text-center font-mono text-[10px] text-zinc-500', '// ' + e.message));
+    });
+    b.addEventListener('click', () => openMedia(Number(b.dataset.i)));
+    if (imgSeen) imgSeen.observe(b);
+    else b.loadImage();
+    return b;
+  }
+
+  // openMedia shows image i of the Media tab (newest first) full size.
+  function openMedia(i) {
+    const list = viewer.list && $('img-view').open ? viewer.list : [...media.items].reverse();
+    const m = list[i];
+    if (!m) return;
+    Object.assign(viewer, { list, i });
+    const seq = ++viewer.seq;
+    $('img-view-bar').hidden = false;
+    $('img-view-cap').textContent = `${i + 1}/${list.length} · ${mediaLabel(m)}${m.ts ? ' · ' + new Date(m.ts).toLocaleString() : ''}`;
+    $('img-view-prev').disabled = i === 0;
+    $('img-view-next').disabled = i === list.length - 1;
+    if ($('img-view').open) $('img-view-img').dataset.loading = '';
+    loadImage(mediaURL(m)).then((src) => {
+      if (seq === viewer.seq) showImage(src);
+    }, (e) => {
+      if (seq === viewer.seq) toast(`could not load the image: ${e.message}`, 'error');
+    });
+  }
+
+  function wireImageView() {
+    const d = $('img-view');
+    d.addEventListener('click', () => d.close());
+    $('img-view-bar').addEventListener('click', (ev) => ev.stopPropagation());
+    $('img-view-prev').addEventListener('click', () => openMedia(viewer.i - 1));
+    $('img-view-next').addEventListener('click', () => openMedia(viewer.i + 1));
+    d.addEventListener('keydown', (ev) => {
+      if (!viewer.list || (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight')) return;
+      ev.preventDefault();
+      openMedia(viewer.i + (ev.key === 'ArrowLeft' ? -1 : 1));
+    });
+    // Swiping sideways steps through the images too.
+    let x0 = null;
+    d.addEventListener('touchstart', (ev) => {
+      x0 = viewer.list && ev.touches.length === 1 ? ev.touches[0] : null;
+    }, { passive: true });
+    d.addEventListener('touchend', (ev) => {
+      const t = ev.changedTouches[0];
+      if (!x0 || !t) return;
+      const dx = t.clientX - x0.clientX, dy = t.clientY - x0.clientY;
+      x0 = null;
+      if (Math.abs(dx) < 50 || Math.abs(dx) < 2 * Math.abs(dy)) return;
+      ev.preventDefault(); // no click: it would close the view
+      openMedia(viewer.i + (dx > 0 ? -1 : 1));
+    });
   }
 
   // Tools whose output is the agent's or a page's text, in markdown.
@@ -4960,8 +5139,9 @@
   }
 
   // setView switches the dialog to the chat, the workflow runs ('wf';
-  // unfolding and showing run, if given) or a workflow agent ('sub', see
-  // openSub). Leaving 'sub' stops following that agent.
+  // unfolding and showing run, if given), a workflow agent ('sub', see
+  // openSub) or the images ('media'). Leaving 'sub' stops following that
+  // agent.
   function setView(view, run) {
     if (view === 'sub' && !wf.sub) view = 'wf';
     if (view !== 'sub' && wf.sub) {
@@ -4975,6 +5155,8 @@
       renderWorkflows();
       const card = run && $('wf-list').querySelector(`[data-run="${CSS.escape(run)}"]`);
       if (card) card.scrollIntoView({ block: 'start' });
+    } else if (view === 'media') {
+      renderMedia();
     } else if (view === 'chat') {
       // Hidden, the log kept growing but lost its scroll position.
       const sc = $('chat-scroll');
@@ -4990,13 +5172,14 @@
     $('chat-foot').hidden = v !== 'chat';
     $('wf-view').hidden = v !== 'wf';
     $('sub-view').hidden = v !== 'sub';
+    $('media-view').hidden = v !== 'media';
     renderChatScreen();
     renderTabs();
   }
 
   function wireChat() {
     const dlg = $('chat');
-    $('img-view').addEventListener('click', () => $('img-view').close());
+    wireImageView();
     $('chat-close').addEventListener('click', closeChat);
     $('chat-form').addEventListener('submit', sendMessage);
     const ta = $('chat-input');
@@ -5055,11 +5238,15 @@
     });
     $('chat-tab-chat').addEventListener('click', () => setView('chat'));
     $('chat-tab-wf').addEventListener('click', () => setView('wf'));
+    $('chat-tab-media').addEventListener('click', () => setView('media'));
     $('chat-tabs').addEventListener('keydown', (ev) => {
       if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
-      const to = chat.view === 'chat' ? 'wf' : 'chat';
-      setView(to);
-      $(to === 'chat' ? 'chat-tab-chat' : 'chat-tab-wf').focus();
+      const tabs = [...$('chat-tabs').querySelectorAll('[role="tab"]')].filter((t) => !t.hidden);
+      const at = tabs.findIndex((t) => t.getAttribute('aria-selected') === 'true');
+      const to = tabs[(at + (ev.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length];
+      if (!to) return;
+      to.click();
+      to.focus();
     });
     $('sub-back').addEventListener('click', () => setView('wf'));
     // Esc steps back from a workflow agent before it closes the dialog.
@@ -5091,6 +5278,8 @@
         if (r.agent) chatAgent(chat.host, r.agent);
         chatModel(r.model);
         chatAsks(r.asks);
+        // The Media tab follows: in full at first, then with each image.
+        if (r.reset || (r.entries || []).some((e) => e.images && e.images.length)) loadMedia();
       },
       onStatus: renderChatStatus,
       onFile: renderChatScreen,
@@ -5356,12 +5545,21 @@
   }
 
   function renderTabs() {
-    const n = wf.runs.length || wf.hint;
-    $('chat-tabs').hidden = !n && chat.view === 'chat';
-    $('chat-tab-chat').setAttribute('aria-selected', String(chat.view === 'chat'));
-    $('chat-tab-wf').setAttribute('aria-selected', String(chat.view !== 'chat'));
-    $('chat-tab-chat').tabIndex = chat.view === 'chat' ? 0 : -1;
-    $('chat-tab-wf').tabIndex = chat.view === 'chat' ? -1 : 0;
+    const v = chat.view;
+    const tabs = { chat: v === 'chat', wf: v === 'wf' || v === 'sub', media: v === 'media' };
+    const runs = !!(wf.runs.length || wf.hint) || tabs.wf;
+    const images = !!media.items.length || tabs.media;
+    $('chat-tabs').hidden = !runs && !images;
+    $('chat-tab-wf').hidden = !runs;
+    $('chat-tab-media').hidden = !images;
+    for (const [k, on] of Object.entries(tabs)) {
+      const t = $('chat-tab-' + k);
+      t.setAttribute('aria-selected', String(on));
+      t.tabIndex = on ? 0 : -1;
+    }
+    const mn = $('chat-tab-media-n');
+    mn.textContent = String(media.items.length);
+    mn.hidden = !media.items.length;
     const count = $('chat-tab-wf-n');
     count.replaceChildren(String(wf.runs.length));
     if (wf.runs.some((r) => r.status === 'running')) count.prepend(h('span', WF.running.dot));
