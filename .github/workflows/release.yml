@@ -1,0 +1,40 @@
+name: release
+
+# Push a tag like v0.1.0 to build fleet for macOS and Linux and publish a
+# GitHub release. install.sh downloads the archives from here.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: go test ./...
+      - name: Build
+        run: make cross GO=go VERSION="$GITHUB_REF_NAME"
+      - name: Package
+        run: |
+          mkdir dist
+          for bin in bin/fleet-*-*; do
+            target=${bin#bin/}                       # fleet-linux-amd64
+            mkdir "dist/$target"
+            cp "$bin" "dist/$target/fleet"
+            cp LICENSE README.md "dist/$target/"
+            tar -C dist -czf "dist/$target.tar.gz" "$target"
+            rm -r "dist/$target"
+          done
+          (cd dist && sha256sum *.tar.gz > checksums.txt)
+          ls -l dist
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag

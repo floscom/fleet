@@ -31,14 +31,33 @@ app is next) in [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## Install
 
-Requirements on the server: Linux (macOS builds too, but is less tested),
+Requirements on the server: Linux (macOS works too, but is less tested),
 tmux (tested with 3.4), git (for worktrees), and the agent CLIs you want to
-run. Building needs Go 1.22.
+run.
+
+Install the latest release (macOS and Linux, amd64 and arm64):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/floscom/fleet/main/install.sh | sh
+```
+
+The script verifies the download against the release's `checksums.txt` and
+installs to `/usr/local/bin` if writable, else `~/.local/bin`. Set
+`FLEET_VERSION=v0.1.0` for a specific release or `FLEET_INSTALL_DIR` for
+another directory (both go before `sh`, e.g. `... | FLEET_VERSION=v0.1.0 sh`).
+Run it again to update, then restart the daemon (`fleet stop && fleet
+start`; running agents are re-adopted). The archives are also on the
+[releases page](https://github.com/floscom/fleet/releases).
+
+From source (needs Go 1.22):
 
 ```sh
 make build                      # -> bin/fleet (static, CGO_ENABLED=0)
 install -m 755 bin/fleet ~/.local/bin/fleet
 ```
+
+Releases are built by GitHub Actions (`.github/workflows/release.yml`)
+when a `v*` tag is pushed: `git tag v0.1.0 && git push origin v0.1.0`.
 
 Other targets: `make test`, `make vet`, `make lint` (vet, `buf lint`,
 gofmt), `make proto` (regenerate `gen/fleetv1` with buf), and `make cross`
@@ -771,3 +790,9 @@ restart with re-adoption. Known gaps:
 - **IPv4 only by default.** The default listen address is `0.0.0.0:7420`.
 - **No native app yet.** The macOS app is the next step; the protocol guide
   for it is [docs/PROTOCOL.md](docs/PROTOCOL.md).
+
+## License
+
+MIT, see [LICENSE](LICENSE). The provider logos in
+`internal/web/static/providers` come from
+[lobe-icons](https://github.com/lobehub/lobe-icons) (MIT).
