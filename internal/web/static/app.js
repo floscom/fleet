@@ -2151,7 +2151,7 @@
       h('span', 'size-1.5 shrink-0 rounded-full ' + (a.available ? 'bg-emerald-400' : 'bg-zinc-600')), a.id);
     name.title = a.available ? `${a.name} ${a.version || ''}`.trim() : `${a.name}: ${a.reason || 'not installed'}`;
     // Meters wrap under each other, not under the name.
-    const meters = h('div', 'flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1');
+    const meters = h('div', 'flex min-w-0 flex-1 flex-wrap items-start gap-x-3 gap-y-1');
     if (!a.available) meters.append(h('span', 'text-zinc-600', 'not installed'));
     else {
       for (const l of a.limits) meters.append(limitMeter(l));
@@ -2165,17 +2165,23 @@
     return h('div', 'flex items-start gap-3 text-xs leading-4', name, meters);
   }
 
-  // limitMeter is one usage window: label, a bar, percent used; the reset
-  // time is in its tooltip.
+  // limitMeter is one usage window: label, a bar, percent used, and the
+  // reset time below it. The tooltip includes the full local date and time.
   function limitMeter(l) {
     const pct = Math.max(0, Math.min(100, l.percent));
     const tone = pct >= 90 ? 'bg-rose-400' : pct >= 70 ? 'bg-amber-400' : 'bg-emerald-400';
     const fill = h('span', 'absolute inset-y-0 left-0 rounded-full ' + tone);
     fill.style.width = pct + '%';
-    const el = h('span', 'inline-flex items-center gap-1.5 whitespace-nowrap',
+    const meter = h('span', 'inline-flex items-center gap-1.5',
       h('span', 'text-zinc-500', l.label),
       h('span', 'relative h-1.5 w-10 overflow-hidden rounded-full bg-ink-700', fill),
       h('span', 'font-mono tabular-nums ' + (pct >= 90 ? 'text-rose-300' : 'text-zinc-300'), Math.round(pct) + '%'));
+    const el = h('span', 'inline-flex flex-col gap-0.5 whitespace-nowrap', meter);
+    if (l.resetsAtMs) {
+      const reset = h('time', 'text-[11px] tabular-nums text-zinc-500', 'resets ' + limitClock(l.resetsAtMs));
+      reset.dateTime = new Date(l.resetsAtMs).toISOString();
+      el.append(reset);
+    }
     el.title = `${l.label}: ${Math.round(pct)}% used` +
       (l.resetsAtMs ? `, resets in ${dur(l.resetsAtMs - Date.now()).replace(/ \d+s$/, '')} (${new Date(l.resetsAtMs).toLocaleString()})` : '');
     return el;
