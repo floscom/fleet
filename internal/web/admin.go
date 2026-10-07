@@ -202,6 +202,7 @@ func (s *Server) apiHandler() http.Handler {
 	admin.HandleFunc("GET /api/usage", s.apiUsage)
 	admin.HandleFunc("GET /api/roots", s.apiRoots)
 	admin.HandleFunc("POST /api/roots", s.apiAddRoot)
+	admin.HandleFunc("PUT /api/roots/{name}", s.apiUpdateRoot)
 	admin.HandleFunc("DELETE /api/roots/{name}", s.apiRemoveRoot)
 	admin.HandleFunc("GET /api/agents", s.apiAgents)
 	admin.HandleFunc("POST /api/agents", s.apiRunAgent)
@@ -321,6 +322,14 @@ func (s *Server) apiUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiAddRoot(w http.ResponseWriter, r *http.Request) {
+	s.apiSaveRoot(w, r, false)
+}
+
+func (s *Server) apiUpdateRoot(w http.ResponseWriter, r *http.Request) {
+	s.apiSaveRoot(w, r, true)
+}
+
+func (s *Server) apiSaveRoot(w http.ResponseWriter, r *http.Request, update bool) {
 	var req struct {
 		Path     string   `json:"path"`
 		Name     string   `json:"name"`
@@ -332,14 +341,23 @@ func (s *Server) apiAddRoot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	root, err := s.opts.Source.AddRoot(&fleetv1.AddRootRequest{
+	input := &fleetv1.AddRootRequest{
 		Path: req.Path, Name: strings.TrimSpace(req.Name), Adapters: req.Adapters, Trust: req.Trust,
-	})
+	}
+	var root *fleetv1.Root
+	var err error
+	status := http.StatusCreated
+	if update {
+		root, err = s.opts.Source.UpdateRoot(r.PathValue("name"), input)
+		status = http.StatusOK
+	} else {
+		root, err = s.opts.Source.AddRoot(input)
+	}
 	if err != nil {
 		s.writeSourceError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]Root{"root": rootsOf([]*fleetv1.Root{root})[0]})
+	writeJSON(w, status, map[string]Root{"root": rootsOf([]*fleetv1.Root{root})[0]})
 }
 
 func (s *Server) apiRemoveRoot(w http.ResponseWriter, r *http.Request) {

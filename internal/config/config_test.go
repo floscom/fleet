@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -166,6 +167,49 @@ func TestAddRemoveRoot(t *testing.T) {
 	}
 	if len(c.Roots) != 1 || c.Roots[0].Name != "code-2" {
 		t.Fatalf("roots = %+v", c.Roots)
+	}
+}
+
+func TestUpdateRoot(t *testing.T) {
+	base := realTemp(t)
+	a := mkdir(t, base, "a")
+	b := mkdir(t, base, "b")
+	newPath := mkdir(t, base, "new")
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(a, link); err != nil {
+		t.Fatal(err)
+	}
+	c := &Config{Roots: []Root{{Name: "a", Path: a}, {Name: "b", Path: b}}}
+	updated, err := c.UpdateRoot("a", Root{Name: "a", Path: link, Adapters: []string{"claude"}, Trust: true})
+	if err != nil || updated.Path != a || !updated.Trust || !reflect.DeepEqual(updated.Adapters, []string{"claude"}) {
+		t.Fatalf("edit own path/name: %+v, %v", updated, err)
+	}
+	before := append([]Root(nil), c.Roots...)
+	for _, tc := range []struct {
+		name string
+		root Root
+	}{
+		{"a", Root{Name: "b", Path: a}},
+		{"a", Root{Name: "renamed", Path: b}},
+		{"a", Root{Name: "bad/name", Path: a}},
+		{"a", Root{Path: filepath.Join(base, "missing")}},
+		{"gone", Root{Path: a}},
+	} {
+		_, err := c.UpdateRoot(tc.name, tc.root)
+		if err == nil || !reflect.DeepEqual(c.Roots, before) {
+			t.Fatalf("invalid update %+v: %v; roots = %+v", tc, err, c.Roots)
+		}
+		if tc.name == "gone" && !errors.Is(err, ErrUnknownRoot) {
+			t.Fatalf("unknown root error = %v", err)
+		}
+	}
+	updated, err = c.UpdateRoot("a", Root{Name: "renamed", Path: newPath})
+	if err != nil || updated.Name != "renamed" || updated.Path != newPath || updated.Trust || len(updated.Adapters) != 0 || len(c.Roots) != 2 || c.Roots[0].Name != "renamed" || !reflect.DeepEqual(c.Roots[1], before[1]) {
+		t.Fatalf("rename/move/clear settings: %+v, %v; roots = %+v", updated, err, c.Roots)
+	}
+	updated, err = c.UpdateRoot("renamed", Root{Path: newPath, Trust: true})
+	if err != nil || updated.Name != "renamed" {
+		t.Fatalf("empty name should retain current name: %+v, %v", updated, err)
 	}
 }
 

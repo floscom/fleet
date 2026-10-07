@@ -212,7 +212,7 @@ func forwardable(method, rest string) bool {
 		return agentRoute(rest, "chat", "screen", "workflows", "image", "media") || workflowChatRoute(rest, "chat", "image")
 	case http.MethodPost:
 		return rest == "roots" || rest == "agents" || agentRoute(rest, "input", "answer", "model", "stop")
-	case http.MethodDelete:
+	case http.MethodPut, http.MethodDelete:
 		return oneSegment(strings.CutPrefix(rest, "roots/"))
 	}
 	return false

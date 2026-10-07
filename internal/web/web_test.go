@@ -27,14 +27,15 @@ import (
 // fakeSource feeds the hub from a channel the test writes to.
 type fakeSource struct {
 	// id is the server id, default "self-id".
-	id     string
-	events chan *fleetv1.Event
-	mu     sync.Mutex
-	devs   []Device
-	added  []*fleetv1.AddRootRequest
-	// addErr and removeErr are returned by AddRoot and RemoveRoot.
-	addErr, removeErr error
-	removed           []string
+	id      string
+	events  chan *fleetv1.Event
+	mu      sync.Mutex
+	devs    []Device
+	added   []*fleetv1.AddRootRequest
+	updated []fakeRootUpdate
+	// These errors are returned by their corresponding root operations.
+	addErr, updateErr, removeErr error
+	removed                      []string
 
 	// Agents: runs, stops and inputs received; chat is what Chat returns
 	// (Agent filled in from agent).
@@ -60,6 +61,11 @@ type fakeInput struct {
 	submit      bool
 	keys        []string
 	images      [][]byte
+}
+
+type fakeRootUpdate struct {
+	name string
+	req  *fleetv1.AddRootRequest
 }
 
 func newFakeSource(agents ...*fleetv1.Agent) *fakeSource {
@@ -100,6 +106,16 @@ func (s *fakeSource) AddRoot(req *fleetv1.AddRootRequest) (*fleetv1.Root, error)
 		return nil, s.addErr
 	}
 	s.added = append(s.added, req)
+	return &fleetv1.Root{Name: req.Name, Path: req.Path, Adapters: req.Adapters, Trust: req.Trust}, nil
+}
+
+func (s *fakeSource) UpdateRoot(name string, req *fleetv1.AddRootRequest) (*fleetv1.Root, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.updateErr != nil {
+		return nil, s.updateErr
+	}
+	s.updated = append(s.updated, fakeRootUpdate{name: name, req: req})
 	return &fleetv1.Root{Name: req.Name, Path: req.Path, Adapters: req.Adapters, Trust: req.Trust}, nil
 }
 
@@ -307,6 +323,7 @@ func TestIcons(t *testing.T) {
 	if len(paths) < 6 {
 		t.Fatalf("icons: %v", paths)
 	}
+	paths = append(paths, "/providers/claude.svg", "/providers/openai.svg", "/providers/shell.svg")
 	for _, p := range paths {
 		if resp, _ := get(p); !strings.HasPrefix(resp.Header.Get("Content-Type"), "image/") {
 			t.Fatalf("%s: Content-Type %q", p, resp.Header.Get("Content-Type"))

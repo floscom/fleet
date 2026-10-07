@@ -67,6 +67,9 @@ func TestPeerAuth(t *testing.T) {
 	if code, body := signed(t, ts, key, "b-id", "", "POST", "/api/roots", `{"path":"/srv/x","name":"x"}`); code != 201 || len(src.added) != 1 {
 		t.Fatalf("signed POST: %d %s", code, body)
 	}
+	if code, body := signed(t, ts, key, "b-id", "", "PUT", "/api/roots/my%20root", `{"path":"/srv/new","name":"new","trust":true}`); code != 200 || len(src.updated) != 1 || src.updated[0].name != "my root" || !src.updated[0].req.Trust {
+		t.Fatalf("signed PUT: %d %s", code, body)
+	}
 	if code, _ := signed(t, ts, key, "b-id", "", "DELETE", "/api/roots/my%20root", ""); code != 204 || src.removed[0] != "my root" {
 		t.Fatalf("signed DELETE: %d %v", code, src.removed)
 	}
@@ -245,6 +248,13 @@ func TestHostProxy(t *testing.T) {
 	var added struct{ Root Root }
 	if code := api(t, a, "POST", "/api/hosts/b-id/roots", tok, `{"path":"/srv/api","name":"api"}`, &added); code != 201 || added.Root.Name != "api" {
 		t.Fatalf("b add: %d %+v", code, added)
+	}
+	var updated struct{ Root Root }
+	if code := api(t, a, "PUT", "/api/hosts/b-id/roots/my%20root", tok, `{"path":"/srv/new","name":"new","adapters":["claude"],"trust":true}`, &updated); code != 200 || updated.Root.Name != "new" || !updated.Root.Trust {
+		t.Fatalf("b update: %d %+v", code, updated)
+	}
+	if len(bSrc.updated) != 1 || bSrc.updated[0].name != "my root" || bSrc.updated[0].req.Path != "/srv/new" || !reflect.DeepEqual(bSrc.updated[0].req.Adapters, []string{"claude"}) {
+		t.Fatalf("b got updates %v", bSrc.updated)
 	}
 	if code := api(t, a, "DELETE", "/api/hosts/b-id/roots/my%20root", tok, "", nil); code != 204 {
 		t.Fatalf("b remove: %d", code)

@@ -327,6 +327,10 @@ there needed. That browser then shows **admin** in the header and can:
   folders; git repositories and existing roots are marked. Then pick a
   name, optionally limit it to some agents, optionally trust it (see
   [Folder trust](#folder-trust)) and add the current folder.
+- **Edit roots**: *Roots → edit* opens the folder picker with the current
+  name, path, agent restrictions and trust setting. Save changes directly;
+  running agents are not affected. An existing root in the picker also has
+  an *Edit root* button, including on other machines.
 - **Remove roots** (running agents are not affected).
 - **Run sessions**: start Claude Code, Codex or a shell, follow the
   conversation, answer the agent, type into it and stop it (see
@@ -371,6 +375,10 @@ Changes apply at once, rewrite `config.toml` and show up in the CLI
   disables it. If the port is busy the daemon logs a warning and runs
   without it. The daemon advertises the dashboard's port in mDNS (TXT
   `web`) unless it listens on loopback only.
+- On desktop, clicking outside a dialog closes it. **Ctrl+1** through
+  **Ctrl+9** opens the first nine live agents in the displayed order,
+  respecting the folder filter. The shortcuts also switch sessions from
+  an open chat; each agent row shows its shortcut.
 - Text fields are 16px on phones, so iOS does not zoom in, and dialogs
   do not pop up the keyboard when they open. Buttons, keys and list rows
   are at least 44px tall on touch screens and phone-width windows.
@@ -438,6 +446,11 @@ on a root, which picks that folder) starts one:
 
 - **Start**: pick the machine, the agent (Claude Code, Codex, shell), a
   root and a folder inside it, and optionally a prompt.
+  Agent rows show a small provider logo on the right. The launcher remembers
+  the last successfully used provider for each root on each machine, using
+  recent sessions on other browsers and local storage after sessions are
+  removed. If that provider is unavailable or disallowed, it picks an
+  installed provider the root allows.
   *Model* and *Effort* choose what the agent runs at (Claude Code: Opus,
   Fable, Sonnet, Haiku at Low to Max or Ultracode; Codex: the models it
   lists), *Default* leaves it to the CLI's own settings; the page remembers
@@ -625,8 +638,8 @@ Trusting a parent folder is not enough for either CLI: both look only at
 the repository (or folder) itself. That is why fleet trusts each
 repository as it is used, not the root. A trusted project may run its own
 hooks, MCP servers and settings, so only use `--trust` for roots that hold
-code you trust. Existing roots can be changed in `config.toml` (then
-restart the daemon).
+  code you trust. Existing roots can be edited in the dashboard, or in
+  `config.toml` (then restart the daemon).
 
 ## Security model
 

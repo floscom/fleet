@@ -84,7 +84,7 @@ func TestAdminAuth(t *testing.T) {
 
 	// Every admin route refuses a missing or wrong token.
 	for _, rt := range [][2]string{{"GET", "/api/fs"}, {"GET", "/api/adapters"}, {"GET", "/api/usage"}, {"GET", "/api/roots"}, {"POST", "/api/roots"},
-		{"DELETE", "/api/roots/code"}, {"GET", "/api/join"}, {"GET", "/api/hosts/peer-id/fs"}} {
+		{"PUT", "/api/roots/code"}, {"DELETE", "/api/roots/code"}, {"GET", "/api/join"}, {"GET", "/api/hosts/peer-id/fs"}} {
 		for _, bad := range []string{"", "wrong"} {
 			var e struct{ Error string }
 			if code := api(t, ts, rt[0], rt[1], bad, `{"path":"/"}`, &e); code != 401 || e.Error == "" {
@@ -92,8 +92,8 @@ func TestAdminAuth(t *testing.T) {
 			}
 		}
 	}
-	if len(src.added)+len(src.removed) != 0 {
-		t.Fatalf("source changed without auth: %v %v", src.added, src.removed)
+	if len(src.added)+len(src.updated)+len(src.removed) != 0 {
+		t.Fatalf("source changed without auth: %v %v %v", src.added, src.updated, src.removed)
 	}
 
 	// A cookie is not a credential.
@@ -207,6 +207,29 @@ func TestAdminRoots(t *testing.T) {
 	src.addErr = io.ErrUnexpectedEOF
 	if code := api(t, ts, "POST", "/api/roots", tok, `{"path":"/srv/code"}`, &e); code != 500 || e.Error != "internal error" {
 		t.Fatalf("internal: %d %+v", code, e)
+	}
+
+	var updated struct{ Root Root }
+	if code := api(t, ts, "PUT", "/api/roots/my%20root", tok, `{"path":"/srv/new","name":" renamed ","adapters":["claude"],"trust":true}`, &updated); code != 200 || updated.Root.Name != "renamed" || updated.Root.Path != "/srv/new" || !updated.Root.Trust {
+		t.Fatalf("update: %d %+v", code, updated)
+	}
+	if len(src.updated) != 1 || src.updated[0].name != "my root" || src.updated[0].req.Name != "renamed" || src.updated[0].req.Path != "/srv/new" || !reflect.DeepEqual(src.updated[0].req.Adapters, []string{"claude"}) || !src.updated[0].req.Trust {
+		t.Fatalf("source got updates %v", src.updated)
+	}
+	if code := api(t, ts, "PUT", "/api/roots/code", tok, `{nope`, &e); code != 400 || len(src.updated) != 1 {
+		t.Fatalf("bad update JSON: %d %+v", code, e)
+	}
+	src.updateErr = &Error{Status: 404, Msg: `unknown root "gone"`}
+	if code := api(t, ts, "PUT", "/api/roots/gone", tok, `{"path":"/srv/new"}`, &e); code != 404 || !strings.Contains(e.Error, "gone") {
+		t.Fatalf("update unknown: %d %+v", code, e)
+	}
+	src.updateErr = &Error{Status: 400, Msg: `root "code" already exists`}
+	if code := api(t, ts, "PUT", "/api/roots/my%20root", tok, `{"path":"/srv/new","name":"code"}`, &e); code != 400 || !strings.Contains(e.Error, "already exists") {
+		t.Fatalf("update duplicate: %d %+v", code, e)
+	}
+	src.updateErr = io.ErrUnexpectedEOF
+	if code := api(t, ts, "PUT", "/api/roots/code", tok, `{"path":"/srv/new"}`, &e); code != 500 || e.Error != "internal error" {
+		t.Fatalf("update internal: %d %+v", code, e)
 	}
 
 	if code := api(t, ts, "DELETE", "/api/roots/my%20root", tok, "", nil); code != 204 {

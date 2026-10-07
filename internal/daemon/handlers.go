@@ -258,6 +258,33 @@ func (d *daemon) ensureRoots(roots []config.Root) error {
 	return nil
 }
 
+func (d *daemon) updateRoot(name string, req *fleetv1.AddRootRequest) (*fleetv1.Root, error) {
+	if !filepath.IsAbs(req.GetPath()) {
+		return nil, errf(codeInvalid, "root path must be absolute: %q", req.GetPath())
+	}
+	for _, a := range req.GetAdapters() {
+		if _, ok := d.opts.Adapters.Get(a); !ok {
+			return nil, errf(codeNotFound, "unknown adapter %q", a)
+		}
+	}
+	d.cfgMu.Lock()
+	old := append([]config.Root(nil), d.cfg.Roots...)
+	r, err := d.cfg.UpdateRoot(name, config.Root{Path: req.GetPath(), Name: req.GetName(), Adapters: req.GetAdapters(), Trust: req.GetTrust()})
+	if err != nil {
+		d.cfgMu.Unlock()
+		return nil, resolveErr(err)
+	}
+	if err := d.cfg.Save(); err != nil {
+		d.cfg.Roots = old
+		d.cfgMu.Unlock()
+		return nil, fmt.Errorf("save config: %w", err)
+	}
+	d.cfgMu.Unlock()
+	d.log.Info("root updated", "previousName", name, "name", r.Name, "path", r.Path)
+	d.agents.broadcastRoots(d.roots())
+	return r.Proto(), nil
+}
+
 func (d *daemon) removeRoot(name string) error {
 	d.cfgMu.Lock()
 	old := append([]config.Root(nil), d.cfg.Roots...)

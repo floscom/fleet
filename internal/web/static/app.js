@@ -114,6 +114,22 @@
     return h('span', cls || 'inline-flex items-center rounded border border-ink-600 bg-ink-800 px-1.5 py-px font-mono text-[11px] text-zinc-400', text);
   }
 
+  function providerLogo(adapter) {
+    const providers = {
+      claude: ['claude', 'Claude · Anthropic'],
+      codex: ['openai', 'Codex · OpenAI'],
+      shell: ['shell', 'Shell'],
+    };
+    const provider = providers[adapter];
+    if (!Array.isArray(provider)) return null;
+    const img = h('img', 'size-5 shrink-0 object-contain');
+    img.src = `/providers/${provider[0]}.svg`;
+    img.alt = provider[1];
+    img.title = provider[1];
+    img.width = img.height = 20;
+    return img;
+  }
+
   // pathBreaks lets a long path wrap before a slash rather than inside a
   // folder name.
   function pathBreaks(p) {
@@ -224,7 +240,7 @@
   }
 
   // agentRow is the row of agent a, running on machine host ('' = here).
-  function agentRow({ a, host }) {
+  function agentRow({ a, host, shortcut = 0 }) {
     const st = stateOf(a);
     const done = isFinished(a);
     const key = agentKey(host, a.id);
@@ -233,6 +249,11 @@
       : 'relative flex flex-col gap-1.5 px-4 py-3 transition-colors hover:bg-ink-850 sm:flex-row sm:gap-3');
     li.dataset.id = a.id;
     li.dataset.key = key;
+    li.dataset.host = host;
+    if (admin && shortcut) {
+      li.dataset.shortcut = String(shortcut);
+      li.setAttribute('aria-keyshortcuts', `Control+${shortcut}`);
+    }
     li.append(h('span', 'absolute inset-y-2 left-0 w-0.5 rounded-r ' + st.edge));
     // By the event's path: a button's handler may have replaced the
     // clicked node (its iOS haptic label) before the click gets here.
@@ -248,6 +269,12 @@
     const name = h('span', done ? 'truncate font-mono text-[13px] font-semibold text-zinc-400' : 'truncate font-mono text-[13px] font-semibold text-zinc-100', a.name || a.id);
     name.title = a.id;
     top.append(name, stateBadge(a));
+    if (admin && shortcut) {
+      const hint = h('kbd', 'touch:hidden rounded border border-ink-600 px-1 font-mono text-[10px] leading-4 text-zinc-500', `Ctrl+${shortcut}`);
+      hint.title = `Open this session with Ctrl+${shortcut}`;
+      hint.setAttribute('aria-hidden', 'true');
+      top.append(hint);
+    }
     if (a.usageLimit && !done) top.append(limitChip(a.usageLimit));
     if (S.remote.size) top.append(hostChip(host));
     if (a.adapter) top.append(chip(a.adapter));
@@ -292,14 +319,15 @@
       li.append(h('span', 'shimmer-bar pointer-events-none absolute inset-x-0 bottom-0 h-px animate-shimmer motion-reduce:animate-none'));
     }
 
-    // right column: attached, updated
-    const side = h('div', 'flex shrink-0 flex-row-reverse items-center justify-end gap-3 text-xs sm:flex-col sm:items-end sm:justify-start sm:gap-1');
+    // right column: provider, attached, updated
+    const side = h('div', 'flex shrink-0 flex-row-reverse items-center justify-between gap-3 text-xs sm:flex-col sm:items-end sm:justify-start sm:gap-1');
     const att = a.attachedClients || 0;
     const attEl = h('span', att > 0
       ? 'inline-flex items-center gap-1 rounded-full bg-emerald-400/10 px-1.5 font-mono tabular-nums text-emerald-300'
       : 'inline-flex items-center gap-1 px-1.5 font-mono tabular-nums text-zinc-600', (att > 0 ? '◉ ' : '○ ') + att);
     attEl.title = att === 1 ? '1 client attached' : `${att} clients attached`;
-    side.append(attEl, relTime(a.updatedAtMs, 'updated ', 'whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-500'));
+    side.append(h('div', 'flex items-center gap-2', attEl, providerLogo(a.adapter)),
+      relTime(a.updatedAtMs, 'updated ', 'whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-500'));
     if (admin) {
       const open = h('button', a.state === 'needs_input'
         ? 'touch:min-h-11 rounded-md bg-amber-400/15 px-2 py-0.5 text-xs font-medium text-amber-200 ring-1 ring-inset ring-amber-400/40 hover:bg-amber-400/25 focus-visible:outline-2 focus-visible:outline-amber-400'
@@ -572,7 +600,7 @@
     const hist = all.filter((x) => isFinished(x.a)).sort(({ a: x }, { a: y }) => (y.updatedAtMs || 0) - (x.updatedAtMs || 0));
 
     const ul = $('agents-live');
-    if (live.length) ul.replaceChildren(...live.map(agentRow));
+    if (live.length) ul.replaceChildren(...live.map((x, i) => agentRow({ ...x, shortcut: i < 9 ? i + 1 : 0 })));
     else if (!S.snapshotDone) ul.replaceChildren(emptyRow('loading…'));
     else if (admin) {
       const li = emptyRow('no live agents', 'start Claude Code or Codex on any machine of the fleet');
@@ -758,6 +786,11 @@
         go.setAttribute('aria-label', `Start a session in ${r.name}`);
         go.addEventListener('click', () => openLaunch({ root: r.name }));
         li.append(go);
+        const edit = h('button', 'touch:min-h-11 shrink-0 rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', 'edit');
+        edit.type = 'button';
+        edit.setAttribute('aria-label', `Edit root ${r.name}`);
+        edit.addEventListener('click', () => openPicker({ root: r, host: '' }));
+        li.append(edit);
       }
       if (admin) li.append(removeControl(r));
       return flash(li, 'root:' + r.name);
@@ -1167,7 +1200,7 @@
     if (admin) {
       pill.className = 'inline-flex items-center gap-1.5 rounded-full border border-violet-400/30 bg-violet-400/10 px-2.5 py-1 text-xs font-medium text-violet-200';
       pill.textContent = 'admin';
-      pill.title = 'This browser can add and remove roots.';
+      pill.title = 'This browser can add, edit and remove roots.';
     } else {
       pill.className = 'inline-flex items-center gap-1.5 rounded-full border border-ink-600 bg-ink-850 px-2.5 py-1 text-xs font-medium text-zinc-500';
       pill.textContent = 'read-only';
@@ -1402,13 +1435,7 @@
     dlg.addEventListener('close', () => {
       $('unlock-key').value = '';
     });
-    let downOutside = false;
-    dlg.addEventListener('mousedown', (ev) => {
-      downOutside = ev.target === dlg;
-    });
-    dlg.addEventListener('click', (ev) => {
-      if (downOutside && ev.target === dlg && !unlockBusy) closeUnlock();
-    });
+    wireBackdrop(dlg, closeUnlock, () => !unlockBusy);
   }
 
   async function removeRoot(name) {
@@ -1437,7 +1464,8 @@
     seq: 0, // request counter; stale replies are dropped
     loading: false,
     error: '',
-    busy: false, // an add is in flight
+    busy: false, // a save is in flight
+    editing: null, // original root while editing; its name identifies the update
     adapters: null, // [{id, name, available}] once loaded
     roots: null, // roots of another machine, once loaded
     joinCmd: '', // `fleet start --join <key>`, once loaded
@@ -1446,6 +1474,26 @@
   // Phones and tablets: no keyboard to keep focus for, and focusing a text
   // field opens the on-screen keyboard.
   const touch = () => matchMedia('(pointer: coarse)').matches;
+
+  // Require both ends of the click to be outside the dialog's bounds, so
+  // selecting text or clicking empty space inside never dismisses it.
+  function wireBackdrop(dlg, close, canClose = () => true) {
+    let downOutside = false;
+    const outside = (ev) => {
+      const r = dlg.getBoundingClientRect();
+      return ev.target === dlg && (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom);
+    };
+    dlg.addEventListener('pointerdown', (ev) => {
+      downOutside = ev.button === 0 && outside(ev);
+    });
+    dlg.addEventListener('pointercancel', () => { downOutside = false; });
+    dlg.addEventListener('close', () => { downOutside = false; });
+    dlg.addEventListener('click', (ev) => {
+      const dismiss = downOutside && outside(ev);
+      downOutside = false;
+      if (dismiss && canClose()) close();
+    });
+  }
 
   // pickerHosts: this daemon, then the fleets on the LAN with a dashboard.
   function pickerHosts() {
@@ -1475,19 +1523,23 @@
     return best;
   }
 
-  function openPicker() {
-    if (!admin) return;
-    $('picker-name').value = '';
-    $('picker-trust').checked = false;
+  function openPicker(opts) {
+    if (!admin || picker.busy) return;
+    const editing = (opts && opts.root) || null;
+    if (editing) resetHost(opts.host || '');
+    picker.editing = editing;
+    $('picker-h').textContent = editing ? 'Edit root folder' : 'Add a root folder';
+    $('picker-name').value = editing ? editing.name : '';
+    $('picker-trust').checked = !!editing && !!editing.trust;
     $('picker-filter').value = '';
     picker.error = '';
     picker.open = true;
     if (picker.host && !pickerHosts().some((x) => x.id === picker.host)) resetHost('');
-    $('picker').showModal();
+    if (!$('picker').open) $('picker').showModal();
     renderHosts();
     renderAdapters();
     renderPicker();
-    browse(picker.dir ? picker.dir.path : '');
+    browse(editing ? editing.path : picker.dir ? picker.dir.path : '');
     loadAdapters();
     loadHostRoots();
     checkHosts();
@@ -1530,7 +1582,7 @@
       if (typed || document.activeElement !== field) field.value = dir.path;
       if (moved) {
         $('picker-filter').value = '';
-        $('picker-name').value = '';
+        if (!picker.editing) $('picker-name').value = '';
         $('picker-list').scrollTop = 0;
       }
     }
@@ -1625,6 +1677,7 @@
       rb.name = 'picker-host';
       rb.value = x.id;
       rb.checked = x.id === picker.host;
+      rb.disabled = picker.busy || (!!picker.editing && x.id !== picker.host);
       const [dot, note] = HOST_STATE[x.id ? picker.hosts.get(x.id) || 'checking' : 'self'];
       return h('label', HOST_CHIP, rb, h('span', dot), x.name,
         note ? h('span', 'font-sans text-[11px] text-zinc-500', note) : null);
@@ -1643,7 +1696,7 @@
   }
 
   function selectHost(id) {
-    if (picker.host === id) return;
+    if (picker.host === id || picker.editing || picker.busy) return;
     resetHost(id);
     $('picker-path').value = '';
     $('picker-filter').value = '';
@@ -1730,14 +1783,20 @@
       box.replaceChildren(h('span', 'text-xs text-zinc-600', 'loading…'));
       return;
     }
-    if (!picker.adapters.length) {
+    if (!picker.adapters.length && !(picker.editing && picker.editing.adapters && picker.editing.adapters.length)) {
       box.replaceChildren(h('span', 'text-xs text-zinc-600', 'all adapters'));
       return;
     }
-    box.replaceChildren(...picker.adapters.map((a) => {
+    const adapters = [...picker.adapters];
+    // Keep stored restrictions selectable even if an adapter disappeared.
+    for (const id of (picker.editing && picker.editing.adapters) || []) {
+      if (!adapters.some((a) => a.id === id)) adapters.push({ id, name: id, available: false });
+    }
+    box.replaceChildren(...adapters.map((a) => {
       const cb = h('input', 'accent-emerald-400');
       cb.type = 'checkbox';
       cb.value = a.id;
+      cb.checked = !!picker.editing && (picker.editing.adapters || []).includes(a.id);
       const label = h('label', 'touch:min-h-11 inline-flex cursor-pointer select-none items-center gap-1.5 rounded-md border border-ink-600 bg-ink-900 px-2 py-1 font-mono text-[12px] text-zinc-300 hover:border-zinc-500 has-checked:border-emerald-400/50 has-checked:bg-emerald-400/10 has-checked:text-emerald-200', cb, a.id);
       label.title = a.available ? a.name : `${a.name}: not installed on this machine`;
       if (!a.available) label.append(h('span', 'text-zinc-600', 'n/a'));
@@ -1751,6 +1810,7 @@
     renderCrumbs(dir ? dir.path : '');
     renderPickerList();
     const existing = dir && rootAt(dir.path);
+    const conflict = existing && (!picker.editing || existing.name !== picker.editing.name);
     const st = $('picker-status');
     const notJoined = picker.host && picker.hosts.get(picker.host) === 'not_joined';
     if (notJoined) {
@@ -1762,19 +1822,25 @@
     } else if (!dir) {
       st.className = 'min-h-5 text-xs text-zinc-500';
       st.textContent = 'loading…';
-    } else if (existing) {
+    } else if (conflict) {
       st.className = 'min-h-5 text-xs text-amber-200/90';
       st.textContent = `This folder is already the root "${existing.name}".`;
+      if (!picker.editing) {
+        const edit = h('button', 'touch:min-h-11 ml-2 rounded px-1.5 py-0.5 font-medium text-emerald-300 hover:bg-ink-800 hover:text-emerald-200 focus-visible:outline-2 focus-visible:outline-emerald-400', 'Edit root');
+        edit.type = 'button';
+        edit.addEventListener('click', () => openPicker({ root: existing, host: picker.host }));
+        st.append(edit);
+      }
     } else {
       const around = rootAround(dir.path);
       st.className = 'min-h-5 min-w-0 break-all text-xs text-zinc-500';
-      st.replaceChildren(h('span', '', 'adds ', h('span', 'font-mono text-zinc-100', dir.path),
-        around ? ` · inside root "${around.name}", where agents can already start` : null));
+      st.replaceChildren(h('span', '', picker.editing ? 'saves ' : 'adds ', h('span', 'font-mono text-zinc-100', dir.path),
+        around && around !== existing ? ` · inside root "${around.name}", where agents can already start` : null));
     }
-    $('picker-name').placeholder = dir ? baseName(dir.path) || 'root' : '';
+    $('picker-name').placeholder = picker.editing ? picker.editing.name : dir ? baseName(dir.path) || 'root' : '';
     const add = $('picker-add');
-    add.disabled = !dir || picker.loading || picker.busy || !!existing || notJoined;
-    add.textContent = picker.busy ? 'Adding…' : 'Add as root';
+    add.disabled = !dir || picker.loading || picker.busy || !!conflict || notJoined;
+    add.textContent = picker.editing ? (picker.busy ? 'Saving…' : 'Save changes') : (picker.busy ? 'Adding…' : 'Add as root');
     $('picker-list').classList.toggle('opacity-50', picker.loading);
   }
 
@@ -1862,10 +1928,12 @@
     return h('li', '', b);
   }
 
-  async function addRoot(ev) {
+  async function saveRoot(ev) {
     ev.preventDefault();
     const dir = picker.dir;
-    if (!dir || picker.loading || picker.busy || rootAt(dir.path)) return;
+    const editing = picker.editing;
+    const existing = dir && rootAt(dir.path);
+    if (!dir || picker.loading || picker.busy || (existing && (!editing || existing.name !== editing.name))) return;
     const name = $('picker-name').value.trim();
     if (/[/\\]/.test(name)) {
       picker.error = 'a root name cannot contain / or \\';
@@ -1878,12 +1946,13 @@
     picker.error = '';
     renderPicker();
     try {
-      const r = await api('POST', hostAPI('roots'), { path: dir.path, name, adapters, trust: $('picker-trust').checked });
+      const r = await api(editing ? 'PUT' : 'POST', hostAPI('roots' + (editing ? '/' + encodeURIComponent(editing.name) : '')), { path: dir.path, name, adapters, trust: $('picker-trust').checked });
+      const action = editing ? 'updated' : 'added';
       if (host) {
-        toast(`added root ${r.root.name} on ${hostName(host)} → ${shortPath(r.root.path)}`);
+        toast(`${action} root ${r.root.name} on ${hostName(host)} → ${shortPath(r.root.path)}`);
       } else {
         markChanged('root:' + r.root.name);
-        toast(`added root ${r.root.name} → ${shortPath(r.root.path)}`);
+        toast(`${action} root ${r.root.name} → ${shortPath(r.root.path)}`);
       }
       closePicker();
     } catch (e) {
@@ -1899,7 +1968,7 @@
     const list = $('picker-list');
     $('roots-add').addEventListener('click', openPicker);
     $('signout').addEventListener('click', signOut);
-    $('picker-form').addEventListener('submit', addRoot);
+    $('picker-form').addEventListener('submit', saveRoot);
     $('picker-close').addEventListener('click', closePicker);
     $('picker-cancel').addEventListener('click', closePicker);
     $('picker-home').addEventListener('click', () => browse(''));
@@ -1954,15 +2023,7 @@
       picker.loading = false;
       clearTimeout(joinTimer);
     });
-    // Close on a click on the backdrop, but not when a text selection
-    // started inside the dialog ends outside it.
-    let downOutside = false;
-    dlg.addEventListener('mousedown', (ev) => {
-      downOutside = ev.target === dlg;
-    });
-    dlg.addEventListener('click', (ev) => {
-      if (downOutside && ev.target === dlg) closePicker();
-    });
+    wireBackdrop(dlg, closePicker, () => !picker.busy);
   }
 
   // ----------------------------------------------------------- other fleets
@@ -2136,6 +2197,7 @@
     look: null, // {root, sub} the folder list looks into; null = recent folders and roots
     dirs: new Map(), // dirKey -> {root, sub, entries, truncated, error}, entries null while listed
     adapter: '',
+    adapterRoot: '', // host/root whose provider was restored during this opening
     gen: 0, // bumped for another machine or on close: stale replies are dropped
     busy: false, // a start is in flight
     error: '',
@@ -2254,6 +2316,7 @@
     const host = launch.host;
     const gen = ++launch.gen;
     launch.adapters = null;
+    launch.adapterRoot = '';
     launch.roots = null;
     launch.dirs = new Map();
     launch.look = null;
@@ -2460,9 +2523,51 @@
     }
   }
 
-  // pickAdapter keeps the chosen adapter if the root allows it and it is
-  // installed, else takes Claude Code, Codex or the first one that is.
+  // Last successfully used provider, per machine and root folder. Session
+  // history supplies it on other browsers; local storage survives pruning.
+  const LAUNCH_PROVIDERS = 'fleet.launch.providers';
+  let launchProviders = {};
+  try {
+    const saved = JSON.parse(localStorage.getItem(LAUNCH_PROVIDERS));
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) launchProviders = saved;
+  } catch {
+    // Storage can be disabled; keep the choices for this page instead.
+  }
+
+  const providerRootKey = (host, root) => JSON.stringify([host || (S.server && S.server.id) || '', root.path]);
+
+  function lastRootProvider(host, root) {
+    const saved = launchProviders[providerRootKey(host, root)];
+    const agents = host ? (S.remote.get(host) || { agents: new Map() }).agents : S.agents;
+    let latest = saved && typeof saved.adapter === 'string'
+      ? { adapter: saved.adapter, usedAtMs: Number(saved.usedAtMs) || 0 } : null;
+    for (const a of agents.values()) {
+      if (a.root !== root.name || !a.adapter) continue;
+      if (!latest || a.createdAtMs > latest.usedAtMs) latest = { adapter: a.adapter, usedAtMs: a.createdAtMs || 0 };
+    }
+    return latest ? latest.adapter : '';
+  }
+
+  function rememberRootProvider(host, root, adapter) {
+    launchProviders[providerRootKey(host, root)] = { adapter, usedAtMs: Date.now() };
+    try {
+      localStorage.setItem(LAUNCH_PROVIDERS, JSON.stringify(launchProviders));
+    } catch {
+      // The in-memory choice still lasts for this page.
+    }
+  }
+
+  // Restore when the root changes, then preserve explicit choices while
+  // async folder listings render. Unavailable/disallowed providers fall
+  // back to Claude Code, Codex or the first installed CLI.
   function pickAdapter(list) {
+    if (!launch.adapters) return;
+    const root = launchRoot();
+    const key = root ? providerRootKey(launch.host, root) : '';
+    if (key !== launch.adapterRoot) {
+      launch.adapterRoot = key;
+      launch.adapter = root ? lastRootProvider(launch.host, root) : '';
+    }
     const ok = (id) => list.some((a) => a.id === id && a.available);
     if (ok(launch.adapter)) return;
     launch.adapter = ['claude', 'codex'].find(ok) || (list.find((a) => a.available) || {}).id || '';
@@ -2741,6 +2846,7 @@
     const root = launchRoot();
     if (!root || !launch.adapter || launch.busy || launchImagesProblem()) return;
     const host = launch.host;
+    const adapter = launch.adapter;
     const then = launch.then || checkedValue('launch-then') || 'chat';
     launch.then = '';
     launch.busy = true;
@@ -2751,7 +2857,7 @@
       const r = await api('POST', launchAPI('agents'), {
         model: (pick && pick.model && pick.model.id) || '',
         effort: (pick && pick.effort && pick.effort.id) || '',
-        adapter: launch.adapter,
+        adapter,
         root: root.name,
         path: launch.sub,
         prompt: $('launch-prompt').value,
@@ -2761,6 +2867,7 @@
         sandbox: checkedValue('launch-sandbox'),
         images: launch.images.map((im) => im.data),
       });
+      rememberRootProvider(host, root, adapter);
       launch.busy = false;
       closeLaunch();
       toast(`started ${r.agent.name}${host ? ' on ' + hostName(host) : ''}`);
@@ -2900,13 +3007,7 @@
       launch.listSig = '';
       launch.listView = '';
     });
-    let downOutside = false;
-    dlg.addEventListener('mousedown', (ev) => {
-      downOutside = ev.target === dlg;
-    });
-    dlg.addEventListener('click', (ev) => {
-      if (downOutside && ev.target === dlg && !launch.busy) closeLaunch();
-    });
+    wireBackdrop(dlg, closeLaunch, () => !launch.busy);
   }
 
   // ------------------------------------------------------------------- chat
@@ -5265,6 +5366,7 @@
       wf.sub = null;
       wf.cards.clear();
     });
+    wireBackdrop(dlg, closeChat);
     chat.feed = newFeed({
       scroller: $('chat-scroll'),
       log: $('chat-log'),
@@ -5897,12 +5999,24 @@
     });
   }
 
-  // N starts a session from anywhere on the page, but in a text field or
-  // an open dialog.
+  // Ctrl+1–9 opens the numbered live sessions, including from the chat's
+  // message box. N starts a session outside text fields and dialogs.
   function wireKeys() {
     document.addEventListener('keydown', (ev) => {
+      if (ev.defaultPrevented || ev.isComposing || ev.repeat || !admin) return;
+      if (ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey && /^[1-9]$/.test(ev.key)) {
+        if (document.querySelector('dialog[open]:not(#chat)')) return;
+        const row = $('agents-live').querySelector(`[data-shortcut="${ev.key}"]`);
+        if (!row) return;
+        const host = row.dataset.host;
+        const a = host ? S.remote.get(host)?.agents.get(row.dataset.id) : S.agents.get(row.dataset.id);
+        if (!a) return;
+        ev.preventDefault();
+        if (!chat.open || chat.host !== host || chat.id !== a.id) openChat(host, a.id, a);
+        return;
+      }
       if (ev.key !== 'n' && ev.key !== 'N') return;
-      if (ev.ctrlKey || ev.metaKey || ev.altKey || ev.isComposing || ev.repeat || !admin) return;
+      if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
       const t = ev.target;
       if (t.closest('input, textarea, select, [contenteditable]') || document.querySelector('dialog[open]')) return;
       ev.preventDefault();

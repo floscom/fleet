@@ -52,6 +52,11 @@ func (s *webSource) AddRoot(req *fleetv1.AddRootRequest) (*fleetv1.Root, error) 
 	return r, webError(err)
 }
 
+func (s *webSource) UpdateRoot(name string, req *fleetv1.AddRootRequest) (*fleetv1.Root, error) {
+	r, err := s.d.updateRoot(name, req)
+	return r, webError(err)
+}
+
 func (s *webSource) RemoveRoot(name string) error {
 	return webError(s.d.removeRoot(name))
 }

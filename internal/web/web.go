@@ -71,6 +71,8 @@ type Source interface {
 	Roots() []*fleetv1.Root
 	// AddRoot adds a root. Errors meant for the user are *Error.
 	AddRoot(req *fleetv1.AddRootRequest) (*fleetv1.Root, error)
+	// UpdateRoot replaces a root by name. Errors meant for the user are *Error.
+	UpdateRoot(name string, req *fleetv1.AddRootRequest) (*fleetv1.Root, error)
 	// RemoveRoot removes a root by name. Errors meant for the user are *Error.
 	RemoveRoot(name string) error
 	// Adapters lists the agent adapters.

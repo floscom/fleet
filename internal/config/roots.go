@@ -33,6 +33,31 @@ func (c *Config) AddRoot(r Root) (Root, error) {
 	return r, nil
 }
 
+// UpdateRoot replaces a root by name, retaining its position and its name
+// when r.Name is empty. Validation failures leave the original root intact.
+// It does not Save.
+func (c *Config) UpdateRoot(name string, r Root) (Root, error) {
+	for i, old := range c.Roots {
+		if old.Name != name {
+			continue
+		}
+		if r.Name == "" {
+			r.Name = old.Name
+		}
+		// Validate against every other root, allowing this root's own name
+		// and path without removing it from the live configuration.
+		other := Config{Roots: append([]Root(nil), c.Roots[:i]...)}
+		other.Roots = append(other.Roots, c.Roots[i+1:]...)
+		updated, err := other.AddRoot(r)
+		if err != nil {
+			return Root{}, err
+		}
+		c.Roots[i] = updated
+		return updated, nil
+	}
+	return Root{}, fmt.Errorf("%w %q", ErrUnknownRoot, name)
+}
+
 func (c *Config) uniqueName(base string) string {
 	if base == "" || base == string(filepath.Separator) || base == "." {
 		base = "root"
