@@ -98,9 +98,10 @@ type AgentUsage struct {
 	// Plan names the subscription, e.g. "max 20x".
 	Plan   string       `json:"plan,omitempty"`
 	Limits []UsageLimit `json:"limits"`
-	// Error is why the usage is unknown.
+	// Error is why the usage is unknown, or, with Limits, why they could
+	// not be renewed.
 	Error string `json:"error,omitempty"`
-	// AsOfMs is when the provider was asked (Unix ms); 0 if it was not.
+	// AsOfMs is when the provider told Limits (Unix ms); 0 if it never did.
 	AsOfMs int64 `json:"asOfMs,omitempty"`
 }
 

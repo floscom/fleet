@@ -169,7 +169,7 @@ func (m *manager) watchLimit(ctx context.Context, id string) {
 
 	now := time.Now()
 	usager, _ := ad.(adapter.Usager)
-	// The account's usage, asked only when needed (cached for usageTTL).
+	// The account's usage, asked only when needed (cached for usageTTL; unknown while it cannot be renewed).
 	var usage *usageEntry
 	exhausted := func() (window string, resets time.Time, known bool) {
 		if usager == nil {

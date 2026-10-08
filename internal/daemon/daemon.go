@@ -125,6 +125,7 @@ func Run(ctx context.Context, opts Options) error {
 		tmux:    tmux.New(cfg.TmuxSocket),
 		docker:  &sandbox.Docker{Binary: cfg.Sandbox.DockerOrDefault()},
 		conns:   map[*conn]struct{}{},
+		usage:   usageCache{path: config.Path("usage.json")},
 
 		sbProbed: map[string]bool{},
 		sbFleet:  map[string]string{},

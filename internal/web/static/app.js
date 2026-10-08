@@ -2103,9 +2103,12 @@
   // Each fleet's agent CLIs, installed or not, and how much of their
   // account's plan limits (5h session, week, ...) is used, shown under the
   // fleet in "Fleet on the network". Asked once a minute while the page is
-  // visible; the daemons cache the providers' answers.
+  // visible; the daemons cache the providers' answers for minutes and keep
+  // showing the last one while a provider refuses to tell.
 
   const USAGE_POLL_MS = 60000;
+  // Usage older than this is marked with when it was told.
+  const USAGE_STALE_MS = 10 * 60000;
   let usageTimer = 0;
   let usageBusy = false;
   let usageAt = 0;
@@ -2156,9 +2159,14 @@
     else {
       for (const l of a.limits) meters.append(limitMeter(l));
       if (a.plan) meters.append(h('span', 'font-mono text-[11px] text-zinc-500', a.plan));
-      if (a.error) {
+      if (a.error && !a.limits.length) {
         const e = h('span', 'min-w-0 truncate text-zinc-500', 'usage unknown');
         e.title = a.error;
+        meters.append(e);
+      } else if (a.asOfMs && Date.now() - a.asOfMs >= USAGE_STALE_MS) {
+        // The daemon shows the last usage it was told until it gets a newer one.
+        const e = h('span', 'whitespace-nowrap text-[11px] text-zinc-600', 'as of ' + limitClock(a.asOfMs));
+        e.title = a.error ? `Could not renew: ${a.error}` : new Date(a.asOfMs).toLocaleString();
         meters.append(e);
       }
     }
