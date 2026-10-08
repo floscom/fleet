@@ -4624,8 +4624,11 @@
       return;
     }
     const act = endAction(chat.agent);
-    const b = h('button', 'touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-2 py-1 text-xs font-medium text-zinc-300 hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-200 aria-expanded:border-rose-500/40 aria-expanded:bg-rose-500/10 aria-expanded:text-rose-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400', act.label);
+    const b = h('button', 'touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-2 py-1 text-xs font-medium text-zinc-300 hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-200 aria-expanded:border-rose-500/40 aria-expanded:bg-rose-500/10 aria-expanded:text-rose-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400', act.label,
+      h('kbd', 'ml-1 rounded border border-ink-600 px-1 font-mono text-[10px] leading-4 text-zinc-500 touch:hidden', MAC ? '⌥A' : 'Alt+A'));
     b.type = 'button';
+    b.title = `${act.label} this session (${MAC ? '⌥A' : 'Alt+A'})`;
+    b.setAttribute('aria-keyshortcuts', 'Alt+A');
     b.setAttribute('aria-expanded', String(chat.confirmStop));
     b.setAttribute('aria-controls', 'chat-confirm');
     b.addEventListener('click', () => {
@@ -5356,8 +5359,26 @@
       to.focus();
     });
     $('sub-back').addEventListener('click', () => setView('wf'));
-    // Esc steps back from a workflow agent before it closes the dialog.
+    // Alt+A (⌥A), also from the message box, asks to archive the session
+    // (or delete a finished one) with the confirmation focused: Enter does
+    // it, Esc or Alt+A again keeps it.
+    dlg.addEventListener('keydown', (ev) => {
+      if (ev.isComposing || ev.code !== 'KeyA' || !ev.altKey || ev.ctrlKey || ev.metaKey || ev.shiftKey) return;
+      if (!chat.agent || chat.stopping) return;
+      ev.preventDefault();
+      $('chat-stop-box').querySelector('button').click();
+      if (!chat.confirmStop && !touch()) ta.focus();
+    });
+    // Esc closes the archive confirmation, then steps back from a
+    // workflow agent, before it closes the dialog.
     dlg.addEventListener('cancel', (ev) => {
+      if (chat.confirmStop && !chat.stopping) {
+        ev.preventDefault();
+        chat.confirmStop = false;
+        renderChatStop();
+        if (!touch()) ta.focus();
+        return;
+      }
       if (chat.view === 'sub') {
         ev.preventDefault();
         setView('wf');

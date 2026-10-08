@@ -398,7 +398,9 @@ Changes apply at once, rewrite `config.toml` and show up in the CLI
 - On desktop, clicking outside a dialog closes it. **Ctrl+1** through
   **Ctrl+9** opens the first nine live agents in the displayed order,
   respecting the folder filter. The shortcuts also switch sessions from
-  an open chat; each agent row shows its shortcut.
+  an open chat; each agent row shows its shortcut. In a chat, **Alt+A**
+  (⌥A on a Mac) asks to archive the session, or delete a finished one;
+  Enter confirms, Esc keeps it.
 - Text fields are 16px on phones, so iOS does not zoom in, and dialogs
   do not pop up the keyboard when they open. Buttons, keys and list rows
   are at least 44px tall on touch screens and phone-width windows.
