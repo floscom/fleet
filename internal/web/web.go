@@ -111,6 +111,9 @@ type Source interface {
 	// SetAutoResume switches resuming a live agent after a usage limit
 	// (auto non-nil) and/or resumes it now, and returns it.
 	SetAutoResume(ctx context.Context, agent string, auto *bool, now bool) (*fleetv1.Agent, error)
+	// MergePull merges a pull request an agent created and returns it
+	// after (fleetv1.MergePullRequestRequest).
+	MergePull(ctx context.Context, req *fleetv1.MergePullRequestRequest) (*fleetv1.PullRequest, error)
 }
 
 // BrowseFunc finds fleet daemons on the LAN (discovery.Browse).
@@ -377,6 +380,49 @@ type Agent struct {
 	Worktree string `json:"worktree"`
 	// UsageLimit is set while a usage limit stopped the agent.
 	UsageLimit *AgentLimit `json:"usageLimit,omitempty"`
+	// PullRequests are the GitHub pull requests it created, oldest first.
+	PullRequests []PullRequest `json:"pullRequests"`
+}
+
+// PullRequest is a pull request an agent created (fleetv1.PullRequest).
+type PullRequest struct {
+	URL    string `json:"url"`
+	Repo   string `json:"repo"`
+	Number int32  `json:"number"`
+	Title  string `json:"title"`
+	// State is "open", "merged", "closed", or "unspecified" until looked up.
+	State          string `json:"state"`
+	Draft          bool   `json:"draft"`
+	HeadBranch     string `json:"headBranch"`
+	BaseBranch     string `json:"baseBranch"`
+	MergeState     string `json:"mergeState"`
+	Checks         string `json:"checks"` // "unspecified" (none), "pending", "passing", "failing"
+	ReviewDecision string `json:"reviewDecision"`
+	Additions      int32  `json:"additions"`
+	Deletions      int32  `json:"deletions"`
+	ChangedFiles   int32  `json:"changedFiles"`
+	CreatedAtMs    int64  `json:"createdAtMs"`
+	MergedAtMs     int64  `json:"mergedAtMs"`
+	CheckedAtMs    int64  `json:"checkedAtMs"`
+	Detail         string `json:"detail"`
+	// MergeMethods are "squash", "merge", "rebase", preferred first.
+	MergeMethods []string `json:"mergeMethods"`
+}
+
+func pullOf(p *fleetv1.PullRequest) PullRequest {
+	out := PullRequest{
+		URL: p.Url, Repo: p.Repo, Number: p.Number, Title: p.Title,
+		State: enumName(p.State, "PULL_REQUEST_STATE_"), Draft: p.Draft,
+		HeadBranch: p.HeadBranch, BaseBranch: p.BaseBranch, MergeState: p.MergeState,
+		Checks: enumName(p.Checks, "CHECKS_STATE_"), ReviewDecision: p.ReviewDecision,
+		Additions: p.Additions, Deletions: p.Deletions, ChangedFiles: p.ChangedFiles,
+		CreatedAtMs: p.CreatedAtMs, MergedAtMs: p.MergedAtMs, CheckedAtMs: p.CheckedAtMs,
+		Detail: p.Detail, MergeMethods: []string{},
+	}
+	for _, m := range p.MergeMethods {
+		out.MergeMethods = append(out.MergeMethods, enumName(m, "MERGE_METHOD_"))
+	}
+	return out
 }
 
 // AgentLimit is a usage limit that stopped an agent (fleetv1.UsageLimit).
@@ -405,6 +451,10 @@ func agentOf(a *fleetv1.Agent) Agent {
 		Sandbox:         enumName(a.Sandbox, "SANDBOX_"),
 		CloneURL:        a.CloneUrl,
 		Worktree:        a.Worktree,
+		PullRequests:    make([]PullRequest, 0, len(a.PullRequests)),
+	}
+	for _, p := range a.PullRequests {
+		out.PullRequests = append(out.PullRequests, pullOf(p))
 	}
 	if a.HasExitCode {
 		code := a.ExitCode
@@ -461,7 +511,9 @@ type agentEntry struct {
 	createdAtMs int64
 	state       string
 	limit       *AgentLimit
-	msg         []byte
+	// pulls is how many of its pull requests were looked up.
+	pulls int
+	msg   []byte
 }
 
 type peerEntry struct {
@@ -572,7 +624,7 @@ func (h *hub) follow(ctx context.Context, events <-chan *fleetv1.Event) {
 			msg := encode("agent", "agent", a)
 			prev, ok := h.agents[a.ID]
 			if !ok || !bytes.Equal(prev.msg, msg) {
-				h.agents[a.ID] = agentEntry{createdAtMs: a.CreatedAtMs, state: a.State, limit: a.UsageLimit, msg: msg}
+				h.agents[a.ID] = agentEntry{createdAtMs: a.CreatedAtMs, state: a.State, limit: a.UsageLimit, pulls: lookedUp(a.PullRequests), msg: msg}
 				h.broadcastLocked(msg)
 			}
 			// Only changes seen live count: a (re)subscription's snapshot

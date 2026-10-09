@@ -539,9 +539,9 @@ func TestInfoAdaptersRoots(t *testing.T) {
 		t.Fatalf("info: %v", info)
 	}
 	ads := c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_ListAdapters{ListAdapters: &fleetv1.ListAdaptersRequest{}}}).GetListAdapters().GetAdapters()
-	if len(ads) != 4 || ads[0].GetId() != "limited" || ads[1].GetId() != "missing" || ads[1].GetAvailable() || ads[1].GetUnavailableReason() == "" ||
-		ads[2].GetId() != "modeled" || len(ads[2].GetModels()) != 2 || len(ads[2].GetEfforts()) != 2 ||
-		ads[3].GetId() != "test" || !ads[3].GetAvailable() || !ads[3].GetCapabilities().GetActivityState() || len(ads[3].GetModels()) != 0 {
+	if len(ads) != 5 || ads[0].GetId() != "limited" || ads[1].GetId() != "missing" || ads[1].GetAvailable() || ads[1].GetUnavailableReason() == "" ||
+		ads[2].GetId() != "modeled" || len(ads[2].GetModels()) != 2 || len(ads[2].GetEfforts()) != 2 || ads[3].GetId() != "pulls" ||
+		ads[4].GetId() != "test" || !ads[4].GetAvailable() || !ads[4].GetCapabilities().GetActivityState() || len(ads[4].GetModels()) != 0 {
 		t.Fatalf("adapters: %v", ads)
 	}
 

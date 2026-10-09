@@ -89,6 +89,14 @@ func (c *Client) AttachImage(ctx context.Context, agent string, data []byte) (st
 	return r.GetPath(), err
 }
 
+// MergePullRequest merges a pull request an agent created and returns it
+// as GitHub shows it after.
+func (c *Client) MergePullRequest(ctx context.Context, in *fleetv1.MergePullRequestRequest) (*fleetv1.PullRequest, error) {
+	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_MergePullRequest{MergePullRequest: in}},
+		(*fleetv1.ServerMessage).GetMergePullRequest)
+	return r.GetPullRequest(), err
+}
+
 // CreatePairingCode issues a one-time pairing code. ttl <= 0 uses the
 // daemon default.
 func (c *Client) CreatePairingCode(ctx context.Context, ttl time.Duration) (*fleetv1.CreatePairingCodeResponse, error) {

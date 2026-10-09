@@ -148,6 +148,11 @@ func (s *webSource) SetAutoResume(ctx context.Context, agent string, auto *bool,
 	return a, webError(err)
 }
 
+func (s *webSource) MergePull(ctx context.Context, req *fleetv1.MergePullRequestRequest) (*fleetv1.PullRequest, error) {
+	p, err := s.d.agents.mergePull(ctx, req)
+	return p, webError(err)
+}
+
 func (s *webSource) Agents() []*fleetv1.Agent { return s.d.agents.list(true) }
 
 func (s *webSource) RunAgent(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleetv1.Agent, error) {

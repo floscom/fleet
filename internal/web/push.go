@@ -500,6 +500,9 @@ func (h *hub) noticeLocked(prev agentEntry, a Agent) {
 	if a.State != prev.state || a.UsageLimit != nil {
 		h.dropDoneLocked(a.ID)
 	}
+	if n, ok := pullNotice(prev.pulls, a); ok {
+		h.notify(n)
+	}
 	if n, ok := limitNotice(prev.limit, a); ok {
 		h.notify(n)
 		return
@@ -640,6 +643,51 @@ func limitNotice(prev *AgentLimit, a Agent) (Notice, bool) {
 	}
 	n.Body = strings.Join(parts, " · ")
 	return n, true
+}
+
+// pullNotice tells about the pull requests agent a created since it had
+// prev looked up ones. It goes out once the pull request was looked up,
+// so it has a title, and only for one created within pullNoticeAge: the
+// daemon also finds those in transcripts of long ago.
+func pullNotice(prev int, a Agent) (Notice, bool) {
+	if lookedUp(a.PullRequests) <= prev {
+		return Notice{}, false
+	}
+	var p PullRequest
+	for _, q := range a.PullRequests {
+		if q.CheckedAtMs > 0 {
+			p = q // the newest
+		}
+	}
+	if time.Since(time.UnixMilli(p.CreatedAtMs)) > pullNoticeAge {
+		return Notice{}, false
+	}
+	n := Notice{
+		Tag: "pr:" + p.URL, Agent: a.ID,
+		Title: firstNonEmpty(a.Name, a.Adapter) + " opened a pull request",
+		Body:  p.Repo + "#" + strconv.Itoa(int(p.Number)),
+	}
+	if p.Title != "" {
+		n.Body += " · " + p.Title
+	}
+	if len(n.Body) > 300 {
+		n.Body = n.Body[:300] + "…"
+	}
+	return n, true
+}
+
+// pullNoticeAge is how new a pull request must be for a notice.
+const pullNoticeAge = 30 * time.Minute
+
+// lookedUp counts the pull requests that were looked up.
+func lookedUp(list []PullRequest) int {
+	n := 0
+	for _, p := range list {
+		if p.CheckedAtMs > 0 {
+			n++
+		}
+	}
+	return n
 }
 
 // clock is t as the time of day, with the weekday if not today.

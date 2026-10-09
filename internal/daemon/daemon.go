@@ -221,6 +221,11 @@ func Run(ctx context.Context, opts Options) error {
 		defer bg.Done()
 		d.agents.limitLoop(ctx)
 	}()
+	bg.Add(1)
+	go func() {
+		defer bg.Done()
+		d.agents.pullLoop(ctx)
+	}()
 	for i, ln := range lns {
 		bg.Add(1)
 		go func(ln net.Listener, local bool) {

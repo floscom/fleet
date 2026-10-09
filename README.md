@@ -116,6 +116,8 @@ address. Without it, commands talk to the local daemon.
 | `fleet kill <agent>... [--rm-worktree] [--force] [--forget]` | Stop agents; optionally remove their worktree or clone and history entry. |
 | `fleet sandbox build [--pull] [--tag T]` / `sandbox dockerfile` | Build the Docker image sandboxed agents run in (on the server) / print its Dockerfile. |
 | `fleet watch` | Print agent state changes as they happen. |
+| `fleet prs [agent] [-a] [--json]` | List the GitHub pull requests agents created, open ones unless `-a`. |
+| `fleet merge <agent> [pr] [--squash\|--merge\|--rebase] [-d]` | Merge a pull request an agent created (its only open one unless `pr`, a number or URL) with the daemon host's `gh`; `-d` deletes the branch on GitHub. |
 | `fleet pair [--ttl 5m]` | Create a one-time pairing code (at most 5 minutes). |
 | `fleet connect [addr\|name] --code CODE [--fingerprint HEX] [--name N]` | Pair this machine with a remote daemon. |
 | `fleet discover [--timeout 2s]` | List daemons on the LAN. |
@@ -537,6 +539,13 @@ on a root, which picks that folder) starts one:
   (refreshed every 1.5 seconds; it opens by itself when the agent needs
   input), and the key row sends Esc, arrows, Tab, Enter, 1-3 and Ctrl-C to
   answer them. For the full terminal, `fleet attach` still works.
+- **Pull requests.** When an agent opens a pull request (`gh pr create`),
+  its row gets a *PR #n* chip linking to it, a push notification says so,
+  and the session shows a bar per pull request: its state, checks, review
+  and size, and *Merge* (pick squash / merge / rebase as the repository
+  allows, optionally delete the branch, click again to confirm). The
+  daemon looks pull requests up and merges them with `gh` on its host, so
+  that `gh` must be logged in. Same from the CLI: `fleet prs`, `fleet merge`.
 - **Stop** asks in a bar under the header, away from Stop itself, so a
   double tap cannot stop a session; *Stop session* there kills it like
   `fleet kill` (the worktree is kept). On a phone the session fills the

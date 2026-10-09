@@ -13,6 +13,7 @@ package web
 //	GET  /api/agents/{id}/media       all the images of its conversation (see media.go)
 //	POST /api/agents/{id}/answer      answer the questions it asks
 //	POST /api/agents/{id}/model       switch its model and/or effort
+//	POST /api/agents/{id}/merge       merge a pull request it created
 //	POST /api/agents/{id}/stop        kill it; forget drops it from the list too
 
 import (
@@ -51,6 +52,8 @@ const (
 	// modelTimeout bounds switching a session's model: the daemon types
 	// into its terminal and waits for each step to show.
 	modelTimeout = 30 * time.Second
+	// mergeTimeout bounds merging a pull request: a few gh calls.
+	mergeTimeout = 100 * time.Second
 )
 
 // Chat is where an agent's conversation is (Source.Chat).
@@ -284,6 +287,37 @@ func (s *Server) apiResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]Agent{"agent": agentOf(a)})
+}
+
+// apiMerge merges a pull request the agent created: {"pullRequest": URL
+// or number, "" for its only open one; "method": "squash", "merge",
+// "rebase" or "" for the repository's first; "deleteBranch": bool}.
+func (s *Server) apiMerge(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PullRequest  string `json:"pullRequest"`
+		Method       string `json:"method"`
+		DeleteBranch bool   `json:"deleteBranch"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	in := &fleetv1.MergePullRequestRequest{Agent: r.PathValue("id"), PullRequest: req.PullRequest, DeleteBranch: req.DeleteBranch}
+	if req.Method != "" {
+		m, ok := fleetv1.MergeMethod_value["MERGE_METHOD_"+strings.ToUpper(req.Method)]
+		if !ok || m == 0 {
+			writeError(w, http.StatusBadRequest, "unknown merge method "+strconv.Quote(req.Method))
+			return
+		}
+		in.Method = fleetv1.MergeMethod(m)
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), mergeTimeout)
+	defer cancel()
+	p, err := s.opts.Source.MergePull(ctx, in)
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]PullRequest{"pullRequest": pullOf(p)})
 }
 
 func (s *Server) apiScreen(w http.ResponseWriter, r *http.Request) {

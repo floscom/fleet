@@ -848,6 +848,32 @@ effort the adapter does not offer);
 - Errors: `INVALID_ARGUMENT` (empty `agent`, agent not running, not an
   image, too large); `NOT_FOUND`.
 
+**`MergePullRequestRequest{agent, pull_request, method, delete_branch}` →
+`MergePullRequestResponse{pull_request}`**
+
+- `Agent.pull_requests` lists the GitHub pull requests an agent created:
+  the daemon reads the agent's transcript for a `gh pr create` (or a GitHub
+  MCP tool named `…create_pull_request`) and takes the pull request URLs
+  its output shows, also from transcripts written before the daemon
+  looked. It looks up each one with the GitHub CLI (`gh`) on the daemon
+  host, logged in as the daemon user: right away, then every minute while
+  it is open and the agent runs, every 10 minutes after the agent ended,
+  never once merged or closed. Each change comes as an `agent_upserted`
+  event. `detail` says why a lookup failed (no `gh`, not logged in, no
+  access); the rest is the last status seen.
+- This request merges one: `pull_request` is its URL or number, or empty
+  for the agent's only open one. `method` `UNSPECIFIED` takes the first of
+  `PullRequest.merge_methods` (squash, merge, rebase, as the repository
+  allows), squash if those are unknown. A draft is marked ready for
+  review first. `delete_branch` deletes the head branch on GitHub; the
+  agent's local branch and worktree are not touched. The response is the
+  pull request as looked up after merging. The daemon may take up to 90 s.
+- Errors: `INVALID_ARGUMENT` (merged or closed already, a method the
+  repository does not allow, several open pull requests and none named,
+  or what GitHub refused: failing required checks, missing reviews,
+  conflicts; the message is gh's); `NOT_FOUND` (agent, or no such / no
+  open pull request); `ADAPTER_UNAVAILABLE` (no `gh` on the daemon host).
+
 **`SubscribeRequest` → `SubscribeResponse`**, then pushed events. See
 section 12.
 

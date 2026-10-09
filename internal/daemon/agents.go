@@ -79,6 +79,11 @@ type agentRec struct {
 	// AutoResume switches resuming the agent after a usage limit for this
 	// agent; nil follows [limits] auto_resume.
 	AutoResume *bool `json:"auto_resume,omitempty"`
+	// PullRequests are the pull requests the agent created, oldest first,
+	// as last looked up; PRScan is how far its transcript was read for
+	// them (pulls.go).
+	PullRequests []*fleetv1.PullRequest `json:"pull_requests,omitempty"`
+	PRScan       *prScan                `json:"pr_scan,omitempty"`
 
 	// limit is the usage limit that stopped the agent (limits.go).
 	limit *fleetv1.UsageLimit
@@ -128,6 +133,7 @@ func (a *agentRec) proto() *fleetv1.Agent {
 		CloneUrl:        a.CloneURL,
 		UsageLimit:      a.limit,
 		Worktree:        wt,
+		PullRequests:    clonePulls(a.PullRequests),
 	}
 }
 
@@ -190,6 +196,10 @@ type manager struct {
 	// limits follow each live agent's session for usage limits (limits.go).
 	limitMu sync.Mutex
 	limits  map[string]*limitWatch
+
+	// repoMethods caches the merge methods of repositories (pulls.go).
+	pullMu      sync.Mutex
+	repoMethods map[string][]fleetv1.MergeMethod
 }
 
 // readyLocked clears a's busy flag and stamps it with a new ready generation.

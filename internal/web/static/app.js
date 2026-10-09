@@ -239,6 +239,47 @@
     return c;
   }
 
+  // Pull requests agents created (Agent.pullRequests).
+  const prOpen = (p) => p.state !== 'merged' && p.state !== 'closed';
+
+  // prStatus is a pull request's state in a word, and its colors.
+  function prStatus(p) {
+    if (p.state === 'merged') return ['merged', 'border-violet-400/30 bg-violet-400/10 text-violet-300'];
+    if (p.state === 'closed') return ['closed', 'border-rose-500/30 bg-rose-500/10 text-rose-300'];
+    if (p.state !== 'open') return [p.detail ? 'PR' : 'checking', 'border-ink-600 bg-ink-800 text-zinc-400'];
+    if (p.draft) return ['draft', 'border-ink-600 bg-ink-800 text-zinc-300'];
+    if (p.mergeState === 'dirty') return ['conflicts', 'border-rose-500/30 bg-rose-500/10 text-rose-300'];
+    if (p.checks === 'failing') return ['checks fail', 'border-rose-500/30 bg-rose-500/10 text-rose-300'];
+    if (p.checks === 'pending') return ['checks running', 'border-amber-400/30 bg-amber-400/10 text-amber-200'];
+    if (p.mergeState === 'blocked') return ['blocked', 'border-amber-400/30 bg-amber-400/10 text-amber-200'];
+    if (p.mergeState === 'behind') return ['behind', 'border-amber-400/30 bg-amber-400/10 text-amber-200'];
+    return ['ready', 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'];
+  }
+
+  // prTitle is the tooltip of a pull request.
+  function prTitle(p) {
+    const parts = [`${p.repo}#${p.number}`];
+    if (p.title) parts.push(p.title);
+    if (p.headBranch) parts.push(`${p.headBranch} → ${p.baseBranch}`);
+    if (p.checks && p.checks !== 'unspecified') parts.push('checks ' + p.checks);
+    if (p.reviewDecision) parts.push(p.reviewDecision.replace('_', ' '));
+    if (p.detail) parts.push(p.detail);
+    return parts.join('\n');
+  }
+
+  // prChip links to a pull request from an agent's row.
+  function prChip(p) {
+    const [word, color] = prStatus(p);
+    const a = h('a', 'inline-flex max-w-full items-center gap-1 truncate rounded border px-1.5 py-px font-mono text-[11px] hover:brightness-125 focus-visible:outline-2 focus-visible:outline-emerald-400 ' + color,
+      h('span', 'opacity-70', 'PR'), '#' + p.number, h('span', 'opacity-80', '· ' + word));
+    a.href = p.url;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.title = prTitle(p);
+    a.addEventListener('click', (ev) => ev.stopPropagation()); // not the row's chat
+    return a;
+  }
+
   // agentRow is the row of agent a, running on machine host ('' = here).
   function agentRow({ a, host, shortcut = 0 }) {
     const st = stateOf(a);
@@ -276,6 +317,10 @@
       top.append(hint);
     }
     if (a.usageLimit && !done) top.append(limitChip(a.usageLimit));
+    // Its open pull requests, else the last one.
+    const prs = a.pullRequests || [];
+    const shown = prs.filter(prOpen);
+    for (const p of (shown.length ? shown : prs.slice(-1)).slice(-3)) top.append(prChip(p));
     if (S.remote.size) top.append(hostChip(host));
     if (a.adapter) top.append(chip(a.adapter));
     if (a.sandbox === 'docker') {
@@ -3074,6 +3119,7 @@
     answered: new Set(), // ids of questions answered here: late replies may still list them
     askForm: null, // the form of asks[0]
     images: [], // {data (base64), url (data: URL), name} to send with the next message
+    prUI: new Map(), // pull request URL -> {method, deleteBranch, armed (ms), busy}
   };
 
   const chatAPI = (rest) => {
@@ -3112,6 +3158,7 @@
       model: null, switching: false, switchedAt: 0, screenAutoOpened: false, asks: [], askForm: null, images: [],
     });
     chat.answered.clear();
+    chat.prUI.clear();
     Object.assign(wf, { runs: [], v: '', loaded: false, sub: null, hint: (S.workflows.get(agentKey(host, id)) || []).length });
     wf.shown.clear();
     wf.known.clear();
@@ -4595,7 +4642,125 @@
     } else {
       det.hidden = true;
     }
+    renderChatPulls(a);
     renderChatStop();
+  }
+
+  // renderChatPulls draws the pull requests the session's agent created,
+  // newest first, with a button to merge an open one: a first click arms
+  // it, a second within prArmFor merges.
+  const prArmFor = 5000;
+  function renderChatPulls(a) {
+    const box = $('chat-prs');
+    const prs = (a.pullRequests || []).slice().reverse();
+    box.hidden = !prs.length;
+    box.replaceChildren(...prs.map((p) => prLine(p)));
+  }
+
+  function prLine(p) {
+    const ui = chat.prUI.get(p.url) || {};
+    const [word, color] = prStatus(p);
+    const pill = h('span', 'inline-flex shrink-0 items-center rounded border px-1.5 py-px font-mono text-[11px] ' + color, word);
+    const title = link(p.url, '');
+    title.className = 'min-w-0 truncate text-zinc-100 hover:underline';
+    title.append(h('span', 'font-mono text-zinc-400', `${p.repo}#${p.number}`), p.title ? '  ' + p.title : '');
+    title.title = prTitle(p);
+    const facts = [];
+    if (p.changedFiles || p.additions || p.deletions) {
+      facts.push(h('span', 'font-mono tabular-nums', h('span', 'text-emerald-300/80', '+' + p.additions), ' ', h('span', 'text-rose-300/80', '−' + p.deletions),
+        h('span', 'text-zinc-500', ` · ${p.changedFiles} file${p.changedFiles === 1 ? '' : 's'}`)));
+    }
+    if (p.headBranch) facts.push(h('span', 'font-mono text-violet-300/70', `${p.headBranch} → ${p.baseBranch}`));
+    if (p.state === 'open') {
+      if (p.checks === 'passing') facts.push(h('span', 'text-emerald-300/80', '✓ checks pass'));
+      if (p.checks === 'failing') facts.push(h('span', 'text-rose-300', '✗ checks fail'));
+      if (p.checks === 'pending') facts.push(h('span', 'text-amber-200/80', '● checks running'));
+      if (p.reviewDecision === 'approved') facts.push(h('span', 'text-emerald-300/80', 'approved'));
+      if (p.reviewDecision === 'changes_requested') facts.push(h('span', 'text-rose-300', 'changes requested'));
+      if (p.reviewDecision === 'review_required') facts.push(h('span', 'text-amber-200/80', 'review required'));
+    }
+    if (p.state === 'merged' && p.mergedAtMs) facts.push(relTime(p.mergedAtMs, 'merged ', 'font-mono text-violet-300/70'));
+    if (p.detail) facts.push(h('span', 'text-amber-200/80', p.detail));
+    const info = h('div', 'flex min-w-0 flex-1 basis-full flex-col gap-0.5 sm:basis-0',
+      h('div', 'flex min-w-0 items-center gap-2', pill, title),
+      facts.length ? h('div', 'flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-zinc-500', ...facts) : null);
+
+    const row = h('div', 'flex flex-wrap items-center gap-x-3 gap-y-2 py-1.5', info);
+    if (p.state !== 'open') return row;
+
+    const btn = 'touch:min-h-11 rounded-md border px-2 py-1 text-xs font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 disabled:opacity-50';
+    const acts = h('div', 'flex shrink-0 flex-wrap items-center gap-2 max-sm:ml-auto');
+    const methods = p.mergeMethods && p.mergeMethods.length ? p.mergeMethods : ['squash', 'merge', 'rebase'];
+    const method = methods.includes(ui.method) ? ui.method : methods[0];
+    if (methods.length > 1) {
+      const sel = h('select', 'touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-1.5 py-1 text-xs text-zinc-300 focus-visible:outline-2 focus-visible:outline-emerald-400');
+      sel.setAttribute('aria-label', 'Merge method');
+      for (const m of methods) {
+        const o = h('option', '', m);
+        o.value = m;
+        o.selected = m === method;
+        sel.append(o);
+      }
+      sel.disabled = !!ui.busy;
+      sel.addEventListener('change', () => chat.prUI.set(p.url, { ...ui, method: sel.value, armed: 0 }));
+      acts.append(sel);
+    }
+    const del = h('input', 'size-3.5 accent-emerald-500');
+    del.type = 'checkbox';
+    del.checked = !!ui.deleteBranch;
+    del.disabled = !!ui.busy;
+    del.addEventListener('change', () => chat.prUI.set(p.url, { ...chat.prUI.get(p.url), deleteBranch: del.checked }));
+    acts.append(h('label', 'touch:min-h-11 inline-flex cursor-pointer items-center gap-1.5 text-xs text-zinc-400', del, 'delete branch'));
+
+    const armed = ui.armed && Date.now() - ui.armed < prArmFor;
+    const merge = h('button', btn + (armed
+      ? ' border-emerald-400 bg-emerald-500 text-ink-950 hover:bg-emerald-400'
+      : ' border-emerald-400/40 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20'),
+    ui.busy ? 'Merging…' : armed ? `Confirm ${method} merge` : 'Merge');
+    merge.type = 'button';
+    merge.disabled = !!ui.busy;
+    merge.title = p.draft ? 'Marks the draft ready for review, then merges it on GitHub' : `Merge #${p.number} on GitHub (${method})`;
+    merge.addEventListener('click', () => {
+      const cur = chat.prUI.get(p.url) || {};
+      if (!(cur.armed && Date.now() - cur.armed < prArmFor)) {
+        chat.prUI.set(p.url, { ...cur, armed: Date.now() });
+        renderChatPulls(chat.agent || {});
+        setTimeout(() => { if (chat.open) renderChatPulls(chat.agent || {}); }, prArmFor + 50);
+        return;
+      }
+      mergePull(p, method, !!cur.deleteBranch);
+    });
+    acts.append(merge);
+    row.append(acts);
+    return row;
+  }
+
+  // mergePull merges pull request p of the open session.
+  async function mergePull(p, method, deleteBranch) {
+    const host = chat.host, id = chat.id, seq = chat.seq;
+    chat.prUI.set(p.url, { ...chat.prUI.get(p.url), busy: true, armed: 0 });
+    renderChatPulls(chat.agent || {});
+    try {
+      const r = await api('POST', chatAPI('merge'), { pullRequest: p.url, method, deleteBranch });
+      const merged = r && r.pullRequest;
+      // Show it merged at once; the agent's next update says the same.
+      const agents = host ? (S.remote.get(host) || {}).agents : S.agents;
+      const a = agents && agents.get(id);
+      if (a && merged) {
+        const next = { ...a, pullRequests: (a.pullRequests || []).map((q) => q.url === merged.url ? merged : q) };
+        agents.set(id, next);
+        if (chat.seq === seq) chat.agent = next;
+        invalidate('agents');
+      }
+      toast(`merged ${p.repo}#${p.number}`);
+    } catch (e) {
+      toast(`could not merge #${p.number}: ${e.message}`, 'error');
+    } finally {
+      if (chat.seq === seq) {
+        chat.prUI.set(p.url, { ...chat.prUI.get(p.url), busy: false, armed: 0 });
+        renderChatPulls(chat.agent || {});
+      }
+    }
   }
 
   // limitDetail is the bar under the session's header while a usage limit

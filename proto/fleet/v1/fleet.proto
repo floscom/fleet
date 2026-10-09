@@ -60,6 +60,7 @@ message ClientMessage {
     SendTextRequest send_text = 33;
     SubscribeRequest subscribe = 34;
     AttachImageRequest attach_image = 36;
+    MergePullRequestRequest merge_pull_request = 37;
 
     // Terminal streaming
     AttachRequest attach = 40;
@@ -105,6 +106,7 @@ message ServerMessage {
     // Pushed after SubscribeRequest (id 0).
     Event event = 35;
     AttachImageResponse attach_image = 36;
+    MergePullRequestResponse merge_pull_request = 37;
 
     AttachResponse attach = 40;
     // Pushed while attached (id 0).
@@ -433,6 +435,74 @@ message Agent {
   // daemon created for the agent, while it is not removed; see
   // KillAgentRequest.remove_worktree.
   string worktree = 21;
+  // The GitHub pull requests the agent created (with `gh pr create`, or a
+  // GitHub MCP tool), oldest first, as last looked up on GitHub.
+  repeated PullRequest pull_requests = 22;
+}
+
+// PullRequest is a GitHub pull request an agent created. The daemon finds
+// it in the agent's transcript and looks up its status with the GitHub CLI
+// (`gh`) of the daemon host: every minute while it is open and the agent
+// runs, less often after.
+message PullRequest {
+  string url = 1;
+  // "owner/name".
+  string repo = 2;
+  int32 number = 3;
+  string title = 4;
+  PullRequestState state = 5;
+  bool draft = 6;
+  string head_branch = 7;
+  string base_branch = 8;
+  // GitHub's mergeStateStatus, lower case: "clean" (ready to merge),
+  // "blocked" (checks or reviews required), "behind", "dirty" (conflicts),
+  // "unstable" (non-required checks fail), "has_hooks", "draft", or
+  // "unknown" while GitHub computes it; empty if not looked up.
+  string merge_state = 9;
+  ChecksState checks = 10;
+  // GitHub's reviewDecision, lower case: "approved", "changes_requested",
+  // "review_required"; empty when no review is required.
+  string review_decision = 11;
+  int32 additions = 12;
+  int32 deletions = 13;
+  int32 changed_files = 14;
+  // When the agent created it; 0 if unknown.
+  int64 created_at_ms = 15;
+  int64 merged_at_ms = 16;
+  // When its status was last looked up; 0 if never.
+  int64 checked_at_ms = 17;
+  // Why its status is not known or stale, e.g. "gh is not installed".
+  string detail = 18;
+  // The ways the repository allows merging it, in the order the daemon
+  // prefers them (MergePullRequestRequest.method UNSPECIFIED takes the
+  // first); empty if not looked up.
+  repeated MergeMethod merge_methods = 19;
+}
+
+enum PullRequestState {
+  // Not looked up yet.
+  PULL_REQUEST_STATE_UNSPECIFIED = 0;
+  PULL_REQUEST_STATE_OPEN = 1;
+  PULL_REQUEST_STATE_MERGED = 2;
+  PULL_REQUEST_STATE_CLOSED = 3;
+}
+
+// The combined state of a pull request's checks (CI).
+enum ChecksState {
+  // No checks, or not looked up.
+  CHECKS_STATE_UNSPECIFIED = 0;
+  CHECKS_STATE_PENDING = 1;
+  CHECKS_STATE_PASSING = 2;
+  CHECKS_STATE_FAILING = 3;
+}
+
+enum MergeMethod {
+  // The first of PullRequest.merge_methods (squash, merge, rebase,
+  // whichever the repository allows first).
+  MERGE_METHOD_UNSPECIFIED = 0;
+  MERGE_METHOD_SQUASH = 1;
+  MERGE_METHOD_MERGE = 2;
+  MERGE_METHOD_REBASE = 3;
 }
 
 // UsageLimit is a usage limit that stopped an agent, and when the daemon
@@ -542,6 +612,25 @@ message AttachImageRequest {
 message AttachImageResponse {
   // Where the daemon saved the image (a path on the daemon's host).
   string path = 1;
+}
+
+// Merges a pull request an agent created (Agent.pull_requests) with the
+// daemon host's GitHub CLI. A draft is marked ready for review first.
+// GitHub refuses what its rules refuse (failing required checks, missing
+// reviews, conflicts); the error says why.
+message MergePullRequestRequest {
+  // Agent id or name.
+  string agent = 1;
+  // The pull request's URL or number; empty for the agent's only open one.
+  string pull_request = 2;
+  MergeMethod method = 3;
+  // Delete the pull request's branch on GitHub after merging. The agent's
+  // local branch and worktree are left alone.
+  bool delete_branch = 4;
+}
+message MergePullRequestResponse {
+  // The pull request after merging, looked up again.
+  PullRequest pull_request = 1;
 }
 
 // Starts pushing Event messages on this connection. The daemon first sends
