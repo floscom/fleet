@@ -429,6 +429,10 @@ message Agent {
   // Set while the agent's last turn was stopped by a usage limit of its
   // account (5-hour, weekly, ...). The agent is IDLE meanwhile.
   UsageLimit usage_limit = 20;
+  // The git worktree (WORKTREE isolation) or clone (CLONE isolation) the
+  // daemon created for the agent, while it is not removed; see
+  // KillAgentRequest.remove_worktree.
+  string worktree = 21;
 }
 
 // UsageLimit is a usage limit that stopped an agent, and when the daemon

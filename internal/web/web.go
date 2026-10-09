@@ -373,6 +373,8 @@ type Agent struct {
 	AttachedClients int32  `json:"attachedClients"`
 	Sandbox         string `json:"sandbox"`
 	CloneURL        string `json:"cloneUrl"`
+	// Worktree is the agent's worktree or clone, until it is removed.
+	Worktree string `json:"worktree"`
 	// UsageLimit is set while a usage limit stopped the agent.
 	UsageLimit *AgentLimit `json:"usageLimit,omitempty"`
 }
@@ -402,6 +404,7 @@ func agentOf(a *fleetv1.Agent) Agent {
 		AttachedClients: a.AttachedClients,
 		Sandbox:         enumName(a.Sandbox, "SANDBOX_"),
 		CloneURL:        a.CloneUrl,
+		Worktree:        a.Worktree,
 	}
 	if a.HasExitCode {
 		code := a.ExitCode

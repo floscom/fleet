@@ -508,15 +508,18 @@ func TestWorktreeAndBrowse(t *testing.T) {
 	c.fails(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_Browse{Browse: &fleetv1.BrowseRequest{Root: "code", Path: ".."}}}, codeOutside)
 
 	wt := filepath.Dir(a.GetCwd())
+	if a.GetWorktree() != wt {
+		t.Fatalf("worktree %q, want %q", a.GetWorktree(), wt)
+	}
 	if err := os.WriteFile(filepath.Join(wt, "dirty.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	r := c.ok(killReq(&fleetv1.KillAgentRequest{Agent: a.GetId(), RemoveWorktree: true})).GetKillAgent()
-	if !r.GetWorktreeKept() || r.GetWorktreeKeptReason() == "" {
+	if !r.GetWorktreeKept() || r.GetWorktreeKeptReason() == "" || r.GetAgent().GetWorktree() != wt {
 		t.Fatalf("dirty worktree not kept: %v", r)
 	}
 	r = c.ok(killReq(&fleetv1.KillAgentRequest{Agent: a.GetId(), RemoveWorktree: true, Force: true, Forget: true})).GetKillAgent()
-	if r.GetWorktreeKept() {
+	if r.GetWorktreeKept() || r.GetAgent().GetWorktree() != "" {
 		t.Fatalf("forced removal kept worktree: %v", r)
 	}
 	if _, err := os.Stat(wt); !os.IsNotExist(err) {

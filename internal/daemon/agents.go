@@ -102,6 +102,10 @@ func isLive(s fleetv1.AgentState) bool {
 }
 
 func (a *agentRec) proto() *fleetv1.Agent {
+	wt := a.Worktree
+	if a.WorktreeRemoved {
+		wt = ""
+	}
 	return &fleetv1.Agent{
 		Id:              a.ID,
 		Name:            a.Name,
@@ -123,6 +127,7 @@ func (a *agentRec) proto() *fleetv1.Agent {
 		Sandbox:         a.sandbox(),
 		CloneUrl:        a.CloneURL,
 		UsageLimit:      a.limit,
+		Worktree:        wt,
 	}
 }
 

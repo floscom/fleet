@@ -821,7 +821,8 @@ effort the adapter does not offer);
 - `remove_worktree`: also remove the agent's worktree (branch is kept) or
   clone. It is kept, with `worktree_kept = true` and a reason, if it has
   uncommitted changes, or for a clone, commits that are on no remote
-  branch, unless `force` is set.
+  branch, unless `force` is set. `Agent.worktree` is the worktree or clone
+  until it is removed, empty after.
 - `forget`: remove the agent from history (`agent_removed` event).
 - Errors: `INVALID_ARGUMENT` (empty `agent`, or the agent is busy starting
   or being killed; retry later); `NOT_FOUND`; `INTERNAL` (tmux failed).

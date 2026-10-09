@@ -349,36 +349,46 @@
 
   // endAction is what ending agent a does: a live session is archived
   // (killed, kept under History with its chat and files), a finished one
-  // deleted (forgotten, and its worktree or clone removed unless it holds
-  // work that would be lost; a worktree's branch stays).
+  // deleted (forgotten). Either can remove the worktree or clone the
+  // daemon made for it (wt names it), unless it holds work that would be
+  // lost; a worktree's branch stays. Deleting removes it by default,
+  // archiving keeps it.
   function endAction(a) {
-    const iso = a.isolation === 'worktree' || a.isolation === 'clone' ? a.isolation : '';
+    const iso = a.isolation === 'clone' ? 'clone' : 'worktree';
+    // Daemons before Agent.worktree say nothing: deleting removes it, if any.
+    const wt = a.worktree || '';
     return isFinished(a)
-      ? { label: 'Delete', busy: 'Deleting…', forget: true,
-        note: 'It leaves History' + (iso ? `; its ${iso} is removed unless it holds unsaved work.` : '.') }
-      : { label: 'Archive', busy: 'Archiving…', forget: false,
-        note: 'The agent is ended and moves to History; its chat and files are kept.' };
+      ? { label: 'Delete', busy: 'Deleting…', forget: true, wt, iso, dropWt: true,
+        note: 'It leaves History' + (a.worktree === undefined && a.isolation === iso ? `; its ${iso} is removed unless it holds unsaved work.` : '.') }
+      : { label: 'Archive', busy: 'Archiving…', forget: false, wt, iso, dropWt: false,
+        note: 'The agent is ended and moves to History; its chat' + (wt ? ' is kept.' : ' and files are kept.') };
   }
 
-  // endAgent archives or deletes agent id on machine host (see endAction).
+  // endAgent archives or deletes agent id on machine host (see endAction),
+  // removing its worktree or clone if dropWt (default: the action's).
   // It returns {agent, forgot}, or null when it failed.
-  async function endAgent(host, id, a) {
+  async function endAgent(host, id, a, dropWt) {
     const act = endAction(a || {});
+    if (dropWt === undefined) dropWt = act.dropWt;
     const name = (a && a.name) || id;
     const base = host ? `/api/hosts/${encodeURIComponent(host)}/agents/` : '/api/agents/';
+    const body = {};
+    if (act.forget) body.forget = true;
+    if (dropWt) body.removeWorktree = true;
     try {
-      const r = await api('POST', base + encodeURIComponent(id) + '/stop', act.forget ? { forget: true, removeWorktree: true } : {});
+      const r = await api('POST', base + encodeURIComponent(id) + '/stop', body);
       const rem = host && S.remote.get(host);
+      const what = `${act.forget ? 'deleted' : 'archived'} ${name}`;
       if (act.forget) {
         saveDraft(host, id, '');
         if (rem) rem.agents.delete(id);
         else if (!host) S.agents.delete(id);
-        if (r && r.worktreeKept) toast(`deleted ${name}; kept ${(a && a.cwd) || 'its worktree'}: ${r.reason}`, 'warn');
-        else toast(`deleted ${name}`);
-      } else {
-        if (rem && r && r.agent) rem.agents.set(id, r.agent);
-        toast(`archived ${name}`);
+      } else if (rem && r && r.agent) {
+        rem.agents.set(id, r.agent);
       }
+      if (r && r.worktreeKept) toast(`${what}; kept ${shortPath(act.wt || (a && a.cwd)) || 'its ' + act.iso}: ${r.reason}`, 'warn');
+      else if (dropWt && act.wt) toast(`${what} and removed its ${act.iso}`);
+      else toast(what);
       invalidate('agents');
       return { agent: r && r.agent, forgot: act.forget };
     } catch (e) {
@@ -414,6 +424,15 @@
     b.dataset.swipeAction = '';
     b.setAttribute('aria-label', `${act.label} ${a.name || a.id}`);
     b.addEventListener('click', async () => {
+      if (act.wt && !act.forget) {
+        // Keep or remove its worktree? The session's confirmation asks.
+        closeSwipe();
+        openChat(host, a.id, a);
+        chat.confirmStop = true;
+        chat.dropWt = false;
+        renderChatStop();
+        return;
+      }
       b.disabled = true;
       b.textContent = act.busy;
       await endAgent(host, a.id, a);
@@ -3048,6 +3067,7 @@
     switching: false, // a model switch is in flight
     switchedAt: 0, // when the last one ended: replies read before it are stale
     confirmStop: false,
+    dropWt: false, // the confirmation's "delete its worktree" choice
     stopping: false,
     screenAutoOpened: false, // the screen opened by itself for a dialog
     asks: [], // questions the agent waits on, first shown first (see questions)
@@ -4641,6 +4661,7 @@
     b.setAttribute('aria-controls', 'chat-confirm');
     b.addEventListener('click', () => {
       chat.confirmStop = !chat.confirmStop;
+      chat.dropWt = act.dropWt;
       renderChatStop();
       if (chat.confirmStop) bar.querySelector('[data-focus="chat-stop-yes"]').focus();
     });
@@ -4658,9 +4679,27 @@
     yes.disabled = chat.stopping;
     yes.dataset.focus = 'chat-stop-yes';
     yes.addEventListener('click', stopChat);
-    bar.replaceChildren(
-      h('p', 'min-w-48 flex-1 text-xs text-rose-100/90', h('span', 'font-semibold', act.label + ' this session?'), ' ' + act.note),
-      h('div', 'ml-auto flex items-center gap-2', keep, yes));
+    const text = h('div', 'min-w-48 flex-1 text-xs text-rose-100/90',
+      h('p', '', h('span', 'font-semibold', act.label + ' this session?'), ' ' + act.note));
+    if (act.wt) {
+      // The worktree or clone: keep it or remove it with the session.
+      const cb = h('input', 'accent-rose-400');
+      cb.type = 'checkbox';
+      cb.checked = chat.dropWt;
+      cb.disabled = chat.stopping;
+      cb.dataset.focus = 'chat-stop-wt';
+      cb.addEventListener('change', () => { chat.dropWt = cb.checked; });
+      const label = h('label', 'touch:min-h-11 mt-1.5 flex cursor-pointer select-none items-center gap-2 text-zinc-300', cb,
+        h('span', 'min-w-0', `Also delete its ${act.iso} `, h('span', 'font-mono text-zinc-400', shortPath(act.wt)),
+          act.iso === 'worktree' && chat.agent.branch ? h('span', 'text-zinc-500', ` (branch ${chat.agent.branch} stays)`) : '',
+          h('span', 'text-zinc-500', '; kept if it holds unsaved work')));
+      label.title = act.wt;
+      text.append(label);
+    }
+    // A re-render (the agent changed) keeps the focus where it was.
+    const had = bar.contains(document.activeElement) && document.activeElement.dataset.focus;
+    bar.replaceChildren(text, h('div', 'ml-auto flex items-center gap-2', keep, yes));
+    if (had) bar.querySelector(`[data-focus="${had}"]`)?.focus();
   }
 
   async function stopChat() {
@@ -4668,7 +4707,8 @@
     const { host, id } = chat;
     chat.stopping = true;
     renderChatStop();
-    const done = await endAgent(host, id, chat.agent);
+    // The choice is only shown, and so only taken, for a known worktree.
+    const done = await endAgent(host, id, chat.agent, endAction(chat.agent).wt ? chat.dropWt : undefined);
     if (seq !== chat.seq) return;
     chat.stopping = false;
     chat.confirmStop = false;
