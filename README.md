@@ -556,7 +556,10 @@ on a root, which picks that folder) starts one:
   chip when there is something to push or pull. Pulling waits until the
   agent is idle, and a merge or rebase that conflicts is aborted. Git runs
   on the daemon host with that user's credentials and never prompts. Same
-  from the CLI: `fleet git <agent> [fetch|pull|push]`.
+  from the CLI: `fleet git <agent> [fetch|pull|push]`. Git and the pull
+  requests fold into one line (branch, ↑ ↓, uncommitted, a pill per pull
+  request) that unfolds to the buttons; it starts folded on phones, and
+  stays as you last left it. Merged and closed pull requests take a line.
 - **Stop** asks in a bar under the header, away from Stop itself, so a
   double tap cannot stop a session; *Stop session* there kills it like
   `fleet kill` (the worktree is kept). On a phone the session fills the

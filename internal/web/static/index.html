@@ -400,8 +400,14 @@
   </div>
   <div id="chat-confirm" hidden class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-rose-500/25 bg-rose-500/5 px-4 py-2.5"></div>
   <div id="chat-detail" hidden class="border-b border-amber-400/20 bg-amber-400/5 px-4 py-2 text-xs text-amber-200/90"></div>
-  <div id="chat-git" hidden aria-label="Git" class="border-b border-ink-700 bg-ink-900/60 px-4 py-1.5 text-xs"></div>
-  <div id="chat-prs" hidden aria-label="Pull requests" class="max-h-48 max-sm:max-h-[40svh] divide-y divide-ink-700/60 overflow-y-auto border-b border-ink-700 bg-ink-900/60 px-4 py-1 text-xs"></div>
+  <!-- The checkout and the agent's pull requests: a line that unfolds to the buttons (folded on phones at first). -->
+  <details id="chat-repo" hidden class="group border-b border-ink-700 bg-ink-900/60 text-xs">
+    <summary id="chat-repo-sum" class="touch:min-h-11 flex cursor-pointer list-none items-center gap-2 px-4 py-1.5 hover:bg-ink-850/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400"></summary>
+    <div class="max-h-[45svh] overflow-y-auto overscroll-contain border-t border-ink-700/60">
+      <div id="chat-git" hidden aria-label="Git" class="px-4 py-1.5"></div>
+      <div id="chat-prs" hidden aria-label="Pull requests" class="divide-y divide-ink-700/60 border-ink-700/60 px-4 py-1"></div>
+    </div>
+  </details>
   <!-- Shown once the session has run a workflow or holds images. -->
   <div id="chat-tabs" hidden role="tablist" aria-label="Session views" class="flex items-center gap-1 border-b border-ink-700 px-3">
     <button id="chat-tab-chat" type="button" role="tab" aria-selected="true" aria-controls="chat-scroll" class="touch:min-h-11 -mb-px border-b-2 border-transparent px-2.5 py-2 text-xs font-medium text-zinc-500 hover:text-zinc-200 aria-selected:border-emerald-400 aria-selected:text-zinc-100 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400">Chat</button>

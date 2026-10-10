@@ -261,6 +261,7 @@
     const parts = [`${p.repo}#${p.number}`];
     if (p.title) parts.push(p.title);
     if (p.headBranch) parts.push(`${p.headBranch} → ${p.baseBranch}`);
+    if (p.changedFiles || p.additions || p.deletions) parts.push(`+${p.additions} −${p.deletions} · ${p.changedFiles} file${p.changedFiles === 1 ? '' : 's'}`);
     if (p.checks && p.checks !== 'unspecified') parts.push('checks ' + p.checks);
     if (p.reviewDecision) parts.push(p.reviewDecision.replace('_', ' '));
     if (p.detail) parts.push(p.detail);
@@ -3198,6 +3199,7 @@
     chat.answered.clear();
     chat.prUI.clear();
     chat.gitUI = {};
+    $('chat-repo').open = repoOpen();
     Object.assign(wf, { runs: [], v: '', loaded: false, sub: null, hint: (S.workflows.get(agentKey(host, id)) || []).length });
     wf.shown.clear();
     wf.known.clear();
@@ -4696,8 +4698,11 @@
     const prs = (a.pullRequests || []).slice().reverse();
     box.hidden = !prs.length;
     box.replaceChildren(...prs.map((p) => prLine(p)));
+    renderChatRepo(a);
   }
 
+  // prLine is a pull request's row: a merged or closed one in a line, an
+  // open one with its facts and the buttons to merge it.
   function prLine(p) {
     const ui = chat.prUI.get(p.url) || {};
     const [word, color] = prStatus(p);
@@ -4706,6 +4711,10 @@
     title.className = 'min-w-0 truncate text-zinc-100 hover:underline';
     title.append(h('span', 'font-mono text-zinc-400', `${p.repo}#${p.number}`), p.title ? '  ' + p.title : '');
     title.title = prTitle(p);
+    if (!prOpen(p)) {
+      return h('div', 'flex min-w-0 items-center gap-2 py-1.5', pill, title,
+        p.state === 'merged' && p.mergedAtMs ? relTime(p.mergedAtMs, '', 'ml-auto shrink-0 font-mono text-[11px] tabular-nums text-zinc-600') : null);
+    }
     const facts = [];
     if (p.changedFiles || p.additions || p.deletions) {
       facts.push(h('span', 'font-mono tabular-nums', h('span', 'text-emerald-300/80', '+' + p.additions), ' ', h('span', 'text-rose-300/80', '−' + p.deletions),
@@ -4823,20 +4832,7 @@
     const ui = chat.gitUI;
     const short = (ref) => (g.remote && ref.startsWith(g.remote + '/') ? ref.slice(g.remote.length + 1) : ref);
 
-    const head = h('div', 'flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5',
-      h('span', 'font-mono text-violet-300/90', '⎇ ' + (g.branch || 'detached HEAD')));
-    if (g.upstream) {
-      head.append(h('span', 'font-mono text-zinc-500', '→ ' + g.upstream));
-      if (g.ahead) head.append(h('span', 'font-mono text-emerald-300/90', '↑' + g.ahead));
-      if (g.behind) head.append(h('span', 'font-mono text-amber-200', '↓' + g.behind));
-      if (!g.ahead && !g.behind) head.append(h('span', 'text-zinc-500', 'up to date'));
-    } else if (g.branch) {
-      head.append(chip('not pushed'));
-    }
-    if (g.operation) head.append(h('span', 'text-rose-300', g.operation + ' in progress'));
-    if (g.conflicts) head.append(h('span', 'text-rose-300', `${g.conflicts} conflicted`));
-    if (g.changed) head.append(h('span', 'text-amber-200/80', `● ${g.changed} uncommitted`));
-
+    // The branch and its upstream are on the summary line (renderChatRepo).
     const facts = [];
     if (g.base && (g.baseAhead || g.baseBehind)) {
       facts.push(h('span', 'font-mono', h('span', 'text-zinc-400', g.base), ' ',
@@ -4855,7 +4851,7 @@
     const note = ui.note ? h('div', 'whitespace-pre-wrap break-words font-mono text-[11px] ' + (ui.note.error ? 'text-rose-300' : 'text-emerald-300/80'),
       (ui.note.error ? '✗ ' : '✓ ') + ui.note.text) : null;
     if (note) note.setAttribute('role', 'status');
-    const info = h('div', 'flex min-w-0 flex-1 basis-full flex-col gap-0.5 sm:basis-0', head,
+    const info = h('div', 'flex min-w-0 flex-1 basis-full flex-col gap-0.5 sm:basis-0',
       facts.length ? h('div', 'flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-zinc-500', ...facts) : null, note);
     info.title = g.dir;
 
@@ -4927,6 +4923,61 @@
     }));
 
     box.replaceChildren(h('div', 'flex flex-wrap items-center gap-x-3 gap-y-2', info, acts));
+    renderChatRepo(a);
+  }
+
+  // renderChatRepo draws the line the checkout and the pull requests fold
+  // into: the branch, what it has to push or pull and, while folded, a
+  // pill per pull request, open ones first. Whether it is unfolded is
+  // kept; at first it is folded on phones, where the chat needs the height.
+  const REPO_OPEN = 'fleet.repoOpen';
+  const repoOpen = () => {
+    const v = localStorage.getItem(REPO_OPEN);
+    return v ? v === '1' : matchMedia('(min-width: 40rem)').matches;
+  };
+
+  function renderChatRepo(a) {
+    const g = a.git;
+    const prs = a.pullRequests || [];
+    $('chat-repo').hidden = !g && !prs.length;
+    $('chat-prs').classList.toggle('border-t', !!g && prs.length > 0);
+
+    // Wordy parts show on phones only while it is unfolded.
+    const wordy = 'max-sm:hidden max-sm:group-open:inline';
+    const line = h('span', 'flex min-w-0 flex-1 items-center gap-x-2 overflow-hidden whitespace-nowrap');
+    if (g) {
+      line.append(h('span', 'min-w-0 truncate font-mono text-violet-300/90', '⎇ ' + (g.branch || 'detached HEAD')));
+      if (g.upstream) {
+        line.append(h('span', 'min-w-0 shrink-[4] truncate font-mono text-zinc-500 ' + wordy, '→ ' + g.upstream));
+        if (g.ahead) line.append(h('span', 'shrink-0 font-mono text-emerald-300/90', '↑' + g.ahead));
+        if (g.behind) line.append(h('span', 'shrink-0 font-mono text-amber-200', '↓' + g.behind));
+        if (!g.ahead && !g.behind) line.append(h('span', 'shrink-0 text-zinc-500 ' + wordy, 'up to date'));
+      } else if (g.branch) {
+        line.append(h('span', 'shrink-0 rounded border border-ink-600 bg-ink-800 px-1.5 py-px font-mono text-[11px] text-zinc-400', 'not pushed'));
+      }
+      if (g.operation) line.append(h('span', 'shrink-0 text-rose-300', g.operation + ' in progress'));
+      if (g.conflicts) line.append(h('span', 'shrink-0 text-rose-300', `${g.conflicts} conflicted`));
+      if (g.changed) line.append(h('span', 'shrink-0 text-amber-200/80', '● ' + g.changed, h('span', wordy, ' uncommitted')));
+    }
+
+    // Unfolded, the pull requests' rows say it.
+    const pills = h('span', 'flex shrink-0 items-center gap-1 group-open:hidden');
+    const listed = prs.filter(prOpen).reverse().concat(prs.filter((p) => !prOpen(p)).reverse());
+    if (listed.length) pills.append(h('span', 'mr-0.5 text-zinc-500', listed.length === 1 ? 'PR' : 'PRs'));
+    for (const p of listed.slice(0, 3)) {
+      const [word, color] = prStatus(p);
+      const pill = h('span', 'rounded border px-1.5 py-px font-mono text-[11px] ' + color, '#' + p.number,
+        h('span', prOpen(p) ? '' : 'sr-only', ' ' + word));
+      pill.title = prTitle(p);
+      pills.append(pill);
+    }
+    if (listed.length > 3) pills.append(h('span', 'font-mono text-[11px] text-zinc-500', '+' + (listed.length - 3)));
+
+    const sum = $('chat-repo-sum');
+    sum.title = g ? gitTitle(g) : '';
+    sum.replaceChildren(
+      h('span', 'inline-block shrink-0 text-zinc-500 transition-transform group-open:rotate-90 motion-reduce:transition-none', '▸'),
+      line, pills);
   }
 
   // setChatGit stores the git state an action returned on the agent.
@@ -5727,6 +5778,13 @@
     wireImageView();
     $('chat-close').addEventListener('click', closeChat);
     $('chat-form').addEventListener('submit', sendMessage);
+    // Kept only once folded or unfolded by hand: until then it follows
+    // the screen's width.
+    const repo = $('chat-repo');
+    repo.addEventListener('toggle', () => {
+      if (repo.open === repoOpen()) return;
+      try { localStorage.setItem(REPO_OPEN, repo.open ? '1' : '0'); } catch (e) { /* the choice lasts this page */ }
+    });
     const ta = $('chat-input');
     ta.addEventListener('input', () => {
       autosize();
