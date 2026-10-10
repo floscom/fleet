@@ -153,6 +153,11 @@ func (s *webSource) MergePull(ctx context.Context, req *fleetv1.MergePullRequest
 	return p, webError(err)
 }
 
+func (s *webSource) Git(ctx context.Context, req *fleetv1.GitRequest) (*fleetv1.GitResponse, error) {
+	r, err := s.d.agents.gitAction(ctx, req)
+	return r, webError(err)
+}
+
 func (s *webSource) Agents() []*fleetv1.Agent { return s.d.agents.list(true) }
 
 func (s *webSource) RunAgent(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleetv1.Agent, error) {

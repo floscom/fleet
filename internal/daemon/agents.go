@@ -84,6 +84,8 @@ type agentRec struct {
 	// them (pulls.go).
 	PullRequests []*fleetv1.PullRequest `json:"pull_requests,omitempty"`
 	PRScan       *prScan                `json:"pr_scan,omitempty"`
+	// Git is the git state of its checkout as last read (git.go).
+	Git *fleetv1.GitStatus `json:"git,omitempty"`
 
 	// limit is the usage limit that stopped the agent (limits.go).
 	limit *fleetv1.UsageLimit
@@ -134,6 +136,7 @@ func (a *agentRec) proto() *fleetv1.Agent {
 		UsageLimit:      a.limit,
 		Worktree:        wt,
 		PullRequests:    clonePulls(a.PullRequests),
+		Git:             cloneGit(a.Git),
 	}
 }
 
@@ -200,6 +203,10 @@ type manager struct {
 	// repoMethods caches the merge methods of repositories (pulls.go).
 	pullMu      sync.Mutex
 	repoMethods map[string][]fleetv1.MergeMethod
+
+	// gitLocks serialize git work on each checkout directory (git.go).
+	gitMu    sync.Mutex
+	gitLocks map[string]*sync.Mutex
 }
 
 // readyLocked clears a's busy flag and stamps it with a new ready generation.

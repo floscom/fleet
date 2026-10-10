@@ -54,6 +54,8 @@ type fakeSource struct {
 	switches []fakeSwitch
 	// answers are the answers received (see ask_test.go).
 	answers []ask.Answer
+	// gits are the git requests received (see git_test.go).
+	gits []*fleetv1.GitRequest
 }
 
 type fakeInput struct {

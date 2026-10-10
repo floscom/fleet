@@ -149,6 +149,12 @@ func (c *conn) dispatch(id uint64, m *fleetv1.ClientMessage) error {
 			return err
 		}
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_MergePullRequest{MergePullRequest: &fleetv1.MergePullRequestResponse{PullRequest: p}}})
+	case *fleetv1.ClientMessage_Git:
+		r, err := d.agents.gitAction(c.ctx, msg.Git)
+		if err != nil {
+			return err
+		}
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_Git{Git: r}})
 	case *fleetv1.ClientMessage_Subscribe:
 		return c.handleSubscribe(id)
 

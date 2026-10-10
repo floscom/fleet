@@ -61,6 +61,7 @@ message ClientMessage {
     SubscribeRequest subscribe = 34;
     AttachImageRequest attach_image = 36;
     MergePullRequestRequest merge_pull_request = 37;
+    GitRequest git = 38;
 
     // Terminal streaming
     AttachRequest attach = 40;
@@ -107,6 +108,7 @@ message ServerMessage {
     Event event = 35;
     AttachImageResponse attach_image = 36;
     MergePullRequestResponse merge_pull_request = 37;
+    GitResponse git = 38;
 
     AttachResponse attach = 40;
     // Pushed while attached (id 0).
@@ -438,6 +440,51 @@ message Agent {
   // The GitHub pull requests the agent created (with `gh pr create`, or a
   // GitHub MCP tool), oldest first, as last looked up on GitHub.
   repeated PullRequest pull_requests = 22;
+  // The git state of the agent's checkout (its worktree, clone or pinned
+  // directory), as last read; unset if it is not in a git repository or
+  // was never read. See GitRequest.
+  GitStatus git = 23;
+}
+
+// GitStatus is the git state of an agent's checkout. The daemon reads it
+// with git on its host: every 20 s while the agent runs, and on
+// GitRequest. Ahead and behind count against the remote-tracking refs as
+// of the last fetch (fetched_at_ms).
+message GitStatus {
+  // The checkout's top-level directory.
+  string dir = 1;
+  // The checked-out branch; empty when HEAD is detached.
+  string branch = 2;
+  // HEAD's abbreviated commit, subject and commit time.
+  string head = 3;
+  string head_subject = 4;
+  int64 head_time_ms = 5;
+  // The branch's upstream ("origin/feature"); empty if it has none.
+  string upstream = 6;
+  // Commits on the branch the upstream lacks, and the other way round.
+  int32 ahead = 7;
+  int32 behind = 8;
+  // The remote's default branch ("origin/main"), when it differs from the
+  // upstream; empty if unknown. base_ahead and base_behind count like
+  // ahead and behind.
+  string base = 9;
+  int32 base_ahead = 10;
+  int32 base_behind = 11;
+  // Files with uncommitted changes (staged, unstaged or untracked), and
+  // of those the ones with merge conflicts.
+  int32 changed = 12;
+  int32 conflicts = 13;
+  // "rebase", "merge", "cherry-pick" or "revert" while one is in progress.
+  string operation = 14;
+  // The remote pushes go to ("origin"); empty if the repository has none.
+  string remote = 15;
+  // When the repository was last fetched; 0 if unknown.
+  int64 fetched_at_ms = 16;
+  // When this was read.
+  int64 checked_at_ms = 17;
+  // Why it could not be read, e.g. the checkout was removed; the other
+  // fields are then as last read.
+  string detail = 18;
 }
 
 // PullRequest is a GitHub pull request an agent created. The daemon finds
@@ -631,6 +678,55 @@ message MergePullRequestRequest {
 message MergePullRequestResponse {
   // The pull request after merging, looked up again.
   PullRequest pull_request = 1;
+}
+
+// Reads, fetches, pulls or pushes an agent's checkout with git on the
+// daemon host, as the user the daemon runs as (their git credentials).
+// Pulling or pushing never prompts: missing credentials fail.
+message GitRequest {
+  // Agent id or name.
+  string agent = 1;
+  GitAction action = 2;
+  // PULL: how to bring in the other side's commits.
+  PullMode pull_mode = 3;
+  // PULL: from GitStatus.base instead of the upstream. Without an upstream
+  // a pull is always from the base.
+  bool from_base = 4;
+  // PUSH: --force-with-lease, e.g. after a rebase.
+  bool force = 5;
+}
+message GitResponse {
+  // The checkout after the action.
+  GitStatus status = 1;
+  // What git printed, its last lines.
+  string output = 2;
+}
+
+enum GitAction {
+  // Same as STATUS.
+  GIT_ACTION_UNSPECIFIED = 0;
+  // Read the status only (no network).
+  GIT_ACTION_STATUS = 1;
+  // git fetch the upstream's remote (else origin).
+  GIT_ACTION_FETCH = 2;
+  // Fetch, then bring the upstream (or base) into the branch. Refused
+  // while the agent is working, as it changes files under it. A merge or
+  // rebase that conflicts is aborted, leaving the checkout as it was.
+  GIT_ACTION_PULL = 3;
+  // Push the branch to its upstream; without one, to the remote under the
+  // same name, which becomes its upstream.
+  GIT_ACTION_PUSH = 4;
+}
+
+enum PullMode {
+  // Same as FF_ONLY.
+  PULL_MODE_UNSPECIFIED = 0;
+  // Fast-forward only: fails if the branch has commits of its own.
+  PULL_MODE_FF_ONLY = 1;
+  // Rebase the branch's own commits onto the other side.
+  PULL_MODE_REBASE = 2;
+  // Merge the other side in with a merge commit.
+  PULL_MODE_MERGE = 3;
 }
 
 // Starts pushing Event messages on this connection. The daemon first sends

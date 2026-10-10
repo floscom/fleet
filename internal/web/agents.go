@@ -14,6 +14,7 @@ package web
 //	POST /api/agents/{id}/answer      answer the questions it asks
 //	POST /api/agents/{id}/model       switch its model and/or effort
 //	POST /api/agents/{id}/merge       merge a pull request it created
+//	POST /api/agents/{id}/git         read, fetch, pull or push its checkout
 //	POST /api/agents/{id}/stop        kill it; forget drops it from the list too
 
 import (
@@ -54,6 +55,9 @@ const (
 	modelTimeout = 30 * time.Second
 	// mergeTimeout bounds merging a pull request: a few gh calls.
 	mergeTimeout = 100 * time.Second
+	// gitTimeout bounds a git action: a fetch and a merge, or a push with
+	// its hooks.
+	gitTimeout = 200 * time.Second
 )
 
 // Chat is where an agent's conversation is (Source.Chat).
@@ -318,6 +322,47 @@ func (s *Server) apiMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]PullRequest{"pullRequest": pullOf(p)})
+}
+
+// apiGit reads, fetches, pulls or pushes the agent's checkout:
+// {"action": "status", "fetch", "pull" or "push"; "mode": "ff_only",
+// "rebase" or "merge" (pull); "fromBase": bool (pull); "force": bool
+// (push)}. It answers {"git": GitStatus, "output": what git printed}.
+func (s *Server) apiGit(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action   string `json:"action"`
+		Mode     string `json:"mode"`
+		FromBase bool   `json:"fromBase"`
+		Force    bool   `json:"force"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	in := &fleetv1.GitRequest{Agent: r.PathValue("id"), FromBase: req.FromBase, Force: req.Force}
+	if req.Action != "" {
+		v, ok := fleetv1.GitAction_value["GIT_ACTION_"+strings.ToUpper(req.Action)]
+		if !ok || v == 0 {
+			writeError(w, http.StatusBadRequest, "unknown git action "+strconv.Quote(req.Action))
+			return
+		}
+		in.Action = fleetv1.GitAction(v)
+	}
+	if req.Mode != "" {
+		v, ok := fleetv1.PullMode_value["PULL_MODE_"+strings.ToUpper(strings.ReplaceAll(req.Mode, "-", "_"))]
+		if !ok || v == 0 {
+			writeError(w, http.StatusBadRequest, "unknown pull mode "+strconv.Quote(req.Mode))
+			return
+		}
+		in.PullMode = fleetv1.PullMode(v)
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), gitTimeout)
+	defer cancel()
+	res, err := s.opts.Source.Git(ctx, in)
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"git": gitOf(res.Status), "output": res.Output})
 }
 
 func (s *Server) apiScreen(w http.ResponseWriter, r *http.Request) {

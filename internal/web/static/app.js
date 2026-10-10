@@ -280,6 +280,41 @@
     return a;
   }
 
+  // The git state of agents' checkouts (Agent.git). gitUnpushed counts
+  // commits the remote lacks: ahead of the upstream, or of the base for a
+  // branch never pushed.
+  const gitUnpushed = (g) => (g.upstream ? g.ahead : g.baseAhead);
+
+  // gitTitle is the tooltip of a checkout's state.
+  function gitTitle(g) {
+    const parts = [(g.branch || 'detached HEAD') + (g.upstream ? ' → ' + g.upstream : ' (not pushed)')];
+    if (g.upstream && (g.ahead || g.behind)) parts.push(`${g.ahead} to push, ${g.behind} to pull`);
+    if (g.base && (g.baseAhead || g.baseBehind)) parts.push(`${g.base}: ${g.baseAhead} ahead, ${g.baseBehind} behind`);
+    if (g.changed) parts.push(`${g.changed} uncommitted`);
+    if (g.operation) parts.push(g.operation + ' in progress');
+    if (g.detail) parts.push(g.detail);
+    return parts.join('\n');
+  }
+
+  // gitChip says on an agent's row what its checkout has to push or pull;
+  // null if nothing.
+  function gitChip(g) {
+    if (!g) return null;
+    const parts = [];
+    if (g.operation || g.conflicts) {
+      parts.push(h('span', 'text-rose-300', g.operation || 'conflicts'));
+    } else {
+      const up = gitUnpushed(g);
+      if (up) parts.push(h('span', 'text-emerald-300/90', '↑' + up));
+      if (g.upstream && g.behind) parts.push(h('span', 'text-amber-200', '↓' + g.behind));
+    }
+    if (!parts.length) return null;
+    const c = h('span', 'inline-flex items-center gap-1 rounded border border-ink-600 bg-ink-800 px-1.5 py-px font-mono text-[11px] text-zinc-400',
+      h('span', 'opacity-70', '⎇'), ...parts);
+    c.title = gitTitle(g);
+    return c;
+  }
+
   // agentRow is the row of agent a, running on machine host ('' = here).
   function agentRow({ a, host, shortcut = 0 }) {
     const st = stateOf(a);
@@ -321,6 +356,8 @@
     const prs = a.pullRequests || [];
     const shown = prs.filter(prOpen);
     for (const p of (shown.length ? shown : prs.slice(-1)).slice(-3)) top.append(prChip(p));
+    const gc = gitChip(a.git);
+    if (gc) top.append(gc);
     if (S.remote.size) top.append(hostChip(host));
     if (a.adapter) top.append(chip(a.adapter));
     if (a.sandbox === 'docker') {
@@ -3120,6 +3157,7 @@
     askForm: null, // the form of asks[0]
     images: [], // {data (base64), url (data: URL), name} to send with the next message
     prUI: new Map(), // pull request URL -> {method, deleteBranch, armed (ms), busy}
+    gitUI: {}, // {busy: the git action in flight, armed: when force push was clicked once, note: {text, error} of the last one}
   };
 
   const chatAPI = (rest) => {
@@ -3159,6 +3197,7 @@
     });
     chat.answered.clear();
     chat.prUI.clear();
+    chat.gitUI = {};
     Object.assign(wf, { runs: [], v: '', loaded: false, sub: null, hint: (S.workflows.get(agentKey(host, id)) || []).length });
     wf.shown.clear();
     wf.known.clear();
@@ -3181,6 +3220,7 @@
     renderChatView();
     renderChatInput();
     renderWorkflows();
+    refreshGit(chat.seq);
     stopFeed(wf.feed);
     startFeed(chat.feed);
     wfLoop(chat.seq);
@@ -4642,6 +4682,7 @@
     } else {
       det.hidden = true;
     }
+    renderChatGit(a);
     renderChatPulls(a);
     renderChatStop();
   }
@@ -4760,6 +4801,187 @@
         chat.prUI.set(p.url, { ...chat.prUI.get(p.url), busy: false, armed: 0 });
         renderChatPulls(chat.agent || {});
       }
+    }
+  }
+
+  // renderChatGit draws the git state of the session's checkout, with
+  // buttons to fetch, pull and push it. Pulling waits while the agent
+  // works; pushing a branch that diverged from its upstream is a force
+  // push, which a first click arms and a second within prArmFor runs.
+  const PULL_MODE = 'fleet.pullMode';
+  const pullModes = [['ff_only', 'fast-forward'], ['rebase', 'rebase'], ['merge', 'merge']];
+  const pullMode = () => {
+    const m = localStorage.getItem(PULL_MODE);
+    return pullModes.some(([v]) => v === m) ? m : 'ff_only';
+  };
+
+  function renderChatGit(a) {
+    const box = $('chat-git');
+    const g = a.git;
+    box.hidden = !g;
+    if (!g) return box.replaceChildren();
+    const ui = chat.gitUI;
+    const short = (ref) => (g.remote && ref.startsWith(g.remote + '/') ? ref.slice(g.remote.length + 1) : ref);
+
+    const head = h('div', 'flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5',
+      h('span', 'font-mono text-violet-300/90', '⎇ ' + (g.branch || 'detached HEAD')));
+    if (g.upstream) {
+      head.append(h('span', 'font-mono text-zinc-500', '→ ' + g.upstream));
+      if (g.ahead) head.append(h('span', 'font-mono text-emerald-300/90', '↑' + g.ahead));
+      if (g.behind) head.append(h('span', 'font-mono text-amber-200', '↓' + g.behind));
+      if (!g.ahead && !g.behind) head.append(h('span', 'text-zinc-500', 'up to date'));
+    } else if (g.branch) {
+      head.append(chip('not pushed'));
+    }
+    if (g.operation) head.append(h('span', 'text-rose-300', g.operation + ' in progress'));
+    if (g.conflicts) head.append(h('span', 'text-rose-300', `${g.conflicts} conflicted`));
+    if (g.changed) head.append(h('span', 'text-amber-200/80', `● ${g.changed} uncommitted`));
+
+    const facts = [];
+    if (g.base && (g.baseAhead || g.baseBehind)) {
+      facts.push(h('span', 'font-mono', h('span', 'text-zinc-400', g.base), ' ',
+        g.baseAhead ? h('span', 'text-emerald-300/70', '↑' + g.baseAhead + ' ') : '',
+        g.baseBehind ? h('span', 'text-amber-200/80', '↓' + g.baseBehind) : ''));
+    }
+    if (g.head) {
+      const c = h('span', 'min-w-0 truncate', h('span', 'font-mono text-zinc-400', g.head), ' ' + (g.headSubject || ''));
+      c.title = g.headSubject || '';
+      facts.push(c);
+      if (g.headTimeMs) facts.push(relTime(g.headTimeMs, '', 'font-mono tabular-nums text-zinc-600'));
+    }
+    if (g.fetchedAtMs) facts.push(relTime(g.fetchedAtMs, 'fetched ', 'font-mono tabular-nums text-zinc-600'));
+    if (g.detail) facts.push(h('span', 'text-amber-200/80', g.detail));
+    // The last action's outcome: toasts would sit under the modal session.
+    const note = ui.note ? h('div', 'whitespace-pre-wrap break-words font-mono text-[11px] ' + (ui.note.error ? 'text-rose-300' : 'text-emerald-300/80'),
+      (ui.note.error ? '✗ ' : '✓ ') + ui.note.text) : null;
+    if (note) note.setAttribute('role', 'status');
+    const info = h('div', 'flex min-w-0 flex-1 basis-full flex-col gap-0.5 sm:basis-0', head,
+      facts.length ? h('div', 'flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-zinc-500', ...facts) : null, note);
+    info.title = g.dir;
+
+    const btn = 'touch:min-h-11 rounded-md border px-2 py-1 text-xs font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 disabled:opacity-50';
+    const plain = btn + ' border-ink-600 bg-ink-850 text-zinc-300 hover:bg-ink-800';
+    const busy = !!ui.busy;
+    const button = (label, cls, title, disabled, onClick) => {
+      const b = h('button', cls, label);
+      b.type = 'button';
+      b.title = title;
+      b.disabled = busy || disabled;
+      b.addEventListener('click', onClick);
+      return b;
+    };
+    const acts = h('div', 'flex shrink-0 flex-wrap items-center gap-2 max-sm:ml-auto');
+    const noRemote = !g.remote;
+    acts.append(button(ui.busy === 'fetch' ? 'Fetching…' : 'Fetch', plain,
+      noRemote ? 'The repository has no remote' : `git fetch ${g.remote}`, noRemote, () => runGit('fetch')));
+
+    // Pull: from the upstream, or the base for a branch never pushed; and
+    // from the base too when it has new commits.
+    const working = a.state === 'working';
+    const why = working ? 'Waits until the agent is idle: a pull changes its files'
+      : !g.branch ? 'Check out a branch to pull into' : g.operation ? `A ${g.operation} is in progress` : '';
+    const sel = h('select', 'touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-1.5 py-1 text-xs text-zinc-300 focus-visible:outline-2 focus-visible:outline-emerald-400');
+    sel.setAttribute('aria-label', 'Pull mode');
+    for (const [v, label] of pullModes) {
+      const o = h('option', '', label);
+      o.value = v;
+      o.selected = v === pullMode();
+      sel.append(o);
+    }
+    sel.disabled = busy;
+    sel.addEventListener('change', () => {
+      try { localStorage.setItem(PULL_MODE, sel.value); } catch (e) { /* the choice lasts this page */ }
+    });
+    acts.append(sel);
+    const from = g.upstream || g.base;
+    if (from) {
+      const behind = g.upstream ? g.behind : g.baseBehind;
+      acts.append(button(ui.busy === 'pull' ? 'Pulling…' : 'Pull' + (g.upstream ? '' : ' ' + short(g.base)) + (behind ? ' ↓' + behind : ''), plain,
+        why || `Fetch, then bring ${from} into ${g.branch}`, !!why, () => runGit('pull', { mode: sel.value })));
+    }
+    if (g.upstream && g.base && g.baseBehind) {
+      acts.append(button(ui.busy === 'base' ? 'Pulling…' : `Pull ${short(g.base)} ↓${g.baseBehind}`, plain,
+        why || `Fetch, then bring ${g.base} into ${g.branch}`, !!why, () => runGit('pull', { mode: sel.value, fromBase: true }, 'base')));
+    }
+
+    // Push: a branch that diverged from its upstream needs force.
+    const up = gitUnpushed(g);
+    const force = !!(g.upstream && g.ahead && g.behind);
+    const armed = force && ui.armed && Date.now() - ui.armed < prArmFor;
+    const pushWhy = noRemote ? 'The repository has no remote' : !g.branch ? 'Check out a branch to push'
+      : g.upstream && !g.ahead ? `${g.upstream} has every commit` : '';
+    const pushCls = btn + (force
+      ? (armed ? ' border-rose-400 bg-rose-500 text-ink-950 hover:bg-rose-400' : ' border-rose-500/40 bg-rose-500/10 text-rose-200 hover:bg-rose-500/20')
+      : ' border-emerald-400/40 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20');
+    const pushLabel = ui.busy === 'push' ? 'Pushing…' : force ? (armed ? 'Confirm force push' : `Force push ↑${g.ahead}`) : 'Push' + (up ? ' ↑' + up : '');
+    acts.append(button(pushLabel, pushCls,
+      pushWhy || (force ? `${g.upstream} has ${g.behind} commit${g.behind === 1 ? '' : 's'} ${g.branch} lacks: overwrite them (--force-with-lease)`
+        : `Push ${g.branch} to ${g.remote}` + (g.upstream ? '' : ' and track it')), !!pushWhy, () => {
+      if (force && !(chat.gitUI.armed && Date.now() - chat.gitUI.armed < prArmFor)) {
+        chat.gitUI.armed = Date.now();
+        renderChatGit(chat.agent || {});
+        setTimeout(() => { if (chat.open) renderChatGit(chat.agent || {}); }, prArmFor + 50);
+        return;
+      }
+      runGit('push', { force });
+    }));
+
+    box.replaceChildren(h('div', 'flex flex-wrap items-center gap-x-3 gap-y-2', info, acts));
+  }
+
+  // setChatGit stores the git state an action returned on the agent.
+  function setChatGit(host, id, seq, git) {
+    const agents = host ? (S.remote.get(host) || {}).agents : S.agents;
+    const a = agents && agents.get(id);
+    if (!a || !git) return;
+    const next = { ...a, git };
+    agents.set(id, next);
+    if (chat.seq === seq) chat.agent = next;
+    invalidate('agents');
+  }
+
+  // runGit runs a git action on the open session's checkout; key names it
+  // in chat.gitUI.busy (default: the action).
+  async function runGit(action, body, key) {
+    const host = chat.host, id = chat.id, seq = chat.seq;
+    chat.gitUI = { busy: key || action };
+    renderChatGit(chat.agent || {});
+    let note;
+    try {
+      const r = await api('POST', chatAPI('git'), { action, ...body });
+      setChatGit(host, id, seq, r && r.git);
+      const g = (r && r.git) || {};
+      const said = r && r.output ? r.output.trim().split('\n').pop().trim() : '';
+      if (action === 'push') note = `pushed ${g.branch} to ${g.upstream || g.remote}`;
+      else if (action === 'pull') note = `pulled into ${g.branch}` + (said ? ': ' + said : '');
+      else note = `fetched ${g.remote}`;
+      note = { text: note };
+    } catch (e) {
+      note = { text: `git ${action}: ${e.message}`, error: true };
+    } finally {
+      if (chat.seq === seq) {
+        chat.gitUI = { note };
+        renderChatGit(chat.agent || {});
+      }
+    }
+  }
+
+  // refreshGit reads the open session's checkout when it opens, fetching
+  // first if the last fetch is older than gitFetchAge, so ahead and behind
+  // are current. Failures stay quiet: the bar shows what was last read.
+  const gitFetchAge = 5 * 60 * 1000;
+  async function refreshGit(seq) {
+    const a = chat.agent;
+    if (!a) return;
+    const g = a.git;
+    const action = g && g.remote && Date.now() - (g.fetchedAtMs || 0) > gitFetchAge ? 'fetch' : 'status';
+    const host = chat.host, id = chat.id;
+    try {
+      const r = await api('POST', chatAPI('git'), { action });
+      setChatGit(host, id, seq, r && r.git);
+      if (chat.seq === seq && !chat.gitUI.busy) renderChatGit(chat.agent || {});
+    } catch (e) {
+      // Not a repository, gone, or offline.
     }
   }
 

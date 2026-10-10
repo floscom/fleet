@@ -97,6 +97,12 @@ func (c *Client) MergePullRequest(ctx context.Context, in *fleetv1.MergePullRequ
 	return r.GetPullRequest(), err
 }
 
+// Git reads, fetches, pulls or pushes an agent's checkout.
+func (c *Client) Git(ctx context.Context, in *fleetv1.GitRequest) (*fleetv1.GitResponse, error) {
+	return unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_Git{Git: in}},
+		(*fleetv1.ServerMessage).GetGit)
+}
+
 // CreatePairingCode issues a one-time pairing code. ttl <= 0 uses the
 // daemon default.
 func (c *Client) CreatePairingCode(ctx context.Context, ttl time.Duration) (*fleetv1.CreatePairingCodeResponse, error) {

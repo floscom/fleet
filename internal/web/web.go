@@ -114,6 +114,9 @@ type Source interface {
 	// MergePull merges a pull request an agent created and returns it
 	// after (fleetv1.MergePullRequestRequest).
 	MergePull(ctx context.Context, req *fleetv1.MergePullRequestRequest) (*fleetv1.PullRequest, error)
+	// Git reads, fetches, pulls or pushes an agent's checkout
+	// (fleetv1.GitRequest).
+	Git(ctx context.Context, req *fleetv1.GitRequest) (*fleetv1.GitResponse, error)
 }
 
 // BrowseFunc finds fleet daemons on the LAN (discovery.Browse).
@@ -382,6 +385,43 @@ type Agent struct {
 	UsageLimit *AgentLimit `json:"usageLimit,omitempty"`
 	// PullRequests are the GitHub pull requests it created, oldest first.
 	PullRequests []PullRequest `json:"pullRequests"`
+	// Git is the git state of its checkout; nil outside a repository.
+	Git *GitStatus `json:"git,omitempty"`
+}
+
+// GitStatus is the git state of an agent's checkout (fleetv1.GitStatus).
+type GitStatus struct {
+	Dir         string `json:"dir"`
+	Branch      string `json:"branch"`
+	Head        string `json:"head"`
+	HeadSubject string `json:"headSubject"`
+	HeadTimeMs  int64  `json:"headTimeMs"`
+	Upstream    string `json:"upstream"`
+	Ahead       int32  `json:"ahead"`
+	Behind      int32  `json:"behind"`
+	Base        string `json:"base"`
+	BaseAhead   int32  `json:"baseAhead"`
+	BaseBehind  int32  `json:"baseBehind"`
+	Changed     int32  `json:"changed"`
+	Conflicts   int32  `json:"conflicts"`
+	Operation   string `json:"operation"`
+	Remote      string `json:"remote"`
+	FetchedAtMs int64  `json:"fetchedAtMs"`
+	CheckedAtMs int64  `json:"checkedAtMs"`
+	Detail      string `json:"detail"`
+}
+
+func gitOf(g *fleetv1.GitStatus) *GitStatus {
+	if g == nil {
+		return nil
+	}
+	return &GitStatus{
+		Dir: g.Dir, Branch: g.Branch, Head: g.Head, HeadSubject: g.HeadSubject, HeadTimeMs: g.HeadTimeMs,
+		Upstream: g.Upstream, Ahead: g.Ahead, Behind: g.Behind,
+		Base: g.Base, BaseAhead: g.BaseAhead, BaseBehind: g.BaseBehind,
+		Changed: g.Changed, Conflicts: g.Conflicts, Operation: g.Operation, Remote: g.Remote,
+		FetchedAtMs: g.FetchedAtMs, CheckedAtMs: g.CheckedAtMs, Detail: g.Detail,
+	}
 }
 
 // PullRequest is a pull request an agent created (fleetv1.PullRequest).
@@ -452,6 +492,7 @@ func agentOf(a *fleetv1.Agent) Agent {
 		CloneURL:        a.CloneUrl,
 		Worktree:        a.Worktree,
 		PullRequests:    make([]PullRequest, 0, len(a.PullRequests)),
+		Git:             gitOf(a.Git),
 	}
 	for _, p := range a.PullRequests {
 		out.PullRequests = append(out.PullRequests, pullOf(p))

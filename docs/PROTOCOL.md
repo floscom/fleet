@@ -874,6 +874,34 @@ effort the adapter does not offer);
   conflicts; the message is gh's); `NOT_FOUND` (agent, or no such / no
   open pull request); `ADAPTER_UNAVAILABLE` (no `gh` on the daemon host).
 
+**`GitRequest{agent, action, pull_mode, from_base, force}` →
+`GitResponse{status, output}`**
+
+- `Agent.git` is the git state of the agent's checkout (its worktree,
+  clone or pinned directory): branch, HEAD, upstream with `ahead` /
+  `behind`, the remote's default branch (`base`, e.g. `origin/main`) with
+  `base_ahead` / `base_behind`, uncommitted (`changed`) and conflicted
+  files, an operation in progress, and when it was last fetched. The
+  daemon reads it every 20 s while the agent runs (no network: the counts
+  are as of the last fetch) and on this request; each change comes as an
+  `agent_upserted` event. Unset outside a git repository.
+- `action`: `STATUS` (or `UNSPECIFIED`) reads it; `FETCH` fetches the
+  upstream's remote (else `origin`); `PULL` fetches, then brings the
+  upstream into the branch, or `base` with `from_base` or when the branch
+  has no upstream: `pull_mode` `FF_ONLY` (default), `REBASE` or `MERGE`,
+  all with `--autostash`. A merge or rebase that conflicts is aborted, so
+  the checkout is as before. `PUSH` pushes the branch to the same name on
+  its remote and makes that its upstream; `force` uses
+  `--force-with-lease`. `status` is the checkout after the action,
+  `output` git's last lines.
+- Git runs on the daemon host as the daemon user, with their credentials,
+  in its own session without a terminal: it never prompts, missing
+  credentials fail. Actions on one checkout run one at a time.
+- Errors: `INVALID_ARGUMENT` (pull while the agent is `WORKING`, detached
+  HEAD, no remote, nothing to pull from, diverged for a fast-forward,
+  conflicts, a rejected push, or git's own message); `NOT_FOUND`;
+  `ADAPTER_UNAVAILABLE` (no `git` on the daemon host).
+
 **`SubscribeRequest` → `SubscribeResponse`**, then pushed events. See
 section 12.
 

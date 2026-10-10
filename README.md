@@ -118,6 +118,7 @@ address. Without it, commands talk to the local daemon.
 | `fleet watch` | Print agent state changes as they happen. |
 | `fleet prs [agent] [-a] [--json]` | List the GitHub pull requests agents created, open ones unless `-a`. |
 | `fleet merge <agent> [pr] [--squash\|--merge\|--rebase] [-d]` | Merge a pull request an agent created (its only open one unless `pr`, a number or URL) with the daemon host's `gh`; `-d` deletes the branch on GitHub. |
+| `fleet git <agent> [status\|fetch\|pull\|push] [--rebase\|--merge] [--base] [-f]` | Show the git state of an agent's checkout, or fetch, pull (fast-forward unless `--rebase`/`--merge`; `--base` from the remote's default branch) or push it (`-f`: with lease) with git on the daemon host. |
 | `fleet pair [--ttl 5m]` | Create a one-time pairing code (at most 5 minutes). |
 | `fleet connect [addr\|name] --code CODE [--fingerprint HEX] [--name N]` | Pair this machine with a remote daemon. |
 | `fleet discover [--timeout 2s]` | List daemons on the LAN. |
@@ -546,6 +547,16 @@ on a root, which picks that folder) starts one:
   allows, optionally delete the branch, click again to confirm). The
   daemon looks pull requests up and merges them with `gh` on its host, so
   that `gh` must be logged in. Same from the CLI: `fleet prs`, `fleet merge`.
+- **Git.** The session shows its checkout's branch, what it has to push
+  (↑) and pull (↓) against its upstream and the remote's default branch,
+  uncommitted files and the last commit, with *Fetch*, *Pull* (fast-forward,
+  rebase or merge; from the upstream, or from `origin/main` for a branch
+  never pushed) and *Push* (sets the upstream; a branch that diverged gets
+  a *Force push* with lease, click again to confirm). The row gets a ⎇ ↑n ↓n
+  chip when there is something to push or pull. Pulling waits until the
+  agent is idle, and a merge or rebase that conflicts is aborted. Git runs
+  on the daemon host with that user's credentials and never prompts. Same
+  from the CLI: `fleet git <agent> [fetch|pull|push]`.
 - **Stop** asks in a bar under the header, away from Stop itself, so a
   double tap cannot stop a session; *Stop session* there kills it like
   `fleet kill` (the worktree is kept). On a phone the session fills the
