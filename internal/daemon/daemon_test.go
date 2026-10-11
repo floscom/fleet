@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -537,6 +538,13 @@ func TestInfoAdaptersRoots(t *testing.T) {
 	info := c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_GetInfo{GetInfo: &fleetv1.GetInfoRequest{}}}).GetGetInfo()
 	if info.GetServerId() != c.hello.GetServerId() || info.GetDaemonVersion() != "test" || info.GetOs() == "" || info.GetStartedAtMs() == 0 {
 		t.Fatalf("info: %v", info)
+	}
+	hs := c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_GetHostStats{GetHostStats: &fleetv1.GetHostStatsRequest{}}}).GetGetHostStats().GetStats()
+	if hs.GetReadAtMs() == 0 || hs.GetHostname() == "" || hs.GetCpus() == 0 || hs.GetOsName() == "" {
+		t.Fatalf("host stats: %v", hs)
+	}
+	if runtime.GOOS == "linux" && (hs.GetMemoryTotal() == 0 || len(hs.GetDisks()) == 0 || hs.GetDisks()[0].GetMount() != "/") {
+		t.Fatalf("host stats: %v", hs)
 	}
 	ads := c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_ListAdapters{ListAdapters: &fleetv1.ListAdaptersRequest{}}}).GetListAdapters().GetAdapters()
 	if len(ads) != 5 || ads[0].GetId() != "limited" || ads[1].GetId() != "missing" || ads[1].GetAvailable() || ads[1].GetUnavailableReason() == "" ||

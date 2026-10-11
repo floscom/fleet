@@ -44,6 +44,8 @@ const (
 	adaptersTimeout = 5 * time.Second
 	// usageTimeout bounds detection plus asking the providers for usage.
 	usageTimeout = 10 * time.Second
+	// hostTimeout bounds reading the machine's stats.
+	hostTimeout = 5 * time.Second
 )
 
 // Error is a Source error shown to the user with an HTTP status.
@@ -111,6 +113,49 @@ type UsageLimit struct {
 	Percent float64 `json:"percent"`
 	// ResetsAtMs is when it starts over (Unix ms); 0 if unknown.
 	ResetsAtMs int64 `json:"resetsAtMs,omitempty"`
+}
+
+// HostStats is how a fleet's machine is doing (fleetv1.HostStats): what it
+// is, its load, memory and disks. Sizes are in bytes, times Unix ms.
+type HostStats struct {
+	ReadAtMs   int64  `json:"readAtMs"`
+	Hostname   string `json:"hostname"`
+	OSName     string `json:"osName"`
+	Kernel     string `json:"kernel"`
+	CPUModel   string `json:"cpuModel"`
+	CPUs       int32  `json:"cpus"`
+	BootedAtMs int64  `json:"bootedAtMs"`
+	// Load is the load average over 1, 5 and 15 minutes.
+	Load            [3]float64 `json:"load"`
+	MemoryTotal     uint64     `json:"memoryTotal"`
+	MemoryAvailable uint64     `json:"memoryAvailable"`
+	SwapTotal       uint64     `json:"swapTotal"`
+	SwapUsed        uint64     `json:"swapUsed"`
+	Disks           []HostDisk `json:"disks"`
+}
+
+// HostDisk is the space of a filesystem; Available is what users other
+// than root may still write.
+type HostDisk struct {
+	Mount     string `json:"mount"`
+	Total     uint64 `json:"total"`
+	Used      uint64 `json:"used"`
+	Available uint64 `json:"available"`
+}
+
+func hostStatsOf(h *fleetv1.HostStats) HostStats {
+	out := HostStats{
+		ReadAtMs: h.GetReadAtMs(), Hostname: h.GetHostname(), OSName: h.GetOsName(), Kernel: h.GetKernel(),
+		CPUModel: h.GetCpuModel(), CPUs: h.GetCpus(), BootedAtMs: h.GetBootedAtMs(),
+		Load:        [3]float64{h.GetLoad1(), h.GetLoad5(), h.GetLoad15()},
+		MemoryTotal: h.GetMemoryTotal(), MemoryAvailable: h.GetMemoryAvailable(),
+		SwapTotal: h.GetSwapTotal(), SwapUsed: h.GetSwapUsed(),
+		Disks: make([]HostDisk, 0, len(h.GetDisks())),
+	}
+	for _, d := range h.GetDisks() {
+		out.Disks = append(out.Disks, HostDisk{Mount: d.Mount, Total: d.Total, Used: d.Used, Available: d.Available})
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +246,7 @@ func (s *Server) apiHandler() http.Handler {
 	admin.HandleFunc("GET /api/fs", s.apiListDir)
 	admin.HandleFunc("GET /api/adapters", s.apiAdapters)
 	admin.HandleFunc("GET /api/usage", s.apiUsage)
+	admin.HandleFunc("GET /api/host", s.apiHostStats)
 	admin.HandleFunc("GET /api/roots", s.apiRoots)
 	admin.HandleFunc("POST /api/roots", s.apiAddRoot)
 	admin.HandleFunc("PUT /api/roots/{name}", s.apiUpdateRoot)
@@ -324,6 +370,13 @@ func (s *Server) apiUsage(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), usageTimeout)
 	defer cancel()
 	writeJSON(w, http.StatusOK, map[string][]AgentUsage{"agents": nonNil(s.opts.Source.Usage(ctx))})
+}
+
+// apiHostStats answers {"host": HostStats}: how this machine is doing.
+func (s *Server) apiHostStats(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), hostTimeout)
+	defer cancel()
+	writeJSON(w, http.StatusOK, map[string]HostStats{"host": hostStatsOf(s.opts.Source.HostStats(ctx))})
 }
 
 func (s *Server) apiAddRoot(w http.ResponseWriter, r *http.Request) {

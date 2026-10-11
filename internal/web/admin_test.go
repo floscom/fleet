@@ -83,7 +83,7 @@ func TestAdminAuth(t *testing.T) {
 	}
 
 	// Every admin route refuses a missing or wrong token.
-	for _, rt := range [][2]string{{"GET", "/api/fs"}, {"GET", "/api/adapters"}, {"GET", "/api/usage"}, {"GET", "/api/roots"}, {"POST", "/api/roots"},
+	for _, rt := range [][2]string{{"GET", "/api/fs"}, {"GET", "/api/adapters"}, {"GET", "/api/usage"}, {"GET", "/api/host"}, {"GET", "/api/roots"}, {"POST", "/api/roots"},
 		{"PUT", "/api/roots/code"}, {"DELETE", "/api/roots/code"}, {"GET", "/api/join"}, {"GET", "/api/hosts/peer-id/fs"}} {
 		for _, bad := range []string{"", "wrong"} {
 			var e struct{ Error string }
@@ -255,6 +255,14 @@ func TestAdminRoots(t *testing.T) {
 	if code := api(t, ts, "GET", "/api/usage", tok, "", &us); code != 200 || len(us.Agents) != 1 ||
 		us.Agents[0].Plan != "max 20x" || len(us.Agents[0].Limits) != 1 || us.Agents[0].Limits[0].Percent != 18 {
 		t.Fatalf("usage: %d %+v", code, us)
+	}
+	var hs struct{ Host HostStats }
+	if code := api(t, ts, "GET", "/api/host", tok, "", &hs); code != 200 || hs.Host.Hostname != "studio" || hs.Host.CPUs != 8 ||
+		hs.Host.Load != [3]float64{1.5, 0, 0} || hs.Host.MemoryAvailable != 40 || len(hs.Host.Disks) != 1 || hs.Host.Disks[0].Used != 9 {
+		t.Fatalf("host: %d %+v", code, hs)
+	}
+	if !forwardable("GET", "host") {
+		t.Error("GET host is not forwarded to other fleets")
 	}
 }
 

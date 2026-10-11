@@ -206,7 +206,7 @@ func forwardable(method, rest string) bool {
 	switch method {
 	case http.MethodGet:
 		switch rest {
-		case "session", "fs", "adapters", "usage", "roots", "agents", "workflows":
+		case "session", "fs", "adapters", "usage", "host", "roots", "agents", "workflows":
 			return true
 		}
 		return agentRoute(rest, "chat", "screen", "workflows", "image", "media", "files", "file") || workflowChatRoute(rest, "chat", "image")

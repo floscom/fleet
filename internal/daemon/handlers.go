@@ -95,6 +95,8 @@ func (c *conn) dispatch(id uint64, m *fleetv1.ClientMessage) error {
 	switch msg := m.GetMsg().(type) {
 	case *fleetv1.ClientMessage_GetInfo:
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_GetInfo{GetInfo: d.info()}})
+	case *fleetv1.ClientMessage_GetHostStats:
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_GetHostStats{GetHostStats: &fleetv1.GetHostStatsResponse{Stats: d.hostStats(c.ctx)}}})
 	case *fleetv1.ClientMessage_ListAdapters:
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_ListAdapters{ListAdapters: d.listAdapters(c.ctx)}})
 	case *fleetv1.ClientMessage_ListRoots:

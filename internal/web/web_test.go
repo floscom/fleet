@@ -137,6 +137,11 @@ func (s *fakeSource) Usage(context.Context) []AgentUsage {
 		Limits: []UsageLimit{{Label: "5h", Percent: 18, ResetsAtMs: 1}}}}
 }
 
+func (s *fakeSource) HostStats(context.Context) *fleetv1.HostStats {
+	return &fleetv1.HostStats{Hostname: "studio", Cpus: 8, Load1: 1.5, MemoryTotal: 100, MemoryAvailable: 40,
+		Disks: []*fleetv1.DiskStats{{Mount: "/", Total: 10, Used: 9, Available: 1}}}
+}
+
 func (s *fakeSource) Agents() []*fleetv1.Agent {
 	s.mu.Lock()
 	defer s.mu.Unlock()

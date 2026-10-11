@@ -409,6 +409,10 @@ func newStatusCmd() *cobra.Command {
 			if info.StartedAtMs > 0 {
 				fmt.Fprintf(out, "up:        %s\n", age(info.StartedAtMs))
 			}
+			// Daemons before host stats answer with an error: no line.
+			if hs, err := c.GetHostStats(ctx); err == nil {
+				fmt.Fprintf(out, "host:      %s\n", hostSummary(hs))
+			}
 			fmt.Fprintf(out, "server id: %s\n", info.ServerId)
 			fmt.Fprintf(out, "agents:    %s\n", agentSummary(agents))
 			fmt.Fprintf(out, "roots:     %d\n", len(roots))

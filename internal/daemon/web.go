@@ -81,6 +81,10 @@ func (s *webSource) Adapters(ctx context.Context) []web.Adapter {
 	return out
 }
 
+func (s *webSource) HostStats(ctx context.Context) *fleetv1.HostStats {
+	return s.d.hostStats(ctx)
+}
+
 func (s *webSource) Usage(ctx context.Context) []web.AgentUsage {
 	var out []web.AgentUsage
 	for _, u := range s.d.agentUsages(ctx) {

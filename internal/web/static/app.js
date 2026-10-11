@@ -25,6 +25,7 @@
     remote: new Map(), // server id of another fleet -> {agents: Map(id -> agent), fails}
     workflows: new Map(), // agentKey -> workflow runs going on (see pollWorkflows)
     usage: new Map(), // server id -> agent CLIs and their plan usage (see pollUsage)
+    host: new Map(), // server id -> how its machine is doing (see pollUsage, hostNode)
     snapshotDone: false,
     peersSeen: false, // first complete (post-browse) peers list of this connection received
   };
@@ -766,6 +767,8 @@
         idEl.title = p.id;
         body.append(idEl);
       }
+      const hs = hostNode(p.id);
+      if (hs) body.append(hs);
       const u = usageNode(p.id);
       if (u) body.append(u);
       row.append(body);
@@ -1243,6 +1246,7 @@
       S.remote.clear();
       S.workflows.clear();
       S.usage.clear();
+      S.host.clear();
     } else {
       closeUnlock();
     }
@@ -2202,7 +2206,8 @@
 
   // ------------------------------------------------------------------ usage
   //
-  // Each fleet's agent CLIs, installed or not, and how much of their
+  // Each fleet's machine (what it is, its load, memory and disks; see
+  // hostNode), its agent CLIs, installed or not, and how much of their
   // account's plan limits (5h session, week, ...) is used, shown under the
   // fleet in "Fleet on the network". Asked once a minute while the page is
   // visible; the daemons cache the providers' answers for minutes and keep
@@ -2226,15 +2231,19 @@
     usageAt = Date.now();
     const self = S.server && S.server.id;
     const ids = S.peers.filter((p) => p.id).map((p) => p.id);
-    for (const id of [...S.usage.keys()]) if (!ids.includes(id)) S.usage.delete(id);
-    await Promise.all(ids.map(async (id) => {
-      try {
-        const r = await api('GET', id === self ? '/api/usage' : `/api/hosts/${encodeURIComponent(id)}/usage`);
-        S.usage.set(id, (r && r.agents) || []);
-      } catch (e) {
-        // Not joined: nothing to show. Unreachable: keep the last answer.
-        if (e.notJoined || !S.usage.has(id)) S.usage.set(id, null);
-      }
+    for (const m of [S.usage, S.host]) for (const id of [...m.keys()]) if (!ids.includes(id)) m.delete(id);
+    await Promise.all(ids.map((id) => {
+      const base = id === self ? '/api/' : `/api/hosts/${encodeURIComponent(id)}/`;
+      // Not joined: nothing to show. Unreachable: keep the last answer.
+      return Promise.all([
+        api('GET', base + 'usage').then((r) => S.usage.set(id, (r && r.agents) || []), (e) => {
+          if (e.notJoined || !S.usage.has(id)) S.usage.set(id, null);
+        }),
+        // A fleet older than host stats has no such route.
+        api('GET', base + 'host').then((r) => S.host.set(id, (r && r.host) || null), (e) => {
+          if (e.notJoined || e.status === 404 || !S.host.has(id)) S.host.set(id, null);
+        }),
+      ]);
     }));
     usageBusy = false;
     invalidate('peers');
@@ -2295,6 +2304,90 @@
     el.title = `${l.label}: ${Math.round(pct)}% used` +
       (l.resetsAtMs ? `, resets in ${dur(l.resetsAtMs - Date.now()).replace(/ \d+s$/, '')} (${new Date(l.resetsAtMs).toLocaleString()})` : '');
     return el;
+  }
+
+  // hostNode shows how a fleet's machine is doing: a line of what it is,
+  // then its load, memory, swap and disks as meters. The dot before them
+  // turns amber, then red, as the fullest of them runs full.
+  function hostNode(id) {
+    const s = admin && id && S.host.get(id);
+    if (!s) return null;
+    const share = (part, whole) => (whole > 0 ? (100 * part) / whole : 0);
+    const meters = [];
+    const busy = share(s.load[0], s.cpus);
+    meters.push(hostMeter('load', busy, s.load[0].toFixed(2), 100, 150,
+      `load ${s.load.map((l) => l.toFixed(2)).join(' · ')} over 1, 5 and 15 minutes, on ${s.cpus} CPUs (${Math.round(busy)}% busy)`));
+    if (s.memoryTotal) {
+      const used = s.memoryTotal - s.memoryAvailable;
+      const p = share(used, s.memoryTotal);
+      meters.push(hostMeter('mem', p, Math.round(p) + '%', 80, 90,
+        `memory: ${fmtIEC(used)} used of ${fmtIEC(s.memoryTotal)}, ${fmtIEC(s.memoryAvailable)} available`));
+    }
+    if (s.swapTotal) {
+      const p = share(s.swapUsed, s.swapTotal);
+      meters.push(hostMeter('swap', p, Math.round(p) + '%', 80, 90, `swap: ${fmtIEC(s.swapUsed)} used of ${fmtIEC(s.swapTotal)}`));
+    }
+    for (const d of s.disks || []) {
+      // As df counts it: of what users may fill.
+      const p = share(d.used, d.used + d.available);
+      meters.push(hostMeter('disk ' + (d.mount === '/' ? '/' : baseName(d.mount)), p, Math.round(p) + '%', 80, 90,
+        `disk ${d.mount}: ${fmtIEC(d.used)} used of ${fmtIEC(d.total)}, ${fmtIEC(d.available)} free`));
+    }
+    const level = Math.max(...meters.map((m) => m.level));
+    const state = ['fine', 'getting full or busy', 'full or overloaded'][level];
+    const name = h('span', 'inline-flex w-16 shrink-0 items-center gap-1.5 font-mono text-zinc-200',
+      h('span', 'size-1.5 shrink-0 rounded-full ' + ['bg-emerald-400', 'bg-amber-400', 'bg-rose-400'][level]), 'host',
+      h('span', 'sr-only', ': ' + state));
+    name.title = `${s.hostname || 'the machine'}: ${state}`;
+    const what = [s.osName, shortCPU(s.cpuModel), s.cpus ? `${s.cpus} CPUs` : '', s.memoryTotal ? fmtIEC(s.memoryTotal) : '',
+      s.bootedAtMs ? 'up ' + upFor(Date.now() - s.bootedAtMs) : ''].filter(Boolean);
+    if (s.readAtMs && Date.now() - s.readAtMs >= USAGE_STALE_MS) what.push('as of ' + limitClock(s.readAtMs));
+    // One unbreakable span per item, like the addresses above.
+    const specs = h('div', 'flex flex-wrap gap-x-3 font-mono text-[11px] text-zinc-500', ...what.map((t) => h('span', 'whitespace-nowrap', t)));
+    specs.title = [s.hostname, s.osName, s.kernel && 'kernel ' + s.kernel, s.cpuModel, s.bootedAtMs && 'booted ' + new Date(s.bootedAtMs).toLocaleString()]
+      .filter(Boolean).join('\n');
+    return h('div', 'mt-2 flex flex-col gap-1.5', specs,
+      h('div', 'flex items-start gap-3 text-xs leading-4', name,
+        h('div', 'flex min-w-0 flex-1 flex-wrap items-start gap-x-3 gap-y-1', ...meters.map((m) => m.el))));
+  }
+
+  // hostMeter is a reading as a bar: amber from warn percent, red from
+  // full. It returns the element and its level (0 fine, 1 amber, 2 red).
+  function hostMeter(label, pct, text, warn, full, title) {
+    const level = pct >= full ? 2 : pct >= warn ? 1 : 0;
+    const fill = h('span', 'absolute inset-y-0 left-0 rounded-full ' + ['bg-emerald-400', 'bg-amber-400', 'bg-rose-400'][level]);
+    fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+    const el = h('span', 'inline-flex items-center gap-1.5 whitespace-nowrap',
+      h('span', 'max-w-32 truncate text-zinc-500', label),
+      h('span', 'relative h-1.5 w-10 overflow-hidden rounded-full bg-ink-700', fill),
+      h('span', 'font-mono tabular-nums ' + (level === 2 ? 'text-rose-300' : 'text-zinc-300'), text));
+    el.title = title;
+    return { el, level };
+  }
+
+  // shortCPU drops trademarks, "CPU", core counts and the clock from a
+  // CPU's name: "Intel(R) Core(TM) i7-7700K CPU @ 4.20GHz" is "Intel Core
+  // i7-7700K".
+  const shortCPU = (m) => (m || '').replace(/\((?:R|TM|C)\)/gi, '').replace(/@.*$/, '')
+    .replace(/\b(?:CPU|Processor|\d+-Core)\b/gi, '').replace(/\s+/g, ' ').trim();
+
+  // upFor is a long time, roughly: 17d, 5h, 12m.
+  function upFor(ms) {
+    const m = Math.max(0, Math.floor(ms / 60000));
+    if (m >= 2880) return Math.floor(m / 1440) + 'd';
+    if (m >= 60) return Math.floor(m / 60) + 'h';
+    return m + 'm';
+  }
+
+  // fmtIEC is a size in binary units: 512 B, 3.4 KiB, 31 GiB.
+  function fmtIEC(n) {
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
+    let i = 0;
+    while (n >= 1024 && i < units.length - 1) {
+      n /= 1024;
+      i++;
+    }
+    return i ? `${n.toFixed(n < 10 ? 1 : 0)} ${units[i]}` : `${n} B`;
   }
 
   // --------------------------------------------------------------- launcher

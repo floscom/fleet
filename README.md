@@ -74,6 +74,7 @@ On the server:
 fleet start                     # daemon in the background, log in ~/.fleet/daemon.log
 fleet roots add ~/code --trust  # allow agents in ~/code (root name "code"), skip trust prompts
 fleet adapters                  # which agent CLIs were found
+fleet host                      # the machine: CPU, load, memory, disks
 fleet run claude code:api --attach   # try it locally; detach with Ctrl-\
 fleet pair                      # one-time code + server fingerprint for a new device
 fleet web                       # admin link for the web dashboard: sessions, folders, roots
@@ -104,7 +105,8 @@ address. Without it, commands talk to the local daemon.
 | `fleet daemon [--listen ADDR\|off] [--web ADDR\|off] [--no-mdns] [--root DIR]... [--trust] [--join KEY]` | Run the daemon in the foreground (logs to stderr). `--root`: see [Starting in a folder](#starting-in-a-folder). `--join`: see [Several machines](#several-machines-one-dashboard). |
 | `fleet start [--listen ...] [--web ...] [--no-mdns] [--root DIR]... [--trust] [--join KEY]` | Start the daemon in the background. If it already runs, only adds the `--root` folders and stores the `--join` key. |
 | `fleet stop [--force]` | Stop the daemon. Agents keep running in tmux. |
-| `fleet status` | Daemon version, uptime, server id, agent, root and device counts. |
+| `fleet status` | Daemon version, uptime, a line on the machine's load, memory and disks, server id, agent, root and device counts. |
+| `fleet host [--json]` | The daemon's machine: OS, kernel, CPU, uptime, load, memory, swap and the disks of `/`, the home folder, the roots and `~/.fleet`. A line ends in `!` when the load passes one per CPU or memory, swap or a disk is 90% full. With `-H`, of a paired server. |
 | `fleet version` | Print the version. |
 | `fleet roots` / `roots add <path> [--name N] [--adapters a,b] [--trust]` / `roots rm <name>` | Manage the folders agents may run in. `--trust`: see [Folder trust](#folder-trust). |
 | `fleet browse [root[/path]] [-a]` | List folders inside a root, marking git repos and running agents. |
@@ -366,6 +368,13 @@ there needed. That browser then shows **admin** in the header and can:
   asks the provider at most every 45 s with the token its CLI stored
   (`~/.claude/.credentials.json`, `~/.codex/auth.json`) and never
   refreshes it; a Claude login in the macOS Keychain shows as unknown.
+- **See how each machine is doing**: above the agent CLIs, each fleet's
+  machine shows its OS, CPU, memory and uptime, then meters for its load
+  (the 1-minute average per CPU), memory, swap and disks (`/`, the home
+  folder, the roots, `~/.fleet`). A meter turns amber at 80% and red at
+  90% (load: at one and one and a half per CPU), and so does the dot
+  before them; hover a meter for the numbers (`GET /api/host`, also
+  `fleet host`).
 - **Add roots on other machines**: the folder picker starts with a
   *Machine* row listing this daemon and every fleet on the LAN with a
   dashboard. Pick one to browse its folders and add a root there (see

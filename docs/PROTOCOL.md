@@ -644,6 +644,20 @@ Errors marked *(any)* can come from almost every request:
 `daemon_version`, `hostname`, `os` and `arch` (Go names: `linux`,
 `darwin`, `amd64`, `arm64`), `started_at_ms` (Unix ms). No errors.
 
+**`GetHostStatsRequest` → `GetHostStatsResponse{stats}`**: how the
+daemon's machine is doing, read when asked. `HostStats` has `read_at_ms`,
+`hostname`, `os_name` ("Ubuntu 24.04.1 LTS", "macOS 15.2"), `kernel`,
+`cpu_model`, `cpus` (logical), `booted_at_ms`, the load averages `load1`,
+`load5`, `load15`, and in bytes `memory_total`, `memory_available` (what
+programs can still get without swapping), `swap_total`, `swap_used`.
+`disks` are the filesystems of `/` (not on macOS, where it is the
+read-only system volume), the home folder, the roots and the daemon's
+own files, each once: `mount`, `total`, `used`, `available` (to users
+other than root, as df's "Avail"; how full a disk is, as df shows it, is
+`used / (used + available)`). What the OS does not tell is 0 or empty.
+No errors. A daemon older than this message finds no request in it and
+answers `INVALID_ARGUMENT` ("empty message").
+
 **`ListAdaptersRequest` → `ListAdaptersResponse`**: every registered
 adapter (v1: `claude`, `codex`, `shell`), whether its CLI was found, its
 path and version, `unavailable_reason` when not found, and

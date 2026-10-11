@@ -20,6 +20,16 @@ func (c *Client) GetInfo(ctx context.Context) (*fleetv1.GetInfoResponse, error) 
 		(*fleetv1.ServerMessage).GetGetInfo)
 }
 
+// GetHostStats reads how the daemon's machine is doing.
+func (c *Client) GetHostStats(ctx context.Context) (*fleetv1.HostStats, error) {
+	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_GetHostStats{GetHostStats: &fleetv1.GetHostStatsRequest{}}},
+		(*fleetv1.ServerMessage).GetGetHostStats)
+	if err != nil {
+		return nil, err
+	}
+	return r.GetStats(), nil
+}
+
 // ListAdapters lists the daemon's adapters.
 func (c *Client) ListAdapters(ctx context.Context) ([]*fleetv1.AdapterInfo, error) {
 	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_ListAdapters{ListAdapters: &fleetv1.ListAdaptersRequest{}}},

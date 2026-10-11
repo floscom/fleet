@@ -52,6 +52,7 @@ message ClientMessage {
     AddRootRequest add_root = 23;
     RemoveRootRequest remove_root = 24;
     BrowseRequest browse = 25;
+    GetHostStatsRequest get_host_stats = 26;
 
     // Agents
     ListAgentsRequest list_agents = 30;
@@ -98,6 +99,7 @@ message ServerMessage {
     AddRootResponse add_root = 23;
     RemoveRootResponse remove_root = 24;
     BrowseResponse browse = 25;
+    GetHostStatsResponse get_host_stats = 26;
 
     ListAgentsResponse list_agents = 30;
     RunAgentResponse run_agent = 31;
@@ -236,6 +238,55 @@ message GetInfoResponse {
   string os = 5;   // GOOS
   string arch = 6; // GOARCH
   int64 started_at_ms = 7;
+}
+
+message GetHostStatsRequest {}
+
+message GetHostStatsResponse {
+  HostStats stats = 1;
+}
+
+// HostStats is how the daemon's machine is doing, read when asked. What
+// the OS does not tell is left 0 or empty.
+message HostStats {
+  // When it was read (Unix ms).
+  int64 read_at_ms = 1;
+  string hostname = 2;
+  // The OS release, e.g. "Ubuntu 24.04.1 LTS" or "macOS 15.2", and the
+  // kernel's, e.g. "6.8.0-139-generic".
+  string os_name = 3;
+  string kernel = 4;
+  string cpu_model = 5;
+  // Logical CPUs.
+  int32 cpus = 6;
+  // When the machine booted (Unix ms).
+  int64 booted_at_ms = 7;
+  // Load averages over 1, 5 and 15 minutes: tasks running or waiting to
+  // (on Linux also those waiting for disk). Compare them with cpus.
+  double load1 = 8;
+  double load5 = 9;
+  double load15 = 10;
+  // Memory in bytes. Available is what programs can still get without
+  // swapping: free memory and caches the OS can drop.
+  uint64 memory_total = 11;
+  uint64 memory_available = 12;
+  uint64 swap_total = 13;
+  uint64 swap_used = 14;
+  // The filesystems of the roots, the home folder and the daemon's own
+  // files, and / (but on macOS, whose / is the read-only system volume),
+  // each once.
+  repeated DiskStats disks = 15;
+}
+
+// DiskStats is the space of a filesystem, in bytes. Available is what
+// users other than root may still write (df's "Avail"): used plus
+// available falls short of total by the blocks reserved for root.
+message DiskStats {
+  // Where it is mounted.
+  string mount = 1;
+  uint64 total = 2;
+  uint64 used = 3;
+  uint64 available = 4;
 }
 
 message ListAdaptersRequest {}
