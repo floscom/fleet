@@ -62,6 +62,10 @@ type Entry struct {
 	TimeMs int64 `json:"ts,omitempty"`
 	// Images are the images of a User message or a Result.
 	Images []Image `json:"images,omitempty"`
+	// Files are the files a Tool call writes (creates, changes or
+	// deletes), as the agent names them: absolute, or relative to its
+	// working directory.
+	Files []string `json:"files,omitempty"`
 }
 
 // Image is an image a transcript holds inline. Line is the offset of its

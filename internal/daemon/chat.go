@@ -73,6 +73,18 @@ func (m *manager) chat(ref string) (*fleetv1.Agent, string, transcript.Parser, e
 	return s.agent, s.path, s.t.ParseTranscript, nil
 }
 
+// startedAt is when agent ref's terminal session was created, after its
+// worktree or clone (0 if unknown).
+func (m *manager) startedAt(ref string) int64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, err := m.find(ref)
+	if err != nil {
+		return 0
+	}
+	return a.StartedAtMs
+}
+
 // sessionFiles is where an agent's session is recorded.
 type sessionFiles struct {
 	agent *fleetv1.Agent

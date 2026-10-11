@@ -66,11 +66,11 @@ func TestParseTranscript(t *testing.T) {
 
 		// file changes
 		{"patch", completed(`{"type":"FileChange","id":"exec-2","changes":{"/w/b.md":{"type":"update","unified_diff":"@@ -1,2 +1,2 @@\n a\n-b\n+c\n","move_path":null},"/w/a.md":{"type":"add","content":"hello\nworld\n"},"/w/c.md":{"type":"delete","content":"old\n"}},"status":"completed","stdout":"Success. Updated the following files:\nA /w/a.md\nM /w/b.md\nD /w/c.md\n","stderr":""}`),
-			tool(transcript.Entry{Name: "edit", Text: "/w/a.md, /w/b.md, /w/c.md", Detail: "A /w/a.md\n+hello\n+world\nM /w/b.md\n@@ -1,2 +1,2 @@\n a\n-b\n+c\nD /w/c.md"})},
+			tool(transcript.Entry{Name: "edit", Text: "/w/a.md, /w/b.md, /w/c.md", Detail: "A /w/a.md\n+hello\n+world\nM /w/b.md\n@@ -1,2 +1,2 @@\n a\n-b\n+c\nD /w/c.md", Files: []string{"/w/a.md", "/w/b.md", "/w/c.md"}})},
 		{"move", completed(`{"type":"FileChange","id":"exec-2","changes":{"/w/a.go":{"type":"update","unified_diff":"","move_path":"/w/b.go"}},"status":"completed"}`),
-			tool(transcript.Entry{Name: "edit", Text: "/w/a.go", Detail: "M /w/a.go -> /w/b.go"})},
+			tool(transcript.Entry{Name: "edit", Text: "/w/a.go", Detail: "M /w/a.go -> /w/b.go", Files: []string{"/w/a.go", "/w/b.go"}})},
 		{"failed patch", completed(`{"type":"FileChange","id":"exec-2","changes":{"/w/a.go":{"type":"update","unified_diff":"@@\n-x\n+y\n"}},"status":"failed","stdout":"","stderr":"patch did not apply\n"}`),
-			tool(transcript.Entry{Name: "edit", Text: "/w/a.go", Detail: "M /w/a.go\n@@\n-x\n+y", Output: "patch did not apply", Error: true})},
+			tool(transcript.Entry{Name: "edit", Text: "/w/a.go", Detail: "M /w/a.go\n@@\n-x\n+y", Output: "patch did not apply", Error: true, Files: []string{"/w/a.go"}})},
 
 		// other tools
 		{"mcp", completed(`{"type":"McpToolCall","id":"exec-3","server":"docs","tool":"search","arguments":{"q":"hooks"},"status":"completed","result":{"content":[{"type":"text","text":"found 2"},{"type":"image","data":"iVBO"}],"isError":false},"duration":{"secs":0,"nanos":1}}`),
@@ -84,7 +84,7 @@ func TestParseTranscript(t *testing.T) {
 		{"find in page", completed(`{"type":"Extension","kind":"web.search","id":"exec-4","query":"","action":{"type":"findInPage","url":"https://example.com/","pattern":"install"}}`),
 			tool(transcript.Entry{Name: "web_search", Text: "install in https://example.com/"})},
 		{"image generation", completed(`{"type":"Extension","kind":"image_gen.generation","id":"exec-5","status":"completed","revisedPrompt":"A red fox.\nPhoto.","result":"iVBORw0KGgoAAAANSUhEUg","transparentBackground":false,"failure":null,"savedPath":"/h/.codex/generated_images/s/exec-5.png"}`),
-			tool(transcript.Entry{Name: "image_gen", Text: "A red fox.", Detail: "A red fox.\nPhoto.", Output: "/h/.codex/generated_images/s/exec-5.png"})},
+			tool(transcript.Entry{Name: "image_gen", Text: "A red fox.", Detail: "A red fox.\nPhoto.", Output: "/h/.codex/generated_images/s/exec-5.png", Files: []string{"/h/.codex/generated_images/s/exec-5.png"}})},
 		{"sleep", completed(`{"type":"Extension","kind":"clock.sleep","id":"call_1","durationMs":45000}`), tool(transcript.Entry{Name: "sleep", Text: "45s"})},
 		{"unknown extension", completed(`{"type":"Extension","kind":"calendar.add","id":"call_1"}`), tool(transcript.Entry{Name: "calendar.add"})},
 		{"view image", completed(`{"type":"ImageView","id":"exec-6","path":"file:///w/shot.png"}`), tool(transcript.Entry{Name: "view_image", Text: "/w/shot.png"})},

@@ -188,7 +188,7 @@ func (s *webSource) Chat(agent string) (web.Chat, error) {
 	if err != nil {
 		return web.Chat{}, webError(err)
 	}
-	c := web.Chat{Agent: a, Path: path, Parse: parse, Image: s.imager(a), Asks: s.d.agents.asksOf(a.GetId())}
+	c := web.Chat{Agent: a, Path: path, Parse: parse, Image: s.imager(a), Asks: s.d.agents.asksOf(a.GetId()), StartedAtMs: s.d.agents.startedAt(a.GetId())}
 	if info, ok, err := s.d.agents.model(a.GetId()); err == nil && ok {
 		c.Model = webModel(info)
 	}

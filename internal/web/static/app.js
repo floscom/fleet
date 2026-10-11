@@ -3205,6 +3205,7 @@
     wf.known.clear();
     wf.cards.clear();
     resetMedia();
+    resetFiles();
     if (opts && opts.run) wf.shown.add(opts.run);
     chat.screenOpen = !!agent && (agent.state === 'needs_input' || agent.adapter === 'shell');
     chat.screenAutoOpened = chat.screenOpen && agent.adapter !== 'shell';
@@ -3867,6 +3868,254 @@
       ev.preventDefault(); // no click: it would close the view
       openMedia(viewer.i + (dx > 0 ? -1 : 1));
     });
+  }
+
+  // ---- the Files tab: what the agent wrote and changed, and a search
+  // through its folder
+  //
+  // GET .../files lists them, newest first: the files its tool calls
+  // wrote, wherever they are, and those of its folder changed since the
+  // session started; with q, those whose path holds every word of it, and
+  // in found the folder's other files that do. The page asks again when
+  // the tab is shown, a search is typed, or the chat shows a tool call
+  // that wrote files. GET .../file reads one, its content in base64.
+
+  const files = {
+    list: [], // {path, rel, size, mtimeMs, written, gone}, newest first
+    found: [], // with a search: the folder's other files that match
+    q: '', // the search the lists are for
+    dir: '', // the agent's folder, '' if it has none
+    total: 0, // files written and changed, without a search: the tab's count
+    partial: false,
+    loaded: false,
+    error: '',
+    missing: false, // the fleet has no files route
+    busy: false,
+    again: false, // ask once more after the request in flight
+    timer: 0, // a search typed or files written: waits for a pause
+    open: null, // the list item opened
+    shown: null, // its content: {path, rel, size, mtimeMs, type, text, data, big}
+    seq: 0, // file reads: only the latest is shown
+    url: '', // object URL of the video or audio shown
+  };
+
+  // Images shown from a data: URL (in an <img> an SVG runs no script).
+  const IMG_TYPE = /^image\/(?:png|jpeg|gif|webp|avif|bmp|svg\+xml|x-icon|vnd\.microsoft\.icon)$/;
+  // The most text a file view shows.
+  const FILE_TEXT_MAX = 512 << 10;
+  // The colour of a file's badge, by its extension.
+  const FILE_KINDS = [
+    [/^(?:png|jpe?g|gif|webp|avif|svg|bmp|ico|heic)$/, 'border-sky-400/30 text-sky-300'],
+    [/^(?:mp4|webm|mov|m4v|mkv|mp3|wav|ogg|m4a|flac)$/, 'border-violet-400/30 text-violet-300'],
+    [/^(?:md|mdx|markdown|txt|pdf|docx?|rtf|csv|tsv|xlsx?|pptx?|html?)$/, 'border-amber-400/30 text-amber-200'],
+  ];
+
+  const fmtSize = (n) => (n < 1024 ? `${n} B`
+    : n < 1 << 20 ? `${(n / 1024).toFixed(n < 10 << 10 ? 1 : 0)} KB`
+      : `${(n / (1 << 20)).toFixed(n < 10 << 20 ? 1 : 0)} MB`);
+
+  function b64bytes(s) {
+    const bin = atob(s || '');
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  function resetFiles() {
+    clearTimeout(files.timer);
+    closeFile();
+    Object.assign(files, { list: [], found: [], q: '', dir: '', total: 0, partial: false, loaded: false, error: '', missing: false, busy: false, again: false });
+    $('files-q').value = '';
+    $('files-list').replaceChildren();
+  }
+
+  // filesSoon reads the lists again after ms: a search being typed, or a
+  // run of files being written, asks once.
+  function filesSoon(ms) {
+    clearTimeout(files.timer);
+    files.timer = setTimeout(loadFiles, ms);
+  }
+
+  // loadFiles reads the lists for the search in the box.
+  async function loadFiles() {
+    clearTimeout(files.timer);
+    if (files.busy) {
+      files.again = true;
+      return;
+    }
+    const seq = chat.seq;
+    files.busy = true;
+    $('files-reload').disabled = true;
+    try {
+      do {
+        files.again = false;
+        const q = $('files-q').value.trim();
+        const r = await api('GET', chatAPI('files' + (q ? '?' + new URLSearchParams({ q }) : '')));
+        if (seq !== chat.seq) return;
+        Object.assign(files, { list: r.files || [], found: r.found || [], q, dir: r.dir || '', partial: !!r.partial, loaded: true, error: '', missing: false });
+        if (!q) files.total = files.list.length;
+      } while (files.again);
+    } catch (e) {
+      if (seq !== chat.seq) return;
+      // A fleet without the files route has none to show.
+      Object.assign(files, { loaded: true, error: e.message, missing: e.status === 404 && !files.dir });
+    } finally {
+      if (seq === chat.seq) {
+        files.busy = false;
+        $('files-reload').disabled = false;
+      }
+    }
+    renderTabs();
+    if (chat.view === 'files') renderFiles();
+  }
+
+  function renderFiles() {
+    const box = $('files-list');
+    const note = (t) => h('div', 'py-10 text-center font-mono text-xs text-zinc-600', t);
+    $('files-q').placeholder = files.dir ? `Search files in ${baseName(files.dir) || '/'}` : 'Search the files written';
+    if (!files.loaded) return box.replaceChildren(note('// loading…'));
+    if (files.error) return box.replaceChildren(note('// ' + (files.missing ? 'This fleet cannot list files: update it.' : files.error)));
+    const head = (label, n) => h('h4', 'flex items-baseline gap-2 px-1 pb-1.5 pt-4 text-[10.5px] font-medium uppercase tracking-wider text-zinc-500 first:pt-0',
+      label, h('span', 'font-mono tabular-nums text-zinc-600', String(n)));
+    const out = [];
+    if (files.q) {
+      if (files.list.length) out.push(head('Written or changed by the agent', files.list.length), fileRows(files.list));
+      if (files.found.length) out.push(head('Elsewhere in the folder', files.found.length), fileRows(files.found));
+      if (!files.list.length && !files.found.length) out.push(note(`// No file matches “${files.q}”.`));
+    } else if (files.list.length) {
+      out.push(head('Written or changed since the session started', files.list.length), fileRows(files.list));
+    } else {
+      out.push(h('div', 'py-10 text-center',
+        h('div', 'font-mono text-xs text-zinc-600', '// The agent has not written or changed a file yet.'),
+        files.dir ? h('div', 'mt-1 text-xs text-zinc-500', 'Search to find any file in ', h('span', 'break-all font-mono text-zinc-400', files.dir), '.') : null));
+    }
+    if (files.partial) out.push(h('div', 'px-1 pt-3 font-mono text-[10.5px] text-zinc-600', '// Not everything is listed: the folder is large.'));
+    box.replaceChildren(...out);
+  }
+
+  function fileBadge(name) {
+    const dot = name.lastIndexOf('.');
+    const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+    const kind = FILE_KINDS.find(([re]) => re.test(ext));
+    return h('span', 'grid h-7 w-10 shrink-0 place-items-center overflow-hidden rounded border bg-ink-950 font-mono text-[9.5px] font-semibold uppercase ' +
+      (kind ? kind[1] : 'border-ink-600 text-zinc-400'), ext.slice(0, 5) || '—');
+  }
+
+  // fileRows lists files: name, folder (./ for the agent's, else absolute),
+  // size and age. A file gone is struck through.
+  function fileRows(list) {
+    const ul = h('ul', 'divide-y divide-ink-700/60 overflow-hidden rounded-md border border-ink-700 bg-ink-900/40');
+    for (const f of list) {
+      const name = baseName(f.path);
+      const where = f.rel ? './' + f.rel.slice(0, -name.length) : f.path.slice(0, -name.length);
+      const b = h('button', 'touch:min-h-11 flex w-full min-w-0 items-center gap-2.5 px-2.5 py-1.5 text-left hover:bg-ink-850 disabled:cursor-default disabled:hover:bg-transparent focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-amber-400',
+        fileBadge(name),
+        h('span', 'min-w-0 flex-1',
+          h('span', 'block truncate font-mono text-[12.5px] ' + (f.gone ? 'text-zinc-500 line-through' : 'text-zinc-200'), name),
+          h('span', 'block truncate font-mono text-[10.5px] text-zinc-500', where)),
+        h('span', 'shrink-0 text-right font-mono text-[10.5px] leading-tight',
+          h('span', 'block tabular-nums text-zinc-400', f.gone ? 'deleted' : fmtSize(f.size)),
+          f.mtimeMs ? relTime(f.mtimeMs, '', 'block tabular-nums text-zinc-600') : null));
+      b.type = 'button';
+      b.title = f.path + (f.written ? '\nwritten by the agent' : '');
+      if (f.gone) b.disabled = true;
+      else b.addEventListener('click', () => openFile(f));
+      ul.append(h('li', '', b));
+    }
+    return ul;
+  }
+
+  // openFile shows file f in place of the lists.
+  async function openFile(f) {
+    const seq = ++files.seq;
+    revokeFileURL();
+    Object.assign(files, { open: f, shown: null });
+    $('file-name').textContent = baseName(f.path);
+    $('file-name').title = f.path;
+    $('file-meta').textContent = f.rel || f.path;
+    $('file-download').disabled = true;
+    $('file-body').replaceChildren(h('div', 'py-10 text-center font-mono text-xs text-zinc-600', '// loading…'));
+    $('files-browse').hidden = true;
+    $('file-view').hidden = false;
+    $('file-body').scrollTop = 0;
+    $('file-back').focus();
+    try {
+      const r = await api('GET', chatAPI('file?' + new URLSearchParams({ path: f.path })));
+      if (seq !== files.seq) return;
+      files.shown = r;
+      const when = r.mtimeMs ? new Date(r.mtimeMs).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : '';
+      $('file-meta').textContent = [fmtSize(r.size), when, r.rel || r.path].filter(Boolean).join(' · ');
+      $('file-download').disabled = !!r.big;
+      $('file-body').replaceChildren(filePreview(r, baseName(r.path)));
+    } catch (e) {
+      if (seq !== files.seq) return;
+      $('file-body').replaceChildren(h('div', 'py-10 text-center font-mono text-xs text-zinc-500', '// ' + e.message));
+    }
+  }
+
+  // closeFile goes back to the lists, as they were.
+  function closeFile() {
+    files.seq++;
+    revokeFileURL();
+    Object.assign(files, { open: null, shown: null });
+    $('file-view').hidden = true;
+    $('files-browse').hidden = false;
+    $('file-body').replaceChildren();
+  }
+
+  function revokeFileURL() {
+    if (files.url) URL.revokeObjectURL(files.url);
+    files.url = '';
+  }
+
+  // filePreview shows a file's content: an image, text (markdown
+  // rendered, code highlighted with line numbers), a video or a sound.
+  function filePreview(r, name) {
+    const note = (t) => h('div', 'py-10 text-center font-mono text-xs text-zinc-500', t);
+    const type = (r.type || '').split(';')[0].trim().toLowerCase();
+    if (r.big) return note(`// ${fmtSize(r.size)}: too large to open here.`);
+    if (IMG_TYPE.test(type) && (!r.text || type === 'image/svg+xml')) {
+      const src = `data:${type};base64,${r.data}`;
+      const img = h('img', 'mx-auto block max-h-[75dvh] max-w-full cursor-zoom-in rounded-md border border-ink-700 bg-ink-950 object-contain');
+      img.alt = name;
+      img.src = src;
+      img.addEventListener('click', () => openImage(src));
+      return img;
+    }
+    if (r.text) {
+      let text = new TextDecoder().decode(b64bytes(r.data));
+      if (!text) return note('// The file is empty.');
+      const cut = text.length > FILE_TEXT_MAX;
+      if (cut) text = text.slice(0, FILE_TEXT_MAX);
+      const more = cut ? h('div', 'pt-2 font-mono text-[10.5px] text-zinc-600', '// … the rest is not shown: download the file.') : null;
+      if (/\.(?:md|mdx|markdown)$/i.test(name)) return h('div', 'mx-auto max-w-3xl', md(text), more);
+      const lang = extLang(name);
+      const numbered = text.replace(/\n$/, '').split('\n').map((l, i) => `${i + 1}\t${l}`).join('\n');
+      return h('div', 'mx-auto max-w-5xl', codeView({ text: numbered, read: true, lang, tag: lang || 'text' }), more);
+    }
+    if (/^(?:video|audio)\//.test(type)) {
+      files.url = URL.createObjectURL(new Blob([b64bytes(r.data)], { type }));
+      const v = h(type.startsWith('video/') ? 'video' : 'audio', 'mx-auto block max-h-[75dvh] max-w-full rounded-md');
+      v.controls = true;
+      v.playsInline = true;
+      v.preload = 'metadata';
+      v.src = files.url;
+      return v;
+    }
+    return note(`// ${type || 'binary file'}: no preview here, download it to open it.`);
+  }
+
+  function downloadFile() {
+    const r = files.shown;
+    if (!r || r.big) return;
+    const url = URL.createObjectURL(new Blob([b64bytes(r.data)], { type: 'application/octet-stream' }));
+    const a = h('a', 'hidden');
+    a.href = url;
+    a.download = baseName(r.path);
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
 
   // Tools whose output is the agent's or a page's text, in markdown.
@@ -5736,8 +5985,8 @@
 
   // setView switches the dialog to the chat, the workflow runs ('wf';
   // unfolding and showing run, if given), a workflow agent ('sub', see
-  // openSub) or the images ('media'). Leaving 'sub' stops following that
-  // agent.
+  // openSub), the images ('media') or the files ('files'). Leaving 'sub'
+  // stops following that agent.
   function setView(view, run) {
     if (view === 'sub' && !wf.sub) view = 'wf';
     if (view !== 'sub' && wf.sub) {
@@ -5753,6 +6002,9 @@
       if (card) card.scrollIntoView({ block: 'start' });
     } else if (view === 'media') {
       renderMedia();
+    } else if (view === 'files') {
+      renderFiles();
+      loadFiles();
     } else if (view === 'chat') {
       // Hidden, the log kept growing but lost its scroll position.
       const sc = $('chat-scroll');
@@ -5769,6 +6021,7 @@
     $('wf-view').hidden = v !== 'wf';
     $('sub-view').hidden = v !== 'sub';
     $('media-view').hidden = v !== 'media';
+    $('files-view').hidden = v !== 'files';
     renderChatScreen();
     renderTabs();
   }
@@ -5842,6 +6095,21 @@
     $('chat-tab-chat').addEventListener('click', () => setView('chat'));
     $('chat-tab-wf').addEventListener('click', () => setView('wf'));
     $('chat-tab-media').addEventListener('click', () => setView('media'));
+    $('chat-tab-files').addEventListener('click', () => setView('files'));
+    $('files-q').addEventListener('input', () => filesSoon(250));
+    $('files-q').addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        loadFiles();
+      } else if (ev.key === 'Escape' && ev.target.value) {
+        ev.preventDefault(); // clear the search instead of closing the dialog
+        ev.target.value = '';
+        loadFiles();
+      }
+    });
+    $('files-reload').addEventListener('click', () => loadFiles());
+    $('file-back').addEventListener('click', closeFile);
+    $('file-download').addEventListener('click', downloadFile);
     $('chat-tabs').addEventListener('keydown', (ev) => {
       if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
       const tabs = [...$('chat-tabs').querySelectorAll('[role="tab"]')].filter((t) => !t.hidden);
@@ -5863,7 +6131,7 @@
       if (!chat.confirmStop && !touch()) ta.focus();
     });
     // Esc closes the archive confirmation, then steps back from a
-    // workflow agent, before it closes the dialog.
+    // workflow agent or a file, before it closes the dialog.
     dlg.addEventListener('cancel', (ev) => {
       if (chat.confirmStop && !chat.stopping) {
         ev.preventDefault();
@@ -5875,12 +6143,17 @@
       if (chat.view === 'sub') {
         ev.preventDefault();
         setView('wf');
+      } else if (chat.view === 'files' && files.open) {
+        ev.preventDefault();
+        closeFile();
       }
     });
     dlg.addEventListener('close', () => {
       chat.open = false;
       chat.seq++;
       clearTimeout(chat.screenTimer);
+      clearTimeout(files.timer);
+      revokeFileURL();
       stopFeed(chat.feed);
       stopFeed(wf.feed);
       wf.sub = null;
@@ -5902,6 +6175,9 @@
         chatAsks(r.asks);
         // The Media tab follows: in full at first, then with each image.
         if (r.reset || (r.entries || []).some((e) => e.images && e.images.length)) loadMedia();
+        // So do the Files tab and its count, a moment after files written.
+        if (r.reset) loadFiles();
+        else if ((r.entries || []).some((e) => e.files && e.files.length)) filesSoon(1500);
       },
       onStatus: renderChatStatus,
       onFile: renderChatScreen,
@@ -6168,12 +6444,14 @@
 
   function renderTabs() {
     const v = chat.view;
-    const tabs = { chat: v === 'chat', wf: v === 'wf' || v === 'sub', media: v === 'media' };
+    const tabs = { chat: v === 'chat', wf: v === 'wf' || v === 'sub', media: v === 'media', files: v === 'files' };
     const runs = !!(wf.runs.length || wf.hint) || tabs.wf;
     const images = !!media.items.length || tabs.media;
-    $('chat-tabs').hidden = !runs && !images;
+    const folder = (!files.missing && !!(files.dir || files.total)) || tabs.files;
+    $('chat-tabs').hidden = !runs && !images && !folder;
     $('chat-tab-wf').hidden = !runs;
     $('chat-tab-media').hidden = !images;
+    $('chat-tab-files').hidden = !folder;
     for (const [k, on] of Object.entries(tabs)) {
       const t = $('chat-tab-' + k);
       t.setAttribute('aria-selected', String(on));
@@ -6182,6 +6460,9 @@
     const mn = $('chat-tab-media-n');
     mn.textContent = String(media.items.length);
     mn.hidden = !media.items.length;
+    const fn = $('chat-tab-files-n');
+    fn.textContent = String(files.total);
+    fn.hidden = !files.total;
     const count = $('chat-tab-wf-n');
     count.replaceChildren(String(wf.runs.length));
     if (wf.runs.some((r) => r.status === 'running')) count.prepend(h('span', WF.running.dot));
@@ -6545,7 +6826,7 @@
   }
 
   // Swiping the session to the right on a touch screen does what Esc
-  // does: steps back from a workflow agent, or closes it. The swipe starts
+  // does: steps back from a workflow agent or a file, or closes it. The swipe starts
   // anywhere but in a text field or a box scrolled sideways, which the
   // finger scrolls back instead.
   function wireChatSwipe() {
@@ -6560,7 +6841,8 @@
       if (ev.touches.length !== 1 || !touch()) return;
       const t = ev.touches[0];
       if (ev.target.closest('input, textarea, select, [contenteditable]') || scrolledLeft(ev.target)) return;
-      g = { el: chat.view === 'sub' ? $('sub-view') : dlg, x0: t.clientX, y0: t.clientY, dx: 0, on: false, t: ev.timeStamp, v: 0 };
+      const el = chat.view === 'sub' ? $('sub-view') : chat.view === 'files' && files.open ? $('file-view') : dlg;
+      g = { el, x0: t.clientX, y0: t.clientY, dx: 0, on: false, t: ev.timeStamp, v: 0 };
     }, { passive: true });
     dlg.addEventListener('touchmove', (ev) => {
       if (!g) return;
@@ -6591,6 +6873,7 @@
         s.el.style.translate = '';
         if (!go) return;
         if (s.el === dlg) closeChat();
+        else if (s.el === $('file-view')) closeFile();
         else setView('wf');
       };
       if (matchMedia('(prefers-reduced-motion: reduce)').matches) return done();

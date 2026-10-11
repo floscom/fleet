@@ -491,10 +491,16 @@ func toolUse(id, name string, input json.RawMessage) transcript.Entry {
 	switch name {
 	case "Bash":
 		text = str("command")
-	case "Read", "Write", "Edit", "MultiEdit":
+	case "Read":
 		text = str("file_path")
-	case "NotebookEdit", "NotebookRead":
+	case "Write", "Edit", "MultiEdit":
+		text = str("file_path")
+		e.Files = nonEmpty(text)
+	case "NotebookRead":
 		text = str("notebook_path")
+	case "NotebookEdit":
+		text = str("notebook_path")
+		e.Files = nonEmpty(text)
 	case "Grep", "Glob":
 		text = str("pattern")
 		if p := str("path"); text != "" && p != "" {
@@ -574,6 +580,14 @@ func toolUse(id, name string, input json.RawMessage) transcript.Entry {
 		e.Detail = detail
 	}
 	return e
+}
+
+// nonEmpty is a list of s, or none if s is empty.
+func nonEmpty(s string) []string {
+	if s == "" {
+		return nil
+	}
+	return []string{s}
 }
 
 func plural(n int, what string) string {

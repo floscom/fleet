@@ -54,7 +54,7 @@ const (
 	peerTimeout     = 15 * time.Second
 	peerDialTimeout = 2 * time.Second
 	// maxPeerReply caps a reply relayed from another daemon.
-	maxPeerReply = 6 << 20 // an image of a transcript line is up to transcript.MaxLine
+	maxPeerReply = 24 << 20 // a file of a session is up to maxFile, in base64
 )
 
 // errNotJoined means the other daemon does not hold our fleet key.
@@ -209,7 +209,7 @@ func forwardable(method, rest string) bool {
 		case "session", "fs", "adapters", "usage", "roots", "agents", "workflows":
 			return true
 		}
-		return agentRoute(rest, "chat", "screen", "workflows", "image", "media") || workflowChatRoute(rest, "chat", "image")
+		return agentRoute(rest, "chat", "screen", "workflows", "image", "media", "files", "file") || workflowChatRoute(rest, "chat", "image")
 	case http.MethodPost:
 		return rest == "roots" || rest == "agents" || agentRoute(rest, "input", "answer", "model", "stop", "merge", "git")
 	case http.MethodPut, http.MethodDelete:

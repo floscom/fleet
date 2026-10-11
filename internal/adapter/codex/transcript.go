@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -361,9 +362,13 @@ func fileChanges(it item) transcript.Entry {
 		paths = append(paths, p)
 	}
 	sort.Strings(paths)
+	files := slices.Clone(paths)
 	var detail strings.Builder
 	for _, p := range paths {
 		ch := it.Changes[p]
+		if ch.MovePath != "" {
+			files = append(files, ch.MovePath)
+		}
 		switch ch.Type {
 		case "add":
 			fmt.Fprintf(&detail, "A %s\n", p)
@@ -389,6 +394,7 @@ func fileChanges(it item) transcript.Entry {
 		Text:   hookcmd.Truncate(strings.Join(paths, ", ")),
 		Detail: transcript.Clip(strings.TrimSuffix(detail.String(), "\n"), transcript.MaxDetail),
 		Error:  failed(it.Status),
+		Files:  files,
 	}
 	if e.Error {
 		// On success the output only repeats the file list.
@@ -462,6 +468,9 @@ func extension(it item) transcript.Entry {
 			Detail: transcript.Clip(it.RevisedPrompt, transcript.MaxDetail),
 			Output: it.SavedPath,
 			Error:  failed(it.Status) || !isNull(it.Failure),
+		}
+		if it.SavedPath != "" {
+			e.Files = []string{it.SavedPath}
 		}
 		if e.Detail == e.Text {
 			e.Detail = ""

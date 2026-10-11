@@ -11,6 +11,8 @@ package web
 //	POST /api/agents/{id}/input       attach images, type text and/or press keys (see apiInput)
 //	GET  /api/agents/{id}/image       an image of its conversation
 //	GET  /api/agents/{id}/media       all the images of its conversation (see media.go)
+//	GET  /api/agents/{id}/files       the files it wrote, or those of its folder (see files.go)
+//	GET  /api/agents/{id}/file        one of them, its content
 //	POST /api/agents/{id}/answer      answer the questions it asks
 //	POST /api/agents/{id}/model       switch its model and/or effort
 //	POST /api/agents/{id}/merge       merge a pull request it created
@@ -75,6 +77,10 @@ type Chat struct {
 	Image func(line []byte, n int) (mediaType string, data []byte, ok bool)
 	// Asks are the questions the agent waits on, for a form.
 	Asks []ask.Pending
+	// StartedAtMs is when the agent's session started, its worktree or
+	// clone in place (0 if unknown): files of its folder changed since are
+	// its work (see files.go).
+	StartedAtMs int64
 }
 
 // Model is the model and effort an agent's session runs at, and what it

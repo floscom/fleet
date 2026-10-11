@@ -514,6 +514,18 @@ on a root, which picks that folder) starts one:
   step through them. It lists them with `GET /api/agents/{id}/media` (the
   whole transcript, then what follows an offset) and asks again whenever the
   chat shows a new image. Claude Code only for now.
+- **Files.** The *Files* tab lists what the agent made, newest first: the
+  files its tool calls wrote (Claude's Write and Edit, Codex's patches and
+  generated images, wherever they are) and every file of its folder changed
+  since the session started, which also catches what its commands produced
+  (a build, a rendered image). The search box looks through the whole folder
+  (every word must be in the path; `.git`, `node_modules`, virtualenvs,
+  build caches and `target` are skipped). Click a file to see it: images,
+  video and sound play in the page, markdown is rendered, code is
+  highlighted with line numbers; *Download* saves any file up to 16 MB. The
+  daemon serves only files in the agent's folder (links that lead out of it
+  excepted) or written by it (`GET /api/agents/{id}/files?q=…`,
+  `GET /api/agents/{id}/file?path=…`).
 - **Questions.** When Claude asks you something with choices (its
   AskUserQuestion tool), the questions show as a form above the message box:
   pick one option, or several where it allows, type your own answer, add a

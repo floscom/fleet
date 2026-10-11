@@ -55,7 +55,7 @@ const (
 	clientBuffer = 256
 )
 
-const csp = "default-src 'self'; connect-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
+const csp = "default-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
 
 // Source is what the dashboard shows; the daemon implements it.
 type Source interface {
@@ -157,6 +157,8 @@ type Server struct {
 	peerHTTP *http.Client
 	// push sends notifications; nil when disabled.
 	push *pusher
+	// written remembers the files agents wrote (files.go).
+	written writtenCache
 }
 
 // CheckAddr returns an error unless addr is host:port.
