@@ -217,6 +217,33 @@
   </form>
 </dialog>
 
+<!-- A note on an agent, shown on its row and in its session. Opened from either. -->
+<dialog id="note" aria-labelledby="note-h" class="m-auto max-h-[calc(100dvh-1.5rem)] w-[min(460px,calc(100vw-1.5rem))] overflow-y-auto rounded-xl border border-ink-600 bg-ink-900 p-0 text-[14px] text-zinc-300 shadow-2xl shadow-black/60 backdrop:bg-black/70">
+  <form id="note-form" class="flex flex-col" novalidate>
+    <div class="flex items-start justify-between gap-3 border-b border-ink-700 px-4 py-3">
+      <div class="min-w-0">
+        <h2 id="note-h" class="truncate text-sm font-semibold text-zinc-100">Note on <span id="note-agent" class="font-mono">agent</span></h2>
+        <p class="mt-0.5 text-xs text-zinc-500">Shown on the agent's row and in its session, to everyone with this dashboard.</p>
+      </div>
+      <button id="note-close" type="button" aria-label="Close" class="touch:min-h-11 touch:min-w-11 -mr-1 rounded-md px-2 py-1 text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400">✕</button>
+    </div>
+
+    <div class="flex flex-col gap-1.5 px-4 py-3">
+      <textarea id="note-text" rows="3" maxlength="500" aria-label="Note" placeholder="e.g. customer is testing the preview, keep it open" class="w-full resize-y rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-yellow-300/50 focus:outline-none focus:ring-2 focus:ring-yellow-300/15"></textarea>
+      <div class="flex items-start justify-between gap-3 text-xs">
+        <div id="note-status" role="status" aria-live="polite" class="min-h-5 min-w-0 text-zinc-500"></div>
+        <span id="note-count" class="shrink-0 font-mono text-[11px] tabular-nums text-zinc-500"></span>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-2 border-t border-ink-700 px-4 py-3">
+      <button id="note-clear" type="button" class="touch:min-h-11 mr-auto rounded-md px-2 py-1.5 text-xs font-medium text-zinc-400 hover:bg-rose-500/10 hover:text-rose-200 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-400">Remove note</button>
+      <button id="note-cancel" type="button" class="touch:min-h-11 ml-auto rounded-md border border-ink-600 bg-ink-850 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Cancel</button>
+      <button id="note-save" type="submit" class="touch:min-h-11 rounded-md bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Save</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="picker" aria-labelledby="picker-h" class="m-auto max-h-[calc(100dvh-1.5rem)] w-[min(760px,calc(100vw-1.5rem))] overflow-y-auto rounded-xl sm:overflow-hidden border border-ink-600 bg-ink-900 p-0 text-[14px] text-zinc-300 shadow-2xl shadow-black/60 backdrop:bg-black/70">
   <form id="picker-form" class="flex flex-col sm:max-h-[min(88vh,780px)]" novalidate>
     <div class="flex items-start justify-between gap-3 border-b border-ink-700 px-4 py-3">
@@ -390,8 +417,10 @@
         <span id="chat-badges" class="flex flex-wrap items-center gap-1.5"></span>
       </div>
       <div id="chat-sub" class="mt-0.5 truncate font-mono text-xs text-zinc-500"></div>
+      <div id="chat-note" hidden class="mt-1.5"></div>
     </div>
     <div class="flex shrink-0 items-center gap-1.5 touch:gap-2">
+      <button id="chat-note-btn" type="button" hidden title="Leave a note on this agent" class="touch:min-h-11 touch:min-w-11 max-sm:hidden rounded-md border border-ink-600 bg-ink-850 px-2 py-1 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-yellow-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"><span aria-hidden="true">✎</span> Note</button>
       <button id="chat-screen-toggle" type="button" aria-pressed="false" class="touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-2 py-1 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 aria-pressed:border-sky-400/40 aria-pressed:bg-sky-400/10 aria-pressed:text-sky-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Screen</button>
       <span id="chat-stop-box" class="flex items-center"></span>
     </div>

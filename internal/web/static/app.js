@@ -317,6 +317,22 @@
     return c;
   }
 
+  // noteLine is the note left on agent a (machine host), up to two lines;
+  // for an admin a button that edits it.
+  function noteLine(host, a) {
+    const el = h(admin ? 'button' : 'div', 'inline-flex max-w-full min-w-0 items-center gap-1.5 rounded border border-yellow-300/20 bg-yellow-300/[0.06] px-2 py-1 text-left text-xs text-yellow-100/90' +
+      (admin ? ' touch:min-h-11 hover:border-yellow-300/40 hover:bg-yellow-300/10 focus-visible:outline-2 focus-visible:outline-yellow-300' : ''),
+    h('span', 'shrink-0 text-yellow-300/70', '✎'),
+    h('span', 'line-clamp-2 min-w-0 whitespace-pre-line break-words', a.note));
+    el.title = a.note;
+    if (admin) {
+      el.type = 'button';
+      el.setAttribute('aria-label', `Note on ${a.name || a.id}: ${a.note}. Edit it`);
+      el.addEventListener('click', () => openNote(host, a));
+    }
+    return el;
+  }
+
   // agentRow is the row of agent a, running on machine host ('' = here).
   function agentRow({ a, host, shortcut = 0 }) {
     const st = stateOf(a);
@@ -393,6 +409,7 @@
     }
     if (a.stateDetail && !done && !a.usageLimit) meta.append(h('span', 'truncate text-amber-200/70', a.stateDetail));
     body.append(meta);
+    if (a.note) body.append(h('div', 'mt-1.5', noteLine(host, a)));
 
     // line 3: its workflow runs going on, the latest first
     const runs = (admin && S.workflows.get(agentKey(host, a.id))) || [];
@@ -420,7 +437,16 @@
       open.type = 'button';
       open.setAttribute('aria-label', `Open the session of ${a.name || a.id}`);
       open.addEventListener('click', () => openChat(host, a.id, a));
-      side.append(open);
+      if (a.note) {
+        side.append(open);
+      } else {
+        const nb = h('button', 'touch:min-h-11 rounded-md px-2 py-0.5 text-xs text-zinc-500 hover:bg-ink-800 hover:text-yellow-200 focus-visible:outline-2 focus-visible:outline-emerald-400', '✎ note');
+        nb.type = 'button';
+        nb.title = 'Leave a note on this agent';
+        nb.setAttribute('aria-label', `Add a note to ${a.name || a.id}`);
+        nb.addEventListener('click', () => openNote(host, a));
+        side.append(h('div', 'flex items-center gap-1', nb, open));
+      }
     }
 
     li.append(body, side);
@@ -1542,6 +1568,98 @@
       $('unlock-key').value = '';
     });
     wireBackdrop(dlg, closeUnlock, () => !unlockBusy);
+  }
+
+  // ------------------------------------------------------------------- note
+  //
+  // A note left on an agent ("customer is testing, keep it open"), shown on
+  // its row and in its session. Edited in a small dialog, from the row or
+  // the session, for this machine's agents and those of other fleets.
+
+  const note = { host: '', id: '', busy: false };
+
+  function openNote(host, a) {
+    if (!admin) return;
+    Object.assign(note, { host, id: a.id, busy: false });
+    $('note-agent').textContent = a.name || a.id;
+    $('note-text').value = a.note || '';
+    $('note-clear').hidden = !a.note;
+    renderNote('');
+    $('note').showModal();
+    const ta = $('note-text');
+    if (!touch()) {
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    }
+  }
+
+  function closeNote() {
+    const d = $('note');
+    if (d.open) d.close();
+  }
+
+  function renderNote(error) {
+    const st = $('note-status');
+    st.className = error ? 'min-h-5 min-w-0 text-rose-300' : 'min-h-5 min-w-0 text-zinc-500';
+    st.textContent = error || (note.busy ? 'saving…' : '');
+    const n = $('note-text').value.length;
+    const count = $('note-count');
+    count.textContent = n > 400 ? `${n}/500` : '';
+    $('note-save').disabled = note.busy;
+    $('note-clear').disabled = note.busy;
+  }
+
+  // saveNote sets the note (text, '' removes it) and shows the agent as
+  // the daemon returns it.
+  async function saveNote(text) {
+    if (note.busy) return;
+    const { host, id } = note;
+    const base = host ? `/api/hosts/${encodeURIComponent(host)}/agents/` : '/api/agents/';
+    note.busy = true;
+    renderNote('');
+    let r;
+    try {
+      r = await api('POST', base + encodeURIComponent(id) + '/note', { note: text.trim() });
+    } catch (e) {
+      note.busy = false;
+      renderNote(e.message);
+      return;
+    }
+    note.busy = false;
+    if (r && r.agent) {
+      const rem = host && S.remote.get(host);
+      if (rem) rem.agents.set(id, r.agent);
+      else if (!host) S.agents.set(id, r.agent);
+      invalidate('agents');
+      chatAgent(host, r.agent);
+    }
+    closeNote();
+  }
+
+  function wireNote() {
+    const dlg = $('note');
+    const ta = $('note-text');
+    $('note-form').addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      saveNote(ta.value);
+    });
+    $('note-clear').addEventListener('click', () => saveNote(''));
+    $('note-close').addEventListener('click', closeNote);
+    $('note-cancel').addEventListener('click', closeNote);
+    $('chat-note-btn').addEventListener('click', () => {
+      if (chat.agent) openNote(chat.host, chat.agent);
+    });
+    ta.addEventListener('input', () => renderNote(''));
+    // Enter saves (Shift+Enter: a new line); on a touch keyboard Enter is
+    // a new line and Save saves. Ctrl/Cmd+Enter saves everywhere.
+    ta.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter' || ev.isComposing) return;
+      if (ev.ctrlKey || ev.metaKey || (!ev.shiftKey && !touch())) {
+        ev.preventDefault();
+        $('note-form').requestSubmit();
+      }
+    });
+    wireBackdrop(dlg, closeNote, () => !note.busy);
   }
 
   async function removeRoot(name) {
@@ -5009,6 +5127,9 @@
     sub.append(shortPath(a.path || a.cwd || ''));
     if (a.branch) sub.append(h('span', 'text-zinc-600', '  ⎇ '), h('span', 'text-violet-300/80', a.branch));
     sub.title = a.cwd || a.path || '';
+    $('chat-note').hidden = !a.note;
+    $('chat-note').replaceChildren(...(a.note ? [noteLine(chat.host, a)] : []));
+    $('chat-note-btn').hidden = !chat.agent || !!a.note;
 
     const det = $('chat-detail');
     if (askShown()) {
@@ -7090,6 +7211,7 @@
   wirePicker();
   wireLaunch();
   wireChat();
+  wireNote();
   wireRoots();
   wireKeys();
   wireTouch();

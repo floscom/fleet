@@ -113,6 +113,8 @@ type Source interface {
 	// SetAutoResume switches resuming a live agent after a usage limit
 	// (auto non-nil) and/or resumes it now, and returns it.
 	SetAutoResume(ctx context.Context, agent string, auto *bool, now bool) (*fleetv1.Agent, error)
+	// SetNote sets or ("") clears the note on an agent and returns it.
+	SetNote(agent, note string) (*fleetv1.Agent, error)
 	// MergePull merges a pull request an agent created and returns it
 	// after (fleetv1.MergePullRequestRequest).
 	MergePull(ctx context.Context, req *fleetv1.MergePullRequestRequest) (*fleetv1.PullRequest, error)
@@ -391,6 +393,8 @@ type Agent struct {
 	PullRequests []PullRequest `json:"pullRequests"`
 	// Git is the git state of its checkout; nil outside a repository.
 	Git *GitStatus `json:"git,omitempty"`
+	// Note is what the user noted on it, "" if nothing.
+	Note string `json:"note"`
 }
 
 // GitStatus is the git state of an agent's checkout (fleetv1.GitStatus).
@@ -497,6 +501,7 @@ func agentOf(a *fleetv1.Agent) Agent {
 		Worktree:        a.Worktree,
 		PullRequests:    make([]PullRequest, 0, len(a.PullRequests)),
 		Git:             gitOf(a.Git),
+		Note:            a.Note,
 	}
 	for _, p := range a.PullRequests {
 		out.PullRequests = append(out.PullRequests, pullOf(p))

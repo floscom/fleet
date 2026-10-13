@@ -86,6 +86,8 @@ type agentRec struct {
 	PRScan       *prScan                `json:"pr_scan,omitempty"`
 	// Git is the git state of its checkout as last read (git.go).
 	Git *fleetv1.GitStatus `json:"git,omitempty"`
+	// Note is what the user noted on the agent (note.go).
+	Note string `json:"note,omitempty"`
 
 	// limit is the usage limit that stopped the agent (limits.go).
 	limit *fleetv1.UsageLimit
@@ -137,6 +139,7 @@ func (a *agentRec) proto() *fleetv1.Agent {
 		Worktree:        wt,
 		PullRequests:    clonePulls(a.PullRequests),
 		Git:             cloneGit(a.Git),
+		Note:            a.Note,
 	}
 }
 

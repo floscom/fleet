@@ -157,6 +157,12 @@ func (c *conn) dispatch(id uint64, m *fleetv1.ClientMessage) error {
 			return err
 		}
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_Git{Git: r}})
+	case *fleetv1.ClientMessage_SetNote:
+		a, err := d.agents.setNote(msg.SetNote.GetAgent(), msg.SetNote.GetNote())
+		if err != nil {
+			return err
+		}
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_SetNote{SetNote: &fleetv1.SetNoteResponse{Agent: a}}})
 	case *fleetv1.ClientMessage_Subscribe:
 		return c.handleSubscribe(id)
 

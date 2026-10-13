@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -41,9 +42,19 @@ func newLsCmd() *cobra.Command {
 					fmt.Fprintln(out, "no agents (start one with: fleet run <adapter> [path])")
 					return nil
 				}
-				t := newTable(out, "ID", "NAME", "ADAPTER", "STATE", "PATH", "AGE")
+				// NOTE only when an agent has one.
+				notes := slices.ContainsFunc(agents, func(a *fleetv1.Agent) bool { return a.Note != "" })
+				head := []string{"ID", "NAME", "ADAPTER", "STATE", "PATH", "AGE"}
+				if notes {
+					head = append(head, "NOTE")
+				}
+				t := newTable(out, head...)
 				for _, a := range agents {
-					t.row(a.Id, a.Name, a.Adapter, agentState(a), agentPath(a), age(a.CreatedAtMs))
+					cols := []string{a.Id, a.Name, a.Adapter, agentState(a), agentPath(a), age(a.CreatedAtMs)}
+					if notes {
+						cols = append(cols, orDash(truncate(oneLine(a.Note), 50)))
+					}
+					t.row(cols...)
 				}
 				t.flush()
 				return nil

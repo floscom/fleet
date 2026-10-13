@@ -15,6 +15,7 @@ package web
 //	GET  /api/agents/{id}/file        one of them, its content
 //	POST /api/agents/{id}/answer      answer the questions it asks
 //	POST /api/agents/{id}/model       switch its model and/or effort
+//	POST /api/agents/{id}/note        set or clear the note on it
 //	POST /api/agents/{id}/merge       merge a pull request it created
 //	POST /api/agents/{id}/git         read, fetch, pull or push its checkout
 //	POST /api/agents/{id}/stop        kill it; forget drops it from the list too
@@ -292,6 +293,26 @@ func (s *Server) apiResume(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), modelTimeout)
 	defer cancel()
 	a, err := s.opts.Source.SetAutoResume(ctx, r.PathValue("id"), req.Auto, req.Now)
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]Agent{"agent": agentOf(a)})
+}
+
+// apiNote sets the note on an agent ({"note": text}; "" clears it).
+func (s *Server) apiNote(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Note *string `json:"note"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Note == nil {
+		writeError(w, http.StatusBadRequest, "note is required")
+		return
+	}
+	a, err := s.opts.Source.SetNote(r.PathValue("id"), *req.Note)
 	if err != nil {
 		s.writeSourceError(w, err)
 		return

@@ -916,6 +916,16 @@ effort the adapter does not offer);
   conflicts, a rejected push, or git's own message); `NOT_FOUND`;
   `ADAPTER_UNAVAILABLE` (no `git` on the daemon host).
 
+**`SetNoteRequest{agent, note}` → `SetNoteResponse{agent}`**
+
+- `Agent.note` is a note the user left on the agent ("customer is
+  testing, keep it open"), for clients to show with it. This request sets
+  it on a live or finished agent; an empty `note` clears it. The daemon
+  trims it and keeps it with the agent across restarts. A change comes as
+  an `agent_upserted` event; `updated_at_ms` stays as it was.
+- Errors: `INVALID_ARGUMENT` (empty `agent`, more than 500 characters,
+  not UTF-8); `NOT_FOUND`.
+
 **`SubscribeRequest` → `SubscribeResponse`**, then pushed events. See
 section 12.
 

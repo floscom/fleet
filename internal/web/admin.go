@@ -263,6 +263,7 @@ func (s *Server) apiHandler() http.Handler {
 	admin.HandleFunc("POST /api/agents/{id}/answer", s.apiAnswer)
 	admin.HandleFunc("POST /api/agents/{id}/model", s.apiSwitchModel)
 	admin.HandleFunc("POST /api/agents/{id}/resume", s.apiResume)
+	admin.HandleFunc("POST /api/agents/{id}/note", s.apiNote)
 	admin.HandleFunc("POST /api/agents/{id}/merge", s.apiMerge)
 	admin.HandleFunc("POST /api/agents/{id}/git", s.apiGit)
 	admin.HandleFunc("POST /api/agents/{id}/stop", s.apiStopAgent)

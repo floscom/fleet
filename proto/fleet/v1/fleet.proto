@@ -63,6 +63,7 @@ message ClientMessage {
     AttachImageRequest attach_image = 36;
     MergePullRequestRequest merge_pull_request = 37;
     GitRequest git = 38;
+    SetNoteRequest set_note = 39;
 
     // Terminal streaming
     AttachRequest attach = 40;
@@ -111,6 +112,7 @@ message ServerMessage {
     AttachImageResponse attach_image = 36;
     MergePullRequestResponse merge_pull_request = 37;
     GitResponse git = 38;
+    SetNoteResponse set_note = 39;
 
     AttachResponse attach = 40;
     // Pushed while attached (id 0).
@@ -495,6 +497,9 @@ message Agent {
   // directory), as last read; unset if it is not in a git repository or
   // was never read. See GitRequest.
   GitStatus git = 23;
+  // A note the user left on the agent ("customer is testing, keep it
+  // open"); empty if none. See SetNoteRequest.
+  string note = 24;
 }
 
 // GitStatus is the git state of an agent's checkout. The daemon reads it
@@ -729,6 +734,18 @@ message MergePullRequestRequest {
 message MergePullRequestResponse {
   // The pull request after merging, looked up again.
   PullRequest pull_request = 1;
+}
+
+// Sets or clears the note on an agent (Agent.note), live or finished. It
+// is trimmed and at most 500 characters; an empty note clears it. The
+// note does not change Agent.updated_at_ms.
+message SetNoteRequest {
+  // Agent id or name.
+  string agent = 1;
+  string note = 2;
+}
+message SetNoteResponse {
+  Agent agent = 1;
 }
 
 // Reads, fetches, pulls or pushes an agent's checkout with git on the

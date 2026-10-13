@@ -84,6 +84,13 @@ func (c *Client) KillAgent(ctx context.Context, in *fleetv1.KillAgentRequest) (*
 		(*fleetv1.ServerMessage).GetKillAgent)
 }
 
+// SetNote sets or ("") clears the note on an agent and returns the agent.
+func (c *Client) SetNote(ctx context.Context, agent, note string) (*fleetv1.Agent, error) {
+	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_SetNote{SetNote: &fleetv1.SetNoteRequest{Agent: agent, Note: note}}},
+		(*fleetv1.ServerMessage).GetSetNote)
+	return r.GetAgent(), err
+}
+
 // SendText types text into an agent's terminal, pressing Enter if submit.
 func (c *Client) SendText(ctx context.Context, agent, text string, submit bool) error {
 	_, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_SendText{SendText: &fleetv1.SendTextRequest{Agent: agent, Text: text, Submit: submit}}},

@@ -116,6 +116,7 @@ address. Without it, commands talk to the local daemon.
 | `fleet attach <agent> [-r]` | Attach to an agent's terminal. Detach with Ctrl-\\. |
 | `fleet send <agent> [text...] [--image FILE]... [--no-enter]` | Type text into an agent's terminal and press Enter; `--image` attaches image files first. |
 | `fleet kill <agent>... [--rm-worktree] [--force] [--forget]` | Stop agents; optionally remove their worktree or clone and history entry. |
+| `fleet note <agent> [text...] [-d]` | Leave a note on an agent (e.g. why it must stay open), shown on its dashboard row and in `fleet ls`; without text prints it, `-d` removes it. |
 | `fleet sandbox build [--pull] [--tag T]` / `sandbox dockerfile` | Build the Docker image sandboxed agents run in (on the server) / print its Dockerfile. |
 | `fleet watch` | Print agent state changes as they happen. |
 | `fleet prs [agent] [-a] [--json]` | List the GitHub pull requests agents created, open ones unless `-a`. |
@@ -581,6 +582,12 @@ on a root, which picks that folder) starts one:
   requests fold into one line (branch, ↑ ↓, uncommitted, a pill per pull
   request) that unfolds to the buttons; it starts folded on phones, and
   stays as you last left it. Merged and closed pull requests take a line.
+- **Notes.** *✎ note* on an agent's row (or *Note* in its session) leaves
+  a note on it, e.g. "customer is testing the preview, keep it open". It
+  shows under the row and in the session's header, where a click edits or
+  removes it; Enter saves, Shift+Enter starts a new line. Notes stay with
+  the agent in History and across daemon restarts. Same from the CLI:
+  `fleet note <agent> [text]`.
 - **Stop** asks in a bar under the header, away from Stop itself, so a
   double tap cannot stop a session; *Stop session* there kills it like
   `fleet kill` (the worktree is kept). On a phone the session fills the
