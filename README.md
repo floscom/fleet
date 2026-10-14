@@ -524,6 +524,14 @@ on a root, which picks that folder) starts one:
   step through them. It lists them with `GET /api/agents/{id}/media` (the
   whole transcript, then what follows an offset) and asks again whenever the
   chat shows a new image. Claude Code only for now.
+- **Videos.** Attach, paste or drop videos into a message or a new
+  session's prompt (any agent CLI, up to five, 4 GB each). Too big to go
+  with the message, each is uploaded to the agent's machine as soon as it
+  is picked, with its progress on its tile (`POST /api/uploads?name=…`,
+  the file as the body, streamed through to another fleet's machine), and
+  the message gets a line `Video: <path>` for the agent to open with its
+  own tools (ffmpeg, say). Uploads live in `<[sandbox] dir>/uploads`,
+  mounted read-only into sandboxes, and are removed after 30 days.
 - **Files.** The *Files* tab lists what the agent made, newest first: the
   files its tool calls wrote (Claude's Write and Edit, Codex's patches and
   generated images, wherever they are) and every file of its folder changed

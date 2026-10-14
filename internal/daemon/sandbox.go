@@ -155,6 +155,7 @@ type dockerLaunch struct {
 	cwd      string // the agent's working directory
 	checkout string // worktree or clone the daemon created; "" when pinned
 	stateDir string
+	uploads  string // files uploaded for prompts (uploadsDir)
 	home     string // mounted at sandboxHome
 	fleetBin string // copy of the fleet binary for hooks
 	spec     *adapter.LaunchSpec
@@ -222,8 +223,8 @@ func (m *manager) dockerArgv(ctx context.Context, l dockerLaunch, cfg config.Con
 //     checkout (worktrees), read-write so the agent can commit;
 //   - the git config and hooks directory, and a worktree's .git file,
 //     read-only: git on the host executes what they name;
-//   - the agent's state dir (generated settings and the hook socket) and
-//     the fleet binary, read-only;
+//   - the agent's state dir (generated settings and the hook socket), the
+//     files uploaded for prompts and the fleet binary, read-only;
 //   - the sandbox home at sandboxHome.
 func sandboxMounts(ctx context.Context, l dockerLaunch) ([]sandbox.Mount, error) {
 	work := l.checkout
@@ -233,12 +234,15 @@ func sandboxMounts(ctx context.Context, l dockerLaunch) ([]sandbox.Mount, error)
 			work = top
 		}
 	}
-	if err := os.MkdirAll(l.home, 0o700); err != nil {
-		return nil, err
+	for _, dir := range []string{l.home, l.uploads} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
 	}
 	mounts := []sandbox.Mount{
 		{Source: work, Target: work},
 		ro(l.stateDir),
+		ro(l.uploads),
 		{Source: l.home, Target: sandboxHome},
 		ro(l.fleetBin),
 	}
@@ -263,6 +267,12 @@ func sandboxMounts(ctx context.Context, l dockerLaunch) ([]sandbox.Mount, error)
 		return nil, err
 	}
 	return append(mounts, ro(hooks)), nil
+}
+
+// uploadsDir is where files uploaded for prompts go (web.Source.UploadDir):
+// in the sandbox dir, so that sandboxed agents can be given them too.
+func uploadsDir(cfg config.Config) string {
+	return filepath.Join(cfg.Sandbox.DirOrDefault(), "uploads")
 }
 
 func ro(p string) sandbox.Mount { return sandbox.Mount{Source: p, Target: p, ReadOnly: true} }

@@ -254,6 +254,7 @@ func (s *Server) apiHandler() http.Handler {
 	admin.HandleFunc("POST /api/roots", s.apiAddRoot)
 	admin.HandleFunc("PUT /api/roots/{name}", s.apiUpdateRoot)
 	admin.HandleFunc("DELETE /api/roots/{name}", s.apiRemoveRoot)
+	admin.HandleFunc("POST /api/uploads", s.apiUpload)
 	admin.HandleFunc("GET /api/agents", s.apiAgents)
 	admin.HandleFunc("POST /api/agents", s.apiRunAgent)
 	admin.HandleFunc("GET /api/agents/{id}/chat", s.apiChat)

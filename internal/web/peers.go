@@ -36,6 +36,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -89,8 +90,13 @@ func SetToken(path, key string) error {
 // peerMAC is the signature of one request to daemon targetID.
 func peerMAC(key, targetID, nonce, method, uri string, body []byte) []byte {
 	sum := sha256.Sum256(body)
+	return peerMACSum(key, targetID, nonce, method, uri, sum[:])
+}
+
+// peerMACSum is peerMAC of a body with SHA-256 sum.
+func peerMACSum(key, targetID, nonce, method, uri string, sum []byte) []byte {
 	m := hmac.New(sha256.New, []byte(key))
-	fmt.Fprintf(m, "%s\n%s\n%s\n%s\n%s\n%s", peerMACLabel, targetID, nonce, method, uri, hex.EncodeToString(sum[:]))
+	fmt.Fprintf(m, "%s\n%s\n%s\n%s\n%s\n%s", peerMACLabel, targetID, nonce, method, uri, hex.EncodeToString(sum))
 	return m.Sum(nil)
 }
 
@@ -159,8 +165,9 @@ func isPeerRequest(r *http.Request) bool {
 }
 
 // peerAuthed reports whether r is correctly signed with the fleet key for
-// this daemon. r's body must be buffered (it is read and replaced). The
-// nonce is spent either way: one guess per nonce.
+// this daemon. r's body is buffered (read and replaced), except an
+// upload's: that is checked against bodyHashHeader as it is read (see
+// checkedBody). The nonce is spent either way: one guess per nonce.
 func (s *Server) peerAuthed(r *http.Request) bool {
 	v, _ := strings.CutPrefix(r.Header.Get("Authorization"), peerScheme)
 	nonce, macHex, ok := strings.Cut(v, ".")
@@ -175,12 +182,23 @@ func (s *Server) peerAuthed(r *http.Request) bool {
 	if err != nil {
 		return false
 	}
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		return false
+	var sum []byte
+	if uploadPath(r.URL.Path) {
+		sum, err = hex.DecodeString(r.Header.Get(bodyHashHeader))
+		if err != nil || len(sum) != sha256.Size {
+			return false
+		}
+		r.Body = newCheckedBody(r.Body, sum)
+	} else {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			return false
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		h := sha256.Sum256(body)
+		sum = h[:]
 	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	return hmac.Equal(mac, peerMAC(key, s.opts.Source.Info().ID, nonce, r.Method, r.RequestURI, body))
+	return hmac.Equal(mac, peerMACSum(key, s.opts.Source.Info().ID, nonce, r.Method, r.RequestURI, sum))
 }
 
 // apiJoin tells an admin browser the command that joins another machine to
@@ -212,7 +230,7 @@ func forwardable(method, rest string) bool {
 		}
 		return agentRoute(rest, "chat", "screen", "workflows", "image", "media", "files", "file") || workflowChatRoute(rest, "chat", "image")
 	case http.MethodPost:
-		return rest == "roots" || rest == "agents" || agentRoute(rest, "input", "answer", "model", "note", "stop", "merge", "git")
+		return rest == "roots" || rest == "agents" || rest == "uploads" || agentRoute(rest, "input", "answer", "model", "note", "stop", "merge", "git")
 	case http.MethodPut, http.MethodDelete:
 		return oneSegment(strings.CutPrefix(rest, "roots/"))
 	}
@@ -262,6 +280,9 @@ func forwardTimeout(method, rest string) time.Duration {
 	if method == http.MethodPost && agentRoute(rest, "git") {
 		return gitTimeout
 	}
+	if method == http.MethodPost && rest == "uploads" {
+		return uploadTimeout
+	}
 	return peerTimeout
 }
 
@@ -291,10 +312,29 @@ func (s *Server) apiHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, name+" has no dashboard on the network (web is off or loopback-only there)")
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, bodyLimit(r.URL.Path)))
-	if err != nil {
-		writeError(w, http.StatusRequestEntityTooLarge, "request too large")
-		return
+	var out outBody
+	if r.Method == http.MethodPost && rest == "uploads" {
+		// Spooled: an upload may be far bigger than memory should hold.
+		f, n, sum, err := spool(w, r, s.opts.Source.UploadDir(), maxUpload)
+		if err != nil {
+			var tooBig *http.MaxBytesError
+			if errors.As(err, &tooBig) {
+				writeError(w, http.StatusRequestEntityTooLarge, "file too large (at most "+strconv.Itoa(maxUpload>>30)+" GiB)")
+			} else {
+				writeError(w, http.StatusBadRequest, "upload failed: "+err.Error())
+			}
+			return
+		}
+		defer os.Remove(f.Name())
+		defer f.Close()
+		out = outBody{r: f, size: n, sum: sum, stream: true}
+	} else {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, bodyLimit(r.URL.Path)))
+		if err != nil {
+			writeError(w, http.StatusRequestEntityTooLarge, "request too large")
+			return
+		}
+		out = bufferedBody(body)
 	}
 	key, err := LoadOrCreateToken(s.opts.KeyPath)
 	if err != nil {
@@ -311,7 +351,7 @@ func (s *Server) apiHost(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), forwardTimeout(r.Method, rest))
 	defer cancel()
-	status, reply, err := s.forward(ctx, p, key, r.Method, uri, body)
+	status, reply, err := s.forwardBody(ctx, p, key, r.Method, uri, out)
 	switch {
 	case errors.Is(err, errNotJoined) || status == http.StatusUnauthorized:
 		writeJSON(w, http.StatusForbidden, map[string]any{
@@ -328,9 +368,29 @@ func (s *Server) apiHost(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// outBody is the body of a request to another daemon.
+type outBody struct {
+	r    io.Reader
+	size int64
+	sum  []byte // SHA-256 of the body
+	// stream sends sum ahead in bodyHashHeader (an upload, which the
+	// target does not buffer) and lifts peerHTTP's overall time limit.
+	stream bool
+}
+
+func bufferedBody(body []byte) outBody {
+	sum := sha256.Sum256(body)
+	return outBody{r: bytes.NewReader(body), size: int64(len(body)), sum: sum[:]}
+}
+
 // forward sends a signed request to peer p, trying its addresses in order
 // until one hands out a nonce. It returns the reply's status and body.
 func (s *Server) forward(ctx context.Context, p Peer, key, method, uri string, body []byte) (int, []byte, error) {
+	return s.forwardBody(ctx, p, key, method, uri, bufferedBody(body))
+}
+
+// forwardBody is forward with a body that may be streamed.
+func (s *Server) forwardBody(ctx context.Context, p Peer, key, method, uri string, body outBody) (int, []byte, error) {
 	var lastErr error
 	for _, a := range p.Addrs {
 		base := "http://" + net.JoinHostPort(a, strconv.Itoa(p.WebPort))
@@ -342,17 +402,28 @@ func (s *Server) forward(ctx context.Context, p Peer, key, method, uri string, b
 			lastErr = err
 			continue // address not reachable from here: try the next one
 		}
-		req, err := http.NewRequestWithContext(ctx, method, base+uri, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, method, base+uri, body.r)
 		if err != nil {
 			return 0, nil, err
 		}
-		mac := peerMAC(key, p.ID, nonce, method, req.URL.RequestURI(), body)
+		req.ContentLength = body.size
+		if body.size == 0 {
+			req.Body = http.NoBody
+		}
+		mac := peerMACSum(key, p.ID, nonce, method, req.URL.RequestURI(), body.sum)
 		req.Header.Set("Authorization", peerScheme+nonce+"."+hex.EncodeToString(mac))
-		if len(body) > 0 {
+		client := s.peerHTTP
+		switch {
+		case body.stream:
+			req.Header.Set(bodyHashHeader, hex.EncodeToString(body.sum))
+			req.Header.Set("Content-Type", "application/octet-stream")
+			// Bound by ctx alone: big files take long.
+			client = &http.Client{Transport: s.peerHTTP.Transport, CheckRedirect: s.peerHTTP.CheckRedirect}
+		case body.size > 0:
 			req.Header.Set("Content-Type", "application/json")
 		}
 		// Not retried on another address: the request may have been applied.
-		resp, err := s.peerHTTP.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			return 0, nil, err
 		}

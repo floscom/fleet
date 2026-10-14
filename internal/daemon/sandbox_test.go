@@ -109,6 +109,7 @@ func TestDockerSandbox(t *testing.T) {
 	wantMounts := []string{
 		"type=bind,source=" + dir + ",target=" + dir,
 		"type=bind,source=" + state + ",target=" + state + ",readonly",
+		"type=bind,source=" + filepath.Join(sb, "uploads") + ",target=" + filepath.Join(sb, "uploads") + ",readonly",
 		"type=bind,source=" + filepath.Join(sb, "home") + ",target=" + sandboxHome,
 		"type=bind,source=" + fleetCopy + ",target=" + fleetCopy + ",readonly",
 	}

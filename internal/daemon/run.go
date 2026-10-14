@@ -335,7 +335,7 @@ func (m *manager) launch(ctx context.Context, ad adapter.Adapter, a agentRec, re
 			}
 		}()
 		argv, err = m.dockerArgv(ctx, dockerLaunch{
-			a: a, cwd: res.cwd, checkout: res.worktree, stateDir: stateDir, home: home, fleetBin: fleetBin,
+			a: a, cwd: res.cwd, checkout: res.worktree, stateDir: stateDir, uploads: uploadsDir(cfg), home: home, fleetBin: fleetBin,
 			spec: spec, env: env,
 		}, cfg)
 		if err != nil {

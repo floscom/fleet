@@ -27,12 +27,14 @@ import (
 // fakeSource feeds the hub from a channel the test writes to.
 type fakeSource struct {
 	// id is the server id, default "self-id".
-	id      string
-	events  chan *fleetv1.Event
-	mu      sync.Mutex
-	devs    []Device
-	added   []*fleetv1.AddRootRequest
-	updated []fakeRootUpdate
+	id string
+	// uploadDir is UploadDir, "" by default (no uploads).
+	uploadDir string
+	events    chan *fleetv1.Event
+	mu        sync.Mutex
+	devs      []Device
+	added     []*fleetv1.AddRootRequest
+	updated   []fakeRootUpdate
 	// These errors are returned by their corresponding root operations.
 	addErr, updateErr, removeErr error
 	removed                      []string
@@ -141,6 +143,8 @@ func (s *fakeSource) HostStats(context.Context) *fleetv1.HostStats {
 	return &fleetv1.HostStats{Hostname: "studio", Cpus: 8, Load1: 1.5, MemoryTotal: 100, MemoryAvailable: 40,
 		Disks: []*fleetv1.DiskStats{{Mount: "/", Total: 10, Used: 9, Available: 1}}}
 }
+
+func (s *fakeSource) UploadDir() string { return s.uploadDir }
 
 func (s *fakeSource) Agents() []*fleetv1.Agent {
 	s.mu.Lock()

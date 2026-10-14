@@ -2534,6 +2534,7 @@
     modelSig: '', // what the model pickers show (see renderLaunchModel)
     then: '', // what to show once started, if a shortcut says so
     images: [], // {data, url, name} to send with the prompt (see readImages)
+    videos: [], // uploaded to the machine for the prompt (see addVideos)
     seq: 0, // bumped on each opening: images read for an earlier one are dropped
   };
 
@@ -2558,7 +2559,8 @@
     if (launch.host && !pickerHosts().some((x) => x.id === launch.host)) launch.host = '';
     launch.seq++;
     launch.images = [];
-    renderThumbs($('launch-images'), launch.images);
+    launch.videos = dropVideos(launch.videos);
+    renderLaunchThumbs();
     $('launch-prompt').value = '';
     $('launch-search').value = '';
     // Key hints only where there are keys.
@@ -2726,6 +2728,11 @@
 
   function selectLaunchHost(id) {
     if (launch.host === id) return;
+    if (launch.videos.length) {
+      toast('the videos went to the other machine: attach them again', 'warn');
+      launch.videos = dropVideos(launch.videos);
+      renderLaunchThumbs();
+    }
     launch.host = id;
     launch.root = '';
     launch.sub = '';
@@ -2833,21 +2840,40 @@
     return !!(ad && ad.images);
   }
 
-  // launchImagesProblem says why the images cannot go with the session.
+  // launchImagesProblem says why the images or videos cannot go with the
+  // session.
   function launchImagesProblem() {
+    const vp = videosProblem(launch.videos);
+    if (vp) return vp;
     if (!launch.images.length) return '';
     if (!launchImages()) return `${launch.adapter || 'this agent'} takes no images at start: remove them, or choose another agent.`;
-    if (!$('launch-prompt').value.trim()) return 'Images go with a prompt: write one.';
+    if (!$('launch-prompt').value.trim() && !launch.videos.length) return 'Images go with a prompt: write one.';
     return '';
   }
 
-  async function addLaunchImages(files) {
-    if (!launch.open || launch.busy || !launchImages()) return;
+  // addLaunchFiles adds the images and videos among files to the prompt.
+  async function addLaunchFiles(files) {
+    if (!launch.open || launch.busy) return;
     const seq = launch.seq;
-    if (await readImages(files, launch.images, () => launch.open && seq === launch.seq)) {
-      renderThumbs($('launch-images'), launch.images);
+    const alive = () => launch.open && seq === launch.seq;
+    addVideos(files, launch.videos, launchAPI('uploads'), () => {
+      if (!alive()) return;
+      renderLaunchThumbs();
+      renderLaunch();
+    });
+    if (![...files].some(isImage)) return;
+    if (!launchImages()) {
+      toast(`${launch.adapter || 'this agent'} takes no images at start`, 'warn');
+      return;
+    }
+    if (await readImages(files, launch.images, alive)) {
+      renderLaunchThumbs();
       renderLaunch();
     }
+  }
+
+  function renderLaunchThumbs() {
+    renderThumbs($('launch-images'), launch.images, launch.videos);
   }
 
   // Last successfully used provider, per machine and root folder. Session
@@ -2937,10 +2963,10 @@
     renderLaunchCrumbs();
     renderLaunchList(notJoined);
 
-    $('launch-attach').disabled = !launchImages() || launch.busy;
+    $('launch-attach').disabled = launch.busy;
     $('launch-attach').title = launchImages() || !launch.adapter
-      ? 'Attach images to the prompt (or paste / drop them)'
-      : `${launch.adapter} takes no images at start`;
+      ? 'Attach images or videos to the prompt (or paste / drop them)'
+      : `Attach videos to the prompt (${launch.adapter} takes no images at start)`;
     const problem = launchImagesProblem();
 
     const st = $('launch-status');
@@ -2959,8 +2985,10 @@
       const p = launchPick();
       const runs = p && [p.model && p.model.label, p.effort && p.effort.label + ' effort'].filter(Boolean).join(' · ');
       const n = launch.images.length;
+      const nv = launch.videos.length;
+      const with_ = [n && `${n} image${n > 1 ? 's' : ''}`, nv && `${nv} video${nv > 1 ? 's' : ''}`].filter(Boolean).join(' and ');
       st.replaceChildren(h('span', '', 'starts ', h('span', 'font-mono text-zinc-200', launch.adapter || '…'),
-        runs ? h('span', 'text-zinc-400', ` (${runs})`) : null, n ? ` with ${n} image${n > 1 ? 's' : ''}` : '', ' in ',
+        runs ? h('span', 'text-zinc-400', ` (${runs})`) : null, with_ ? ` with ${with_}` : '', ' in ',
         h('span', 'font-mono text-zinc-200', ...pathBreaks(shortPath(inRoot(root, launch.sub))))));
     } else {
       st.className = 'min-h-5 min-w-0 basis-full text-xs text-zinc-500 sm:basis-0 sm:flex-1';
@@ -3187,7 +3215,7 @@
         adapter,
         root: root.name,
         path: launch.sub,
-        prompt: $('launch-prompt').value,
+        prompt: withVideos($('launch-prompt').value, launch.videos),
         name: $('launch-name').value.trim(),
         branch: $('launch-branch').value.trim(),
         isolation: checkedValue('launch-iso'),
@@ -3299,21 +3327,22 @@
       }
     });
     prompt.addEventListener('paste', (ev) => {
-      const files = imageFiles(ev.clipboardData);
-      if (!files.length || !launchImages()) return;
+      const files = mediaFiles(ev.clipboardData);
+      if (!files.length) return;
       ev.preventDefault();
-      addLaunchImages(files);
+      addLaunchFiles(files);
     });
     $('launch-attach').addEventListener('click', () => $('launch-file').click());
     $('launch-file').addEventListener('change', (ev) => {
-      addLaunchImages(ev.target.files);
+      addLaunchFiles(ev.target.files);
       ev.target.value = '';
     });
     $('launch-images').addEventListener('click', (ev) => {
-      const b = ev.target.closest('button[data-image]');
+      const b = ev.target.closest('button[data-image], button[data-video]');
       if (!b || launch.busy) return;
-      launch.images.splice(Number(b.dataset.image), 1);
-      renderThumbs($('launch-images'), launch.images);
+      if (b.dataset.video) dropVideos(launch.videos.splice(Number(b.dataset.video), 1));
+      else launch.images.splice(Number(b.dataset.image), 1);
+      renderLaunchThumbs();
       renderLaunch();
       if (!touch()) prompt.focus();
     });
@@ -3324,12 +3353,12 @@
     dlg.addEventListener('drop', (ev) => {
       if (!ev.dataTransfer || !ev.dataTransfer.files.length) return;
       ev.preventDefault();
-      if (launchImages()) addLaunchImages(ev.dataTransfer.files);
-      else if (imageFiles(ev.dataTransfer).length) toast(`${launch.adapter || 'this agent'} takes no images at start`, 'warn');
+      addLaunchFiles(ev.dataTransfer.files);
     });
     dlg.addEventListener('close', () => {
       launch.open = false;
       launch.images = [];
+      launch.videos = dropVideos(launch.videos);
       launch.gen++;
       launch.listSig = '';
       launch.listView = '';
@@ -3368,6 +3397,7 @@
     answered: new Set(), // ids of questions answered here: late replies may still list them
     askForm: null, // the form of asks[0]
     images: [], // {data (base64), url (data: URL), name} to send with the next message
+    videos: [], // uploaded to the agent's machine for the next message (see addVideos)
     prUI: new Map(), // pull request URL -> {method, deleteBranch, armed (ms), busy}
     gitUI: {}, // {busy: the git action in flight, armed: when force push was clicked once, note: {text, error} of the last one}
   };
@@ -3401,11 +3431,12 @@
     if (!admin) return;
     closeLaunch();
     chat.seq++;
+    dropVideos(chat.videos);
     const view = (opts && opts.view) || 'chat';
     Object.assign(chat, {
       open: true, host, id, agent: agent || null, view,
       sending: false, held: false, confirmStop: false, stopping: false, screenAuto: true,
-      model: null, switching: false, switchedAt: 0, screenAutoOpened: false, asks: [], askForm: null, images: [],
+      model: null, switching: false, switchedAt: 0, screenAutoOpened: false, asks: [], askForm: null, images: [], videos: [],
     });
     chat.answered.clear();
     chat.prUI.clear();
@@ -6002,11 +6033,12 @@
     const ta = $('chat-input');
     const text = ta.value;
     const images = chat.images;
+    const videos = chat.videos.slice();
     const { host, id } = chat;
-    if ((!text.trim() && !images.length) || chat.sending || !chatLive()) return;
+    if ((!text.trim() && !images.length && !videos.length) || chat.sending || !chatLive()) return;
     if (askShown() && chat.askForm) {
-      if (images.length) {
-        toast('answer the questions first, then send the images', 'warn');
+      if (images.length || videos.length) {
+        toast(`answer the questions first, then send the ${images.length ? 'images' : 'videos'}`, 'warn');
         return;
       }
       // In place of answers: the agent gets the text instead.
@@ -6017,6 +6049,11 @@
       }
       return;
     }
+    const problem = videosProblem(videos);
+    if (problem) {
+      toast(problem, 'warn');
+      return;
+    }
     const seq = chat.seq;
     chat.sending = true;
     chat.held = false;
@@ -6025,7 +6062,7 @@
     try {
       // The daemon holds Enter back if the agent shows a dialog, where
       // Enter picks the highlighted option whatever was typed.
-      const body = { text, submit: true };
+      const body = { text: withVideos(text, videos), submit: true };
       if (images.length) body.images = images.map((im) => im.data);
       const r = await api('POST', chatAPI('input'), body);
       held = !!(r && r.held);
@@ -6034,6 +6071,7 @@
         ta.value = '';
         autosize();
         chat.images = chat.images.filter((im) => !images.includes(im));
+        chat.videos = chat.videos.filter((v) => !videos.includes(v));
         renderChatImages();
       }
     } catch (e) {
@@ -6061,17 +6099,24 @@
   const IMAGE_BYTES = 3.5 * 1024 * 1024; // the daemon's limit per image
   const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
 
-  async function addChatImages(files) {
+  // addChatFiles adds the images and videos among files to the next
+  // message.
+  async function addChatFiles(files) {
     if (!chatLive() || chat.sending || askShown()) return;
     const seq = chat.seq;
+    addVideos(files, chat.videos, chatUploads(), () => {
+      if (seq === chat.seq) renderChatImages();
+    });
     if (await readImages(files, chat.images, () => seq === chat.seq)) renderChatImages();
   }
+
+  const chatUploads = () => (chat.host ? `/api/hosts/${encodeURIComponent(chat.host)}/uploads` : '/api/uploads');
 
   // readImages adds the image files among files to images, ready to send,
   // up to MAX_IMAGES in all. It stops, answering false, once alive() is
   // false: the message they were for is gone.
   async function readImages(files, images, alive) {
-    for (const f of [...files].filter((f) => f.type.startsWith('image/'))) {
+    for (const f of [...files].filter(isImage)) {
       if (images.length >= MAX_IMAGES) {
         toast(`at most ${MAX_IMAGES} images per message`, 'warn');
         break;
@@ -6089,8 +6134,9 @@
     return alive();
   }
 
-  // imageFiles is the image files pasted or dropped, if any.
-  const imageFiles = (dt) => [...(dt ? dt.files : [])].filter((f) => f.type.startsWith('image/'));
+  const isImage = (f) => f.type.startsWith('image/');
+  // mediaFiles is the image and video files pasted or dropped, if any.
+  const mediaFiles = (dt) => [...(dt ? dt.files : [])].filter((f) => isImage(f) || isVideo(f));
 
   // fitImage returns f as is if the agents can read it and it is small
   // enough, else scaled down and re-encoded (GIFs lose their animation).
@@ -6129,25 +6175,133 @@
     });
   }
 
-  function renderChatImages() {
-    renderThumbs($('chat-images'), chat.images);
+  // Videos sent with a message are too big to go with it: each is
+  // uploaded to the agent's machine as soon as it is picked (POST
+  // .../uploads, streamed), and the message gets a line with its path
+  // there, for the agent to open with its own tools.
+  const MAX_VIDEOS = 5;
+  const VIDEO_BYTES = 4 * 1024 ** 3; // the daemon's limit per file
+  const VIDEO_EXT = /\.(?:mp4|m4v|mov|webm|mkv|avi|3gp|mpe?g|ogv|wmv|flv)$/i;
+  // Some browsers give no type for some videos (MKV): the name tells.
+  const isVideo = (f) => f.type.startsWith('video/') || (!f.type && VIDEO_EXT.test(f.name || ''));
+
+  // addVideos starts uploading the videos among files to url, the uploads
+  // route of the agent's machine, adding each to videos as {name, size,
+  // sent, path, error, xhr}; changed() runs when one is added, done or
+  // failed.
+  function addVideos(files, videos, url, changed) {
+    let added = false;
+    for (const f of [...files].filter(isVideo)) {
+      if (videos.length >= MAX_VIDEOS) {
+        toast(`at most ${MAX_VIDEOS} videos per message`, 'warn');
+        break;
+      }
+      if (f.size > VIDEO_BYTES) {
+        toast(`${f.name || 'video'}: too large (at most 4 GB)`, 'error');
+        continue;
+      }
+      const v = { name: f.name || 'video', size: f.size, sent: 0, path: '', error: '', xhr: null };
+      v.xhr = uploadFile(url, f, (sent) => {
+        v.sent = sent;
+        paintVideo(v);
+      }, (err, r) => {
+        v.xhr = null;
+        if (err) v.error = err;
+        else v.path = r.path;
+        changed();
+      });
+      videos.push(v);
+      added = true;
+    }
+    if (added) changed();
   }
 
-  // renderThumbs shows images to send in list ul, each with a button to
-  // remove it (data-image is its index).
-  function renderThumbs(ul, images) {
-    ul.hidden = !images.length;
+  // uploadFile posts file to url (XHR, for its progress), named after it.
+  // done gets an error message, or '' and the decoded reply.
+  function uploadFile(url, file, progress, done) {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url + '?' + new URLSearchParams({ name: file.name || 'video' }));
+    const token = getToken();
+    if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+    xhr.upload.onprogress = (ev) => progress(ev.loaded);
+    xhr.onload = () => {
+      let data = null;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        // not JSON
+      }
+      if (xhr.status === 401) lostAdmin();
+      if (xhr.status >= 200 && xhr.status < 300 && data && data.path) done('', data);
+      else done((data && data.error) || `upload failed (${xhr.status})`);
+    };
+    xhr.onerror = () => done('cannot reach the daemon');
+    xhr.send(file);
+    return xhr;
+  }
+
+  // dropVideos stops the uploads of videos still on their way and returns
+  // an empty list. What has arrived stays on the machine until pruned.
+  function dropVideos(videos) {
+    for (const v of videos) if (v.xhr) v.xhr.abort();
+    return [];
+  }
+
+  // videosProblem says why videos cannot be sent yet.
+  function videosProblem(videos) {
+    if (videos.some((v) => v.error)) return 'A video could not be uploaded: remove it.';
+    if (videos.some((v) => !v.path)) return 'Wait for the videos to finish uploading.';
+    return '';
+  }
+
+  // withVideos is text with a line for each video's path appended.
+  function withVideos(text, videos) {
+    if (!videos.length) return text;
+    const lines = videos.map((v) => `Video: ${v.path}`).join('\n');
+    return text.trim() ? text.trimEnd() + '\n\n' + lines : lines;
+  }
+
+  function renderChatImages() {
+    renderThumbs($('chat-images'), chat.images, chat.videos);
+  }
+
+  // renderThumbs shows images and videos to send in list ul, each with a
+  // button to remove it (data-image or data-video is its index).
+  function renderThumbs(ul, images, videos = []) {
+    ul.hidden = !images.length && !videos.length;
     ul.replaceChildren(...images.map((im, i) => {
       const img = h('img', 'h-16 w-16 rounded-md border border-ink-600 bg-ink-950 object-cover touch:h-20 touch:w-20');
       img.src = im.url;
       img.alt = im.name;
       img.title = im.name;
-      const x = h('button', 'touch:h-8 touch:w-8 absolute -right-1.5 -top-1.5 grid h-5 w-5 place-items-center rounded-full border border-ink-600 bg-ink-900 text-[11px] leading-none text-zinc-300 hover:border-rose-400/60 hover:text-rose-300 focus-visible:outline-2 focus-visible:outline-emerald-400', '✕');
-      x.type = 'button';
-      x.dataset.image = String(i);
-      x.setAttribute('aria-label', `Remove ${im.name}`);
-      return h('li', 'relative', img, x);
+      return h('li', 'relative', img, removeButton('image', i, im.name));
+    }), ...videos.map((v, i) => {
+      v.statusEl = h('span', 'truncate text-[11px]');
+      v.barEl = h('span', 'block h-full rounded-full bg-emerald-400');
+      const box = h('div', 'flex h-16 w-44 flex-col justify-center gap-1 rounded-md border border-ink-600 bg-ink-950 px-2 touch:h-20',
+        h('span', 'truncate font-mono text-[11px] text-zinc-200', '▶ ' + v.name), v.statusEl,
+        h('span', 'block h-1 overflow-hidden rounded-full bg-ink-700', v.barEl));
+      box.title = v.path || v.name;
+      paintVideo(v);
+      return h('li', 'relative', box, removeButton('video', i, v.name));
     }));
+  }
+
+  function removeButton(kind, i, name) {
+    const x = h('button', 'touch:h-8 touch:w-8 absolute -right-1.5 -top-1.5 grid h-5 w-5 place-items-center rounded-full border border-ink-600 bg-ink-900 text-[11px] leading-none text-zinc-300 hover:border-rose-400/60 hover:text-rose-300 focus-visible:outline-2 focus-visible:outline-emerald-400', '✕');
+    x.type = 'button';
+    x.dataset[kind] = String(i);
+    x.setAttribute('aria-label', `Remove ${name}`);
+    return x;
+  }
+
+  // paintVideo shows how far video v's upload is.
+  function paintVideo(v) {
+    if (!v.statusEl) return;
+    const pct = v.path ? 100 : v.size ? Math.min(99, Math.floor((v.sent / v.size) * 100)) : 0;
+    v.statusEl.textContent = v.error ? v.error : v.path ? `${fmtSize(v.size)} · uploaded` : `uploading ${pct}% of ${fmtSize(v.size)}`;
+    v.statusEl.className = 'truncate text-[11px] ' + (v.error ? 'text-rose-300' : 'text-zinc-500');
+    v.barEl.style.width = (v.error ? 0 : pct) + '%';
   }
 
   // autosize grows the message box with its text, up to its max height.
@@ -6264,20 +6418,21 @@
       }
     });
     ta.addEventListener('paste', (ev) => {
-      const files = imageFiles(ev.clipboardData);
+      const files = mediaFiles(ev.clipboardData);
       if (!files.length) return;
       ev.preventDefault();
-      addChatImages(files);
+      addChatFiles(files);
     });
     $('chat-attach').addEventListener('click', () => $('chat-file').click());
     $('chat-file').addEventListener('change', (ev) => {
-      addChatImages(ev.target.files);
+      addChatFiles(ev.target.files);
       ev.target.value = '';
     });
     $('chat-images').addEventListener('click', (ev) => {
-      const b = ev.target.closest('button[data-image]');
+      const b = ev.target.closest('button[data-image], button[data-video]');
       if (!b) return;
-      chat.images.splice(Number(b.dataset.image), 1);
+      if (b.dataset.video) dropVideos(chat.videos.splice(Number(b.dataset.video), 1));
+      else chat.images.splice(Number(b.dataset.image), 1);
       renderChatImages();
       if (!touch()) ta.focus();
     });
@@ -6287,7 +6442,7 @@
     dlg.addEventListener('drop', (ev) => {
       if (!ev.dataTransfer || !ev.dataTransfer.files.length) return;
       ev.preventDefault();
-      addChatImages(ev.dataTransfer.files);
+      addChatFiles(ev.dataTransfer.files);
     });
     $('chat-keys').addEventListener('click', (ev) => {
       const b = ev.target.closest('button[data-key]');
@@ -6365,6 +6520,7 @@
     dlg.addEventListener('close', () => {
       chat.open = false;
       chat.seq++;
+      chat.videos = dropVideos(chat.videos);
       clearTimeout(chat.screenTimer);
       clearTimeout(files.timer);
       revokeFileURL();

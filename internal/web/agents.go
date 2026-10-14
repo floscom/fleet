@@ -624,6 +624,9 @@ func decodeMax(w http.ResponseWriter, r *http.Request, v any, limit int64) bool 
 // bodyLimit is the largest request body accepted for an API path: input
 // and start requests carry images.
 func bodyLimit(path string) int64 {
+	if uploadPath(path) {
+		return maxUpload
+	}
 	if strings.HasSuffix(path, "/input") || strings.HasSuffix(path, "/agents") {
 		return maxInputBody
 	}

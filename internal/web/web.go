@@ -84,6 +84,9 @@ type Source interface {
 	Usage(ctx context.Context) []AgentUsage
 	// HostStats reads how this machine is doing.
 	HostStats(ctx context.Context) *fleetv1.HostStats
+	// UploadDir is where uploaded files go (see uploads.go), a folder
+	// agents can read, sandboxed ones too; "" takes no uploads.
+	UploadDir() string
 
 	// Agents lists every agent, finished ones included.
 	Agents() []*fleetv1.Agent
