@@ -29,10 +29,10 @@ var usageClient = &http.Client{Timeout: 8 * time.Second}
 // Usage implements adapter.Usager.
 func (c *claude) Usage(ctx context.Context) (*adapter.Usage, error) {
 	raw, err := os.ReadFile(c.AuthFile(""))
+	if errors.Is(err, fs.ErrNotExist) && runtime.GOOS == "darwin" {
+		raw, err = readKeychain(ctx, keychainService())
+	}
 	if errors.Is(err, fs.ErrNotExist) {
-		if runtime.GOOS == "darwin" {
-			return nil, errors.New("the login is in the macOS Keychain, which fleet does not read")
-		}
 		return nil, errors.New("not logged in")
 	}
 	if err != nil {

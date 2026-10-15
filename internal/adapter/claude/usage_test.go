@@ -2,10 +2,12 @@ package claude
 
 import (
 	"context"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -16,6 +18,16 @@ func TestUsage(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", dir)
 	c := New("", nil).(*claude)
+	// The Keychain is only asked on macOS; never the real one.
+	keychain := map[string]string{}
+	oldKC := readKeychain
+	readKeychain = func(_ context.Context, service string) ([]byte, error) {
+		if v, ok := keychain[service]; ok {
+			return []byte(v), nil
+		}
+		return nil, fs.ErrNotExist
+	}
+	defer func() { readKeychain = oldKC }()
 
 	if _, err := c.Usage(context.Background()); err == nil || !strings.Contains(err.Error(), "not logged in") {
 		t.Fatalf("no login: %v", err)
@@ -65,6 +77,17 @@ func TestUsage(t *testing.T) {
 	u, err = parseUsage([]byte(`{"five_hour":{"utilization":7,"resets_at":"2026-10-03T14:00:00Z"},"seven_day":{"utilization":40},"seven_day_opus":null}`))
 	if err != nil || len(u.Limits) != 2 || u.Limits[0].Label != "5h" || u.Limits[1].Percent != 40 {
 		t.Fatalf("fallback %+v %v", u, err)
+	}
+
+	// On macOS, a login only in the Keychain.
+	if runtime.GOOS == "darwin" {
+		os.Remove(filepath.Join(dir, ".credentials.json"))
+		keychain[keychainService()] = cred
+		if u, err := c.Usage(context.Background()); err != nil || u.Plan != "max 20x" {
+			t.Fatalf("keychain: %+v %v", u, err)
+		}
+		delete(keychain, keychainService())
+		os.WriteFile(filepath.Join(dir, ".credentials.json"), []byte(cred), 0o600)
 	}
 
 	cred = strings.Replace(cred, itoa(exp), itoa(time.Now().Add(-time.Minute).UnixMilli()), 1)

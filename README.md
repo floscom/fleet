@@ -367,8 +367,8 @@ there needed. That browser then shows **admin** in the header and can:
   plan limits (5-hour session, week, ...) is used, with the reset time below
   each meter in your local time (full date and time on hover). Each daemon
   asks the provider at most every 45 s with the token its CLI stored
-  (`~/.claude/.credentials.json`, `~/.codex/auth.json`) and never
-  refreshes it; a Claude login in the macOS Keychain shows as unknown.
+  (`~/.claude/.credentials.json`, or the macOS Keychain for Claude;
+  `~/.codex/auth.json`) and never refreshes it.
 - **See how each machine is doing**: above the agent CLIs, each fleet's
   machine shows its OS, CPU, memory and uptime, then meters for its load
   (the 1-minute average per CPU), memory, swap and disks (`/`, the home
