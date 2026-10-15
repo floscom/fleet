@@ -642,6 +642,15 @@ key shows up as *not joined*, with the command to copy; the picker notices
 when it has been run. No pairing is needed for this: pairing (`fleet pair`)
 is only for the fleet CLI and native apps talking to a daemon over TLS.
 
+The dashboard finds the other machines with mDNS on the LAN and, when
+[Tailscale](https://tailscale.com) runs, on the tailnet: mDNS does not
+cross Tailscale, so every 10 seconds it lists the online machines with
+`tailscale status --json` (the `tailscale` CLI on `PATH`, or the one in
+the macOS app) and asks each for `GET /api/hello` on this dashboard's port
+and 7421. A machine on both is listed once, LAN addresses first. Their
+dashboard must listen on the tailnet (the default `0.0.0.0:7421` does) and
+be reachable through its firewall.
+
 How it works: the browser only talks to the dashboard it opened, with that
 machine's admin token. That daemon asks the other one for a nonce and sends
 the request signed with the key (HMAC-SHA256 over the target's server id,
@@ -776,8 +785,8 @@ Honest limits:
   compare the fingerprint. **Pair on a trusted network**, and compare the
   fingerprint. A PAKE bound to both certificates would remove this attack;
   it needs protocol v2.
-- **mDNS is unauthenticated.** Anyone on the LAN can advertise a fake
-  daemon. Pinning makes this harmless for paired servers; during pairing
+- **mDNS and `/api/hello` are unauthenticated.** Anyone on the LAN, or
+  on the tailnet, can claim to be a daemon. Pinning makes this harmless for paired servers; during pairing
   the fingerprint check is what stops it.
 - **The web admin token travels over plain HTTP.** Someone who can sniff
   the LAN can capture it from a browser's admin request and then do

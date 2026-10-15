@@ -25,14 +25,17 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	fleetv1 "fleet/gen/fleetv1"
+	"fleet/internal/discovery"
 )
 
 const (
@@ -238,8 +241,8 @@ func holds(path, got string) bool {
 // ---------------------------------------------------------------------------
 // Routes
 
-// apiHandler routes /api/. /api/session, /api/nonce and /api/unlock are
-// open; the rest needs the admin token, or a request signed with the fleet
+// apiHandler routes /api/. /api/session, /api/nonce, /api/unlock and
+// /api/hello are open; the rest needs the admin token, or a request signed with the fleet
 // key (see peers.go), which reaches this daemon's own routes only.
 func (s *Server) apiHandler() http.Handler {
 	admin := http.NewServeMux()
@@ -288,6 +291,9 @@ func (s *Server) apiHandler() http.Handler {
 		case "/api/unlock":
 			s.apiUnlock(w, r)
 			return
+		case discovery.HelloPath:
+			s.apiHello(w, r)
+			return
 		}
 		token := s.hasToken(r)
 		peer := false
@@ -312,6 +318,21 @@ func (s *Server) apiHandler() http.Handler {
 			writeError(w, http.StatusUnauthorized, "admin token required: run `fleet web` on the server")
 		}
 	})
+}
+
+// apiHello describes this daemon to dashboards looking for it on the
+// tailnet (discovery.BrowseTailnet): what mDNS TXT records tell the LAN.
+func (s *Server) apiHello(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	info := s.opts.Source.Info()
+	h := discovery.Hello{V: 1, ID: info.ID, Name: info.Name, Web: s.webPort}
+	if _, port, err := net.SplitHostPort(info.Listen); err == nil {
+		h.Port, _ = strconv.Atoi(port)
+	}
+	writeJSON(w, http.StatusOK, h)
 }
 
 // apiUnlock trades a secret typed into the page for the admin token: the

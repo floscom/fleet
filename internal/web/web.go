@@ -28,6 +28,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -38,6 +39,7 @@ import (
 
 	fleetv1 "fleet/gen/fleetv1"
 	"fleet/internal/ask"
+	"fleet/internal/config"
 	"fleet/internal/discovery"
 	"fleet/internal/workflow"
 )
@@ -123,7 +125,8 @@ type Source interface {
 	Git(ctx context.Context, req *fleetv1.GitRequest) (*fleetv1.GitResponse, error)
 }
 
-// BrowseFunc finds fleet daemons on the LAN (discovery.Browse).
+// BrowseFunc finds fleet daemons on the LAN and the tailnet
+// (discovery.BrowseAll).
 type BrowseFunc func(ctx context.Context, timeout time.Duration) ([]discovery.Found, error)
 
 // Options configures New.
@@ -142,7 +145,8 @@ type Options struct {
 	PushKeyPath  string
 	PushSubsPath string
 	Log          *slog.Logger
-	// Browse defaults to discovery.Browse. Tests replace it.
+	// Browse defaults to discovery.BrowseAll on this dashboard's port and
+	// the default one. Tests replace it.
 	Browse BrowseFunc
 }
 
@@ -163,6 +167,21 @@ type Server struct {
 	push *pusher
 	// written remembers the files agents wrote (files.go).
 	written writtenCache
+	// webPort is the port Serve listens on, for the hello.
+	webPort int
+}
+
+// webPorts are the dashboard ports to look for on the tailnet: this
+// dashboard's own and the default one.
+func webPorts(own string) []int {
+	_, def, _ := net.SplitHostPort(config.DefaultWeb)
+	var out []int
+	for _, s := range []string{own, def} {
+		if p, err := strconv.Atoi(s); err == nil && p > 0 && p <= 65535 && !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // CheckAddr returns an error unless addr is host:port.
@@ -181,10 +200,13 @@ func New(opts Options) (*Server, error) {
 	if opts.Log == nil {
 		opts.Log = slog.Default()
 	}
+	host, port, _ := net.SplitHostPort(opts.Addr)
 	if opts.Browse == nil {
-		opts.Browse = discovery.Browse
+		ports := webPorts(port)
+		opts.Browse = func(ctx context.Context, timeout time.Duration) ([]discovery.Found, error) {
+			return discovery.BrowseAll(ctx, timeout, ports)
+		}
 	}
-	host, _, _ := net.SplitHostPort(opts.Addr)
 	s := &Server{opts: opts, host: strings.ToLower(host), peerHTTP: newPeerClient()}
 	if hn, err := os.Hostname(); err == nil {
 		s.hostname = firstLabel(hn)
@@ -200,6 +222,9 @@ func New(opts Options) (*Server, error) {
 // shuts the server down and closes every WebSocket.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) {
 	s.opts.Log.Info("web ui", "url", "http://"+ln.Addr().String()+"/")
+	if a, ok := ln.Addr().(*net.TCPAddr); ok {
+		s.webPort = a.Port
+	}
 	s.start(ctx)
 	srv := &http.Server{Handler: s.handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {

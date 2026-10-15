@@ -6,7 +6,8 @@ package web
 // with `fleet start --join KEY`) trust each other's dashboards: the browser
 // asks its own daemon for /api/hosts/{id}/..., and that daemon signs the
 // request with the key and sends it to daemon {id}, found on the LAN via
-// mDNS. The key itself never crosses the network.
+// mDNS or on the tailnet (discovery.BrowseAll). The key itself never
+// crosses the network.
 //
 // A signed request is a normal admin request with
 //

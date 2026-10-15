@@ -333,3 +333,33 @@ func TestValidKey(t *testing.T) {
 		t.Fatalf("stored %q", got)
 	}
 }
+
+func TestHello(t *testing.T) {
+	src := newFakeSource()
+	src.id = "b-id"
+	s, err := New(Options{Addr: "127.0.0.1:0", Source: src})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.webPort = 7999
+	ts := httptest.NewServer(s.handler())
+	defer ts.Close()
+	var h discovery.Hello
+	if code := api(t, ts, "GET", discovery.HelloPath, "", "", &h); code != 200 {
+		t.Fatalf("hello: %d", code)
+	}
+	if want := (discovery.Hello{V: 1, ID: "b-id", Name: "studio", Port: 7420, Web: 7999}); h != want {
+		t.Fatalf("got %+v, want %+v", h, want)
+	}
+	if code := api(t, ts, "POST", discovery.HelloPath, "", "", nil); code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST hello: %d", code)
+	}
+}
+
+func TestWebPorts(t *testing.T) {
+	for own, want := range map[string][]int{"7421": {7421}, "8000": {8000, 7421}, "0": {7421}, "x": {7421}} {
+		if got := webPorts(own); !reflect.DeepEqual(got, want) {
+			t.Errorf("webPorts(%q) = %v, want %v", own, got, want)
+		}
+	}
+}
