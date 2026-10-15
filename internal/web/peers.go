@@ -230,7 +230,7 @@ func forwardable(method, rest string) bool {
 		}
 		return agentRoute(rest, "chat", "screen", "workflows", "image", "media", "files", "file") || workflowChatRoute(rest, "chat", "image")
 	case http.MethodPost:
-		return rest == "roots" || rest == "agents" || rest == "uploads" || agentRoute(rest, "input", "answer", "model", "note", "stop", "merge", "git")
+		return rest == "roots" || rest == "agents" || rest == "uploads" || agentRoute(rest, "input", "answer", "model", "note", "stop", "merge", "git", "send")
 	case http.MethodPut, http.MethodDelete:
 		return oneSegment(strings.CutPrefix(rest, "roots/"))
 	}
@@ -280,7 +280,7 @@ func forwardTimeout(method, rest string) time.Duration {
 	if method == http.MethodPost && agentRoute(rest, "git") {
 		return gitTimeout
 	}
-	if method == http.MethodPost && rest == "uploads" {
+	if method == http.MethodPost && (rest == "uploads" || agentRoute(rest, "send")) {
 		return uploadTimeout
 	}
 	return peerTimeout

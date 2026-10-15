@@ -475,8 +475,13 @@
           <h3 id="file-name" class="truncate font-mono text-[13px] font-semibold text-zinc-100"></h3>
           <div id="file-meta" class="mt-0.5 truncate font-mono text-[11px] text-zinc-500"></div>
         </div>
+        <div class="relative shrink-0">
+          <button id="file-send" type="button" aria-haspopup="true" aria-expanded="false" class="touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-2.5 py-1 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 aria-expanded:border-amber-400/40 aria-expanded:bg-ink-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400">Send to…</button>
+          <div id="file-send-menu" hidden class="absolute right-0 top-full z-10 mt-1 w-56 max-h-64 overflow-y-auto rounded-md border border-ink-600 bg-ink-850 py-1 shadow-lg shadow-black/40"></div>
+        </div>
         <button id="file-download" type="button" disabled class="touch:min-h-11 shrink-0 rounded-md border border-ink-600 bg-ink-850 px-2.5 py-1 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 disabled:opacity-40 disabled:hover:bg-ink-850 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400">Download</button>
       </div>
+      <div id="file-send-note" hidden role="status" class="break-all border-b border-ink-700 px-4 py-1.5 font-mono text-[11px] max-sm:px-2.5"></div>
       <div id="file-body" class="min-h-0 flex-1 overflow-auto overscroll-contain px-4 py-3 max-sm:px-2.5"></div>
     </div>
   </div>

@@ -264,6 +264,7 @@ func (s *Server) apiHandler() http.Handler {
 	admin.HandleFunc("GET /api/agents/{id}/media", s.apiMedia)
 	admin.HandleFunc("GET /api/agents/{id}/files", s.apiFiles)
 	admin.HandleFunc("GET /api/agents/{id}/file", s.apiFile)
+	admin.HandleFunc("POST /api/agents/{id}/send", s.apiSendFile)
 	admin.HandleFunc("POST /api/agents/{id}/answer", s.apiAnswer)
 	admin.HandleFunc("POST /api/agents/{id}/model", s.apiSwitchModel)
 	admin.HandleFunc("POST /api/agents/{id}/resume", s.apiResume)

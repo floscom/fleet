@@ -4298,6 +4298,9 @@
   // closeFile goes back to the lists, as they were.
   function closeFile() {
     files.seq++;
+    closeFileSend();
+    fileSendNote('');
+    $('file-send').disabled = false;
     revokeFileURL();
     Object.assign(files, { open: null, shown: null });
     $('file-view').hidden = true;
@@ -4345,6 +4348,73 @@
       return v;
     }
     return note(`// ${type || 'binary file'}: no preview here, download it to open it.`);
+  }
+
+  // ---- sending the open file straight to another machine of the fleet
+  // (POST .../send); the list is the same "Fleet on the network" peers
+  // the dashboard already tracks, minus this file's own machine.
+
+  function sendTargets() {
+    return S.peers.filter((p) => !p.self && p.id !== chat.host);
+  }
+
+  function closeFileSend() {
+    $('file-send').setAttribute('aria-expanded', 'false');
+    $('file-send-menu').hidden = true;
+  }
+
+  function toggleFileSend() {
+    const menu = $('file-send-menu');
+    if (!menu.hidden) return closeFileSend();
+    renderFileSendMenu();
+    $('file-send').setAttribute('aria-expanded', 'true');
+    menu.hidden = false;
+  }
+
+  function renderFileSendMenu() {
+    const menu = $('file-send-menu');
+    const targets = sendTargets();
+    const item = (cls, text) => h('div', 'px-3 py-2 font-mono text-[11px] text-zinc-500 ' + cls, text);
+    if (!targets.length) {
+      menu.replaceChildren(item('', S.peers.length ? 'No other machine is on the network.' : 'No other machine found yet.'));
+      return;
+    }
+    menu.replaceChildren(...targets.map((p) => {
+      const b = h('button', 'touch:min-h-11 flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-200 hover:bg-ink-800 focus-visible:bg-ink-800 focus-visible:outline-none disabled:opacity-40',
+        h('span', 'min-w-0 flex-1 truncate', p.name || p.host || p.id));
+      b.type = 'button';
+      b.addEventListener('click', () => sendFileTo(p));
+      return h('div', '', b);
+    }));
+  }
+
+  // fileSendNote shows how a send went under the file's header (toasts
+  // would be under the session dialog); '' hides it.
+  function fileSendNote(text, kind) {
+    const el = $('file-send-note');
+    el.hidden = !text;
+    el.textContent = text;
+    el.className = el.className.replace(/\btext-(?:zinc|emerald|rose)-\d+\b/g, '') +
+      (kind === 'error' ? ' text-rose-300' : kind === 'ok' ? ' text-emerald-300' : ' text-zinc-400');
+  }
+
+  // sendFileTo pushes the open file to peer p's machine.
+  async function sendFileTo(p) {
+    const f = files.open;
+    closeFileSend();
+    if (!f) return;
+    const seq = files.seq;
+    const label = p.name || p.host || p.id;
+    $('file-send').disabled = true;
+    fileSendNote(`// sending ${baseName(f.path)} to ${label}…`);
+    try {
+      const r = await api('POST', chatAPI('send'), { path: f.path, host: p.id });
+      if (seq === files.seq) fileSendNote(`sent to ${r.name || label}: ${r.path}`, 'ok');
+    } catch (e) {
+      if (seq === files.seq) fileSendNote(`sending to ${label} failed: ${e.message}`, 'error');
+    } finally {
+      if (seq === files.seq) $('file-send').disabled = false;
+    }
   }
 
   function downloadFile() {
@@ -6479,6 +6549,13 @@
     $('files-reload').addEventListener('click', () => loadFiles());
     $('file-back').addEventListener('click', closeFile);
     $('file-download').addEventListener('click', downloadFile);
+    $('file-send').addEventListener('click', toggleFileSend);
+    document.addEventListener('click', (ev) => {
+      if (!$('file-send-menu').hidden && !ev.target.closest('#file-send, #file-send-menu')) closeFileSend();
+    });
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && !$('file-send-menu').hidden) closeFileSend();
+    });
     $('chat-tabs').addEventListener('keydown', (ev) => {
       if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
       const tabs = [...$('chat-tabs').querySelectorAll('[role="tab"]')].filter((t) => !t.hidden);
