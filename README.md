@@ -49,7 +49,7 @@ Run it again to update, then restart the daemon (`fleet stop && fleet
 start`; running agents are re-adopted). The archives are also on the
 [releases page](https://github.com/floscom/fleet/releases).
 
-From source (needs Go 1.22):
+From source (needs Go 1.26):
 
 ```sh
 make build                      # -> bin/fleet (static, CGO_ENABLED=0)
