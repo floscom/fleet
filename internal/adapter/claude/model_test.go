@@ -104,6 +104,9 @@ func TestParsePicker(t *testing.T) {
 	if p.row("sonnet") != 3 || p.row("opus") != 1 || p.row("gpt") != -1 {
 		t.Fatal("row lookup")
 	}
+	if q, ok := parsePicker(withSidebar(pickerScreen)); !ok || q.cursor != p.cursor || q.effort != p.effort || !slices.Equal(q.rows, p.rows) {
+		t.Fatalf("picker beside a sidebar %+v, %v", q, ok)
+	}
 	haiku := strings.Replace(pickerScreen, "   ◉ xHigh effort (default) ←/→ to adjust", "   ○ Effort not supported for Haiku", 1)
 	if p, ok := parsePicker(haiku); !ok || p.effort != "" {
 		t.Fatalf("haiku picker %+v", p)

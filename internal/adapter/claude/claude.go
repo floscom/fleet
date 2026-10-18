@@ -170,19 +170,29 @@ const footerLines = 8
 // screen: a line of hints, one of them dialogHint. Higher up, or amid
 // other words, the text is part of the conversation.
 func (c *claude) DialogOpen(screen string) bool {
-	lines := strings.Split(screen, "\n")
-	for i, n := len(lines)-1, 0; i >= 0 && n < footerLines; i-- {
-		l := strings.TrimSpace(lines[i])
-		if l == "" {
-			continue
-		}
-		if slices.Contains(strings.Split(l, " · "), dialogHint) {
-			return true
-		}
-		n++
-	}
-	return false
+	return footer(strings.Split(screen, "\n"), dialogHint) >= 0
 }
+
+// column returns the text of a screen line in Claude's own column. In a
+// wide terminal, a session that changed files shows them and their diff
+// in a sidebar, on the same lines to the right, down to the bottom of
+// the screen. Two spaces or more set it apart; the footers, titles and
+// options read off the screen have none, or only before an option's
+// description. A line that starts as far right as sidebarIndent has
+// nothing in Claude's column.
+func column(l string) string {
+	t := strings.TrimLeft(l, " ")
+	if len(l)-len(t) >= sidebarIndent {
+		return ""
+	}
+	t, _, _ = strings.Cut(strings.TrimSpace(t), "  ")
+	return t
+}
+
+// sidebarIndent is where a line starts that holds only the sidebar (or
+// text Claude aligns to the right): Claude's own lines are indented by a
+// few spaces, the sidebar starts about halfway across the terminal.
+const sidebarIndent = 40
 
 // resumes reports whether args ask claude to continue or resume a session.
 func resumes(args []string) bool {

@@ -3,6 +3,7 @@ package claude
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	fleetv1 "fleet/gen/fleetv1"
 	"fleet/internal/adapter"
@@ -388,7 +390,25 @@ func TestDialogOpen(t *testing.T) {
 		if got := a.DialogOpen(tc.screen); got != tc.want {
 			t.Errorf("%s: DialogOpen = %v, want %v", name, got, tc.want)
 		}
+		if got := a.DialogOpen(withSidebar(tc.screen)); got != tc.want {
+			t.Errorf("%s beside a sidebar: DialogOpen = %v, want %v", name, got, tc.want)
+		}
 	}
+}
+
+// withSidebar puts the diff sidebar of a session that changed files to
+// the right of screen, on every line, as Claude Code 2.1.280 shows it in
+// a terminal 200 columns wide.
+func withSidebar(screen string) string {
+	lines := strings.Split(screen, "\n")
+	width := 110
+	for _, l := range lines {
+		width = max(width, utf8.RuneCountInString(l))
+	}
+	for i, l := range lines {
+		lines[i] = l + strings.Repeat(" ", width-utf8.RuneCountInString(l)) + fmt.Sprintf("   %3d +line %d was rewritten", i+1, i+1)
+	}
+	return strings.Join(lines, "\n")
 }
 
 func TestHandleHookTranscript(t *testing.T) {

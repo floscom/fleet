@@ -377,7 +377,7 @@ func parsePicker(screen string) (picker, bool) {
 	}
 	top := -1
 	for i := foot - 1; i >= 0; i-- {
-		if strings.TrimSpace(lines[i]) == pickerTitle {
+		if column(lines[i]) == pickerTitle {
 			top = i
 			break
 		}
@@ -387,13 +387,13 @@ func parsePicker(screen string) (picker, bool) {
 	}
 	p := picker{cursor: -1}
 	for _, l := range lines[top+1 : foot] {
-		l = strings.TrimSpace(l)
+		// A row's label ends where its description starts.
+		l = column(l)
 		if m := rowRe.FindStringSubmatch(l); m != nil {
-			label, _, _ := strings.Cut(m[3], "  ")
 			if m[1] != "" {
 				p.cursor = len(p.rows)
 			}
-			p.rows = append(p.rows, strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(label), "✔")))
+			p.rows = append(p.rows, strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[3]), "✔")))
 		} else if m := pickerEffortRe.FindStringSubmatch(l); m != nil {
 			p.effort = effortID(m[1])
 		}
@@ -408,7 +408,7 @@ func parsePicker(screen string) (picker, bool) {
 func parseConfirm(screen string) (yes, ok bool) {
 	lines := strings.Split(screen, "\n")
 	for i, n := len(lines)-1, 0; i >= 0 && n < footerLines+2; i-- {
-		l := strings.TrimSpace(lines[i])
+		l := column(lines[i])
 		if l == "" {
 			continue
 		}
@@ -417,7 +417,7 @@ func parseConfirm(screen string) (yes, ok bool) {
 			continue
 		}
 		for _, r := range lines[i+1:] {
-			m := rowRe.FindStringSubmatch(strings.TrimSpace(r))
+			m := rowRe.FindStringSubmatch(column(r))
 			if m != nil && m[2] == "1" && strings.HasPrefix(m[3], "Yes, switch") {
 				return m[1] != "", true
 			}
@@ -431,7 +431,7 @@ func parseConfirm(screen string) (yes, ok bool) {
 // " · "-separated hints include hint, -1 if none.
 func footer(lines []string, hint string) int {
 	for i, n := len(lines)-1, 0; i >= 0 && n < footerLines; i-- {
-		l := strings.TrimSpace(lines[i])
+		l := column(lines[i])
 		if l == "" {
 			continue
 		}
