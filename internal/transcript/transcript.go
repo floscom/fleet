@@ -41,6 +41,9 @@ const (
 	Task = "task"
 )
 
+// Interrupted is the Text of the Note a turn the user interrupted leaves.
+const Interrupted = "interrupted"
+
 // Entry is one item of a chat.
 type Entry struct {
 	Kind string `json:"kind"`

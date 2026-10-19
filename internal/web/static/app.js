@@ -3389,6 +3389,8 @@
     model: null, // {model, name, effort, switch, models, efforts}; null: the agent offers no choice
     switching: false, // a model switch is in flight
     switchedAt: 0, // when the last one ended: replies read before it are stale
+    interrupting: false, // an interrupt is in flight
+    interruptedAt: 0, // when the last one was asked for: Esc soon after closes the session again
     confirmStop: false,
     dropWt: false, // the confirmation's "delete its worktree" choice
     stopping: false,
@@ -3409,6 +3411,11 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const chatLive = () => chat.agent && !isFinished(chat.agent);
   const chatDialog = () => chatLive() && chat.agent.state === 'needs_input';
+  // ESC_AGAIN: for this long after an interrupt, Esc closes the session.
+  const ESC_AGAIN = 4000;
+  // chatBusy: the agent works on a turn, or waits on a dialog of one; Esc
+  // interrupts it then.
+  const chatBusy = () => chatLive() && (chat.agent.state === 'working' || chat.agent.state === 'needs_input');
 
   // A session's draft: what is typed into its message box stays in
   // localStorage until it is sent, so notes outlive closing the session
@@ -3436,7 +3443,7 @@
     Object.assign(chat, {
       open: true, host, id, agent: agent || null, view,
       sending: false, held: false, confirmStop: false, stopping: false, screenAuto: true,
-      model: null, switching: false, switchedAt: 0, screenAutoOpened: false, asks: [], askForm: null, images: [], videos: [],
+      model: null, switching: false, switchedAt: 0, interrupting: false, interruptedAt: 0, screenAutoOpened: false, asks: [], askForm: null, images: [], videos: [],
     });
     chat.answered.clear();
     chat.prUI.clear();
@@ -5736,8 +5743,9 @@
     st.textContent = !a ? '' : !chatLive() ? 'the session has ended'
       : chat.switching ? 'switching the model…'
       : askShown() ? 'a message sent now answers none of the questions: the agent reads it instead'
+      : chat.interrupting ? 'interrupting…'
       : chatDialog() ? 'in a dialog, Send types your text without pressing Enter: Enter picks the highlighted option'
-      : a.state === 'working' ? 'working… new messages appear as the agent writes them' : '';
+      : a.state === 'working' ? 'working… new messages appear as the agent writes them' + (touch() ? '' : ' · Esc or Ctrl+C interrupts it') : '';
   }
 
   // ---------------------------------------------------------------- model
@@ -6068,6 +6076,8 @@
       : chatDialog() ? 'Type into the dialog (Enter is not pressed)'
       : touch() ? 'Message the agent' : 'Message the agent · Enter sends, Shift+Enter for a new line';
     $('chat-send').disabled = !live || chat.sending;
+    $('chat-interrupt').hidden = !chatBusy();
+    $('chat-interrupt').disabled = chat.interrupting;
     $('chat-attach').disabled = !live || chat.sending || askShown();
     renderChatModel();
     const keys = $('chat-keys');
@@ -6095,6 +6105,39 @@
       toast(`could not send the key: ${e.message}`, 'error');
       return;
     }
+    if (chat.screenOpen) setTimeout(refreshScreen, 150);
+  }
+
+  // interruptChat interrupts the agent's turn as Esc in its terminal does
+  // (POST .../interrupt): the daemon waits for the transcript to record it
+  // and makes the agent idle. A daemon without that route gets Esc.
+  async function interruptChat() {
+    if (!chatBusy() || chat.interrupting) return;
+    const { host, id, seq } = chat;
+    chat.interrupting = true;
+    chat.interruptedAt = Date.now();
+    renderChatInput();
+    let r = null;
+    try {
+      r = await api('POST', chatAPI('interrupt'));
+    } catch (e) {
+      // A daemon from before that route (an unknown agent fails again).
+      if (e.status === 404 || e.status === 405) {
+        r = await api('POST', chatAPI('input'), { keys: ['escape'] }).then(() => ({ interrupted: true }), (e2) => ({ error: e2 }));
+      } else r = { error: e };
+    }
+    if (seq !== chat.seq) return;
+    chat.interrupting = false;
+    if (r.error) toast(`could not interrupt: ${r.error.message}`, 'error');
+    else if (!r.interrupted) toast('Esc was pressed, but the agent shows no interruption yet', 'warn');
+    if (r.agent) {
+      const rem = host && S.remote.get(host);
+      if (rem) rem.agents.set(id, r.agent);
+      else if (!host) S.agents.set(id, r.agent);
+      invalidate('agents');
+      chatAgent(host, r.agent);
+    }
+    renderChatInput();
     if (chat.screenOpen) setTimeout(refreshScreen, 150);
   }
 
@@ -6518,6 +6561,7 @@
       const b = ev.target.closest('button[data-key]');
       if (b) sendKey(b.dataset.key);
     });
+    $('chat-interrupt').addEventListener('click', interruptChat);
     $('chat-model-sel').addEventListener('change', switchChatModel);
     $('chat-effort-sel').addEventListener('change', switchChatModel);
     $('chat-screen-toggle').addEventListener('click', () => {
@@ -6575,6 +6619,21 @@
       ev.preventDefault();
       $('chat-stop-box').querySelector('button').click();
       if (!chat.confirmStop && !touch()) ta.focus();
+    });
+    // Esc while the agent works, and Ctrl+C with no text selected while it
+    // works or waits on a dialog, interrupt its turn as in its terminal.
+    // Esc again soon after closes the session as usual.
+    dlg.addEventListener('keydown', (ev) => {
+      if (ev.isComposing || ev.altKey || ev.metaKey || ev.shiftKey) return;
+      const esc = ev.key === 'Escape' && !ev.ctrlKey;
+      const ctrlC = ev.ctrlKey && ev.key.toLowerCase() === 'c';
+      if (!esc && !ctrlC || chat.view !== 'chat' || chat.confirmStop || !chatBusy()) return;
+      const t = ev.target;
+      if (esc && (chat.agent.state !== 'working' || Date.now() - chat.interruptedAt < ESC_AGAIN ||
+        t !== ta && t.closest('input, select, textarea'))) return;
+      if (ctrlC && ((t.selectionStart ?? 0) !== (t.selectionEnd ?? 0) || String(getSelection()))) return;
+      ev.preventDefault();
+      interruptChat();
     });
     // Esc closes the archive confirmation, then steps back from a
     // workflow agent or a file, before it closes the dialog.

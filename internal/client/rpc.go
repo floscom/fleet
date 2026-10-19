@@ -98,6 +98,14 @@ func (c *Client) SendText(ctx context.Context, agent, text string, submit bool) 
 	return err
 }
 
+// InterruptAgent interrupts the turn an agent is working on, as Esc in its
+// terminal does, and reports whether its transcript recorded that.
+func (c *Client) InterruptAgent(ctx context.Context, agent string) (*fleetv1.Agent, bool, error) {
+	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_InterruptAgent{InterruptAgent: &fleetv1.InterruptAgentRequest{Agent: agent}}},
+		(*fleetv1.ServerMessage).GetInterruptAgent)
+	return r.GetAgent(), r.GetInterrupted(), err
+}
+
 // AttachImage attaches an image to the prompt an agent is composing and
 // returns where the daemon saved it.
 func (c *Client) AttachImage(ctx context.Context, agent string, data []byte) (string, error) {

@@ -256,7 +256,7 @@ func userText(s string) []transcript.Entry {
 	case s == "":
 		return nil
 	case strings.HasPrefix(s, "[Request interrupted by user"):
-		return note("interrupted")
+		return note(transcript.Interrupted)
 	case strings.HasPrefix(s, "<command-name>"), strings.HasPrefix(s, "<command-message>"):
 		name, _ := inner(s, "command-name")
 		args, _ := inner(s, "command-args")

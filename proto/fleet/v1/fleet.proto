@@ -64,6 +64,7 @@ message ClientMessage {
     MergePullRequestRequest merge_pull_request = 37;
     GitRequest git = 38;
     SetNoteRequest set_note = 39;
+    InterruptAgentRequest interrupt_agent = 44;
 
     // Terminal streaming
     AttachRequest attach = 40;
@@ -113,6 +114,7 @@ message ServerMessage {
     MergePullRequestResponse merge_pull_request = 37;
     GitResponse git = 38;
     SetNoteResponse set_note = 39;
+    InterruptAgentResponse interrupt_agent = 44;
 
     AttachResponse attach = 40;
     // Pushed while attached (id 0).
@@ -702,6 +704,23 @@ message SendTextRequest {
   bool submit = 3;
 }
 message SendTextResponse {}
+
+// Interrupts the turn an agent is working on, as Esc in its terminal does,
+// and closes the dialog it shows if any. The CLIs report no end of a turn
+// interrupted while the model writes, so the daemon waits a few seconds
+// for the transcript to record the interruption and then makes the agent
+// IDLE itself.
+message InterruptAgentRequest {
+  // Agent id or name.
+  string agent = 1;
+}
+message InterruptAgentResponse {
+  Agent agent = 1;
+  // True if the transcript recorded the interruption. False: Esc was
+  // pressed but the turn may go on (the CLI did not take it in time, or
+  // the agent keeps no transcript).
+  bool interrupted = 2;
+}
 
 // Attaches an image to the prompt the agent is composing, as if the user
 // had pasted it: the daemon saves it in the agent's state dir and pastes

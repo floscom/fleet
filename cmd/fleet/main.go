@@ -57,7 +57,7 @@ Every command that talks to a daemon uses the local one unless --host
 		newDaemonCmd(), newStartCmd(), newStopCmd(), newStatusCmd(), newHostCmd(), newVersionCmd(),
 		newPairCmd(), newConnectCmd(), newDiscoverCmd(), newServersCmd(), newDevicesCmd(),
 		newRootsCmd(), newBrowseCmd(), newAdaptersCmd(),
-		newLsCmd(), newRunCmd(), newAttachCmd(), newSendCmd(), newKillCmd(), newWatchCmd(),
+		newLsCmd(), newRunCmd(), newAttachCmd(), newSendCmd(), newInterruptCmd(), newKillCmd(), newWatchCmd(),
 		newNoteCmd(), newPullsCmd(), newMergeCmd(), newGitCmd(),
 		newSandboxCmd(), newWebCmd(), newHookCmd(),
 	)

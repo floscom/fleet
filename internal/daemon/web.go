@@ -189,6 +189,11 @@ func (s *webSource) SendInput(ctx context.Context, agent, text string, submit bo
 	return held, webError(err)
 }
 
+func (s *webSource) Interrupt(ctx context.Context, agent string) (*fleetv1.Agent, bool, error) {
+	a, done, err := s.d.agents.interrupt(ctx, agent)
+	return a, done, webError(err)
+}
+
 func (s *webSource) Screen(ctx context.Context, agent string) (string, error) {
 	screen, err := s.d.agents.screen(ctx, agent)
 	return screen, webError(err)

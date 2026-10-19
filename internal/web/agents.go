@@ -9,6 +9,7 @@ package web
 //	GET  /api/agents/{id}/chat        its conversation (see serveChat)
 //	GET  /api/agents/{id}/screen      its terminal screen, as text
 //	POST /api/agents/{id}/input       attach images, type text and/or press keys (see apiInput)
+//	POST /api/agents/{id}/interrupt   interrupt the turn it works on, as Esc does
 //	GET  /api/agents/{id}/image       an image of its conversation
 //	GET  /api/agents/{id}/media       all the images of its conversation (see media.go)
 //	GET  /api/agents/{id}/files       the files it wrote, or those of its folder (see files.go)
@@ -253,6 +254,18 @@ func (s *Server) apiInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"held": held})
+}
+
+// apiInterrupt interrupts the turn an agent is working on and answers
+// {"agent": Agent, "interrupted": bool}: false when Esc was pressed but
+// the transcript did not record an interruption in time.
+func (s *Server) apiInterrupt(w http.ResponseWriter, r *http.Request) {
+	a, done, err := s.opts.Source.Interrupt(r.Context(), r.PathValue("id"))
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agent": agentOf(a), "interrupted": done})
 }
 
 // apiSwitchModel switches a running session to another model and/or

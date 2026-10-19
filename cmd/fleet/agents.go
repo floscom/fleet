@@ -284,6 +284,42 @@ func newKillCmd() *cobra.Command {
 	return cmd
 }
 
+func newInterruptCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "interrupt <agent>...",
+		Short: "Interrupt the turn agents are working on, as Esc does",
+		Long: `Interrupt the turn agents are working on, as Esc in their terminal does.
+The agent stays running and waits for the next message.
+
+The daemon waits a few seconds for the agent's transcript to record the
+interruption; if it does not, Esc was pressed but the turn may go on.`,
+		Example: `  fleet interrupt claude-api-1`,
+		Args:    cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return withClient(cmd, func(ctx context.Context, c *client.Client) error {
+				var failed error
+				for _, name := range args {
+					a, done, err := c.InterruptAgent(ctx, name)
+					if err != nil {
+						failed = fmt.Errorf("%s: %w", name, err)
+						fmt.Fprintln(cmd.ErrOrStderr(), "fleet:", failed)
+						continue
+					}
+					if done {
+						fmt.Fprintf(cmd.OutOrStdout(), "interrupted %s (%s)\n", a.GetName(), a.GetId())
+					} else {
+						fmt.Fprintf(cmd.OutOrStdout(), "pressed Esc in %s (%s); its transcript shows no interruption yet\n", a.GetName(), a.GetId())
+					}
+				}
+				if failed != nil {
+					return exitCode(1)
+				}
+				return nil
+			})
+		},
+	}
+}
+
 func newSendCmd() *cobra.Command {
 	var (
 		noEnter bool

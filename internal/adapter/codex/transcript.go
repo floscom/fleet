@@ -133,7 +133,7 @@ func parseLine(line []byte) []transcript.Entry {
 	case "item_completed":
 		out = itemEntries(ev.Item)
 	case "turn_aborted":
-		text := "interrupted"
+		text := transcript.Interrupted
 		if ev.Reason != "" && ev.Reason != "interrupted" {
 			text = "turn aborted: " + ev.Reason
 		}

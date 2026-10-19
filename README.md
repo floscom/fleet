@@ -115,6 +115,7 @@ address. Without it, commands talk to the local daemon.
 | `fleet ls [-a] [--json]` | List agents (`-a` includes exited and failed ones). |
 | `fleet attach <agent> [-r]` | Attach to an agent's terminal. Detach with Ctrl-\\. |
 | `fleet send <agent> [text...] [--image FILE]... [--no-enter]` | Type text into an agent's terminal and press Enter; `--image` attaches image files first. |
+| `fleet interrupt <agent>...` | Interrupt the turn agents are working on, as Esc does; they keep running. |
 | `fleet kill <agent>... [--rm-worktree] [--force] [--forget]` | Stop agents; optionally remove their worktree or clone and history entry. |
 | `fleet note <agent> [text...] [-d]` | Leave a note on an agent (e.g. why it must stay open), shown on its dashboard row and in `fleet ls`; without text prints it, `-d` removes it. |
 | `fleet sandbox build [--pull] [--tag T]` / `sandbox dockerfile` | Build the Docker image sandboxed agents run in (on the server) / print its Dockerfile. |
@@ -565,6 +566,12 @@ on a root, which picks that folder) starts one:
   into `[Image #n]`. Photos over 2000 px are scaled down in the browser
   first; formats the agents cannot read (HEIC) become JPEG. From the CLI:
   `fleet send <agent> --image a.png --image b.png "what changed?"`.
+- **Stop a turn.** While the agent works or waits on a dialog, *Stop*
+  beside *Send* interrupts its turn as Esc in its terminal does; so do Esc
+  (while it works) and Ctrl+C (with no text selected) in the session. The
+  agent keeps running and waits for your next message; a second Esc closes
+  the session. The daemon marks the agent idle once its transcript records
+  the interruption. From the CLI: `fleet interrupt <agent>`.
 - **Screen and keys.** Permission prompts, folder trust and menus are not
   part of the transcript. *Screen* shows the agent's terminal as text
   (refreshed every 1.5 seconds; it opens by itself when the agent needs

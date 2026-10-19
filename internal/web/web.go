@@ -101,6 +101,10 @@ type Source interface {
 	// after text is held back (it would pick the dialog's highlighted
 	// option), which held reports.
 	SendInput(ctx context.Context, agent, text string, submit bool, keys []string, images [][]byte) (held bool, err error)
+	// Interrupt interrupts the turn a live agent is working on, as Esc in
+	// its terminal does, and returns it; interrupted reports that its
+	// transcript recorded the interruption (the agent is idle then).
+	Interrupt(ctx context.Context, agent string) (a *fleetv1.Agent, interrupted bool, err error)
 	// Screen is the visible terminal screen of a live agent.
 	Screen(ctx context.Context, agent string) (string, error)
 	// Chat finds an agent's transcript.

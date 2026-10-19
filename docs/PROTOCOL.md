@@ -849,6 +849,19 @@ effort the adapter does not offer);
 - Errors: `INVALID_ARGUMENT` (empty `agent`, agent not running);
   `NOT_FOUND`.
 
+**`InterruptAgentRequest{agent}` → `InterruptAgentResponse{agent, interrupted}`**
+
+- Interrupts the turn the agent is working on by pressing Esc in its
+  terminal (Claude Code and Codex stop the turn and close the dialog they
+  show), then waits up to 3 s for the transcript to record the
+  interruption. No hook reports a turn interrupted while the model
+  writes, so once the transcript does, the daemon makes the agent `IDLE`
+  (an `agent_upserted` event) and `interrupted` is true. False: Esc was
+  pressed but the turn may go on.
+- Errors: `INVALID_ARGUMENT` (empty `agent`, agent not running, or not
+  `WORKING` or `NEEDS_INPUT`: Esc twice at an idle Claude prompt opens its
+  rewind menu); `NOT_FOUND`.
+
 **`AttachImageRequest{agent, data}` → `AttachImageResponse{path}`**
 
 - Attaches an image to the prompt the agent is composing, as if pasted:
