@@ -51,6 +51,9 @@ type Config struct {
 	Web string `toml:"web,omitempty"`
 	// MDNS enables LAN advertisement. Default true.
 	MDNS *bool `toml:"mdns"`
+	// StayAwake keeps the machine from sleeping while agents have work to
+	// do (macOS: caffeinate). Default true.
+	StayAwake *bool `toml:"stay_awake,omitempty"`
 	// TmuxSocket is the tmux -L socket name. Default: DefaultTmuxSocket.
 	TmuxSocket string `toml:"tmux_socket"`
 	// DefaultIsolation: "worktree" (default; falls back to pinned outside git) or "pinned".
@@ -308,6 +311,9 @@ func (c *Config) Save() error {
 
 // MDNSEnabled reports the effective mdns setting.
 func (c *Config) MDNSEnabled() bool { return c.MDNS == nil || *c.MDNS }
+
+// StayAwakeOn reports the effective stay_awake setting.
+func (c Config) StayAwakeOn() bool { return c.StayAwake == nil || *c.StayAwake }
 
 // writeFileAtomic writes data to a temp file next to path (0600), syncs it
 // and renames it into place.

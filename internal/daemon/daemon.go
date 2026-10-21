@@ -231,6 +231,11 @@ func Run(ctx context.Context, opts Options) error {
 		defer bg.Done()
 		d.agents.gitLoop(ctx)
 	}()
+	bg.Add(1)
+	go func() {
+		defer bg.Done()
+		d.agents.awakeLoop(ctx)
+	}()
 	for i, ln := range lns {
 		bg.Add(1)
 		go func(ln net.Listener, local bool) {

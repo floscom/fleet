@@ -282,6 +282,12 @@ web = "0.0.0.0:7421"
 # Advertise the daemon on the LAN via mDNS (_fleet._tcp). Default true.
 mdns = true
 
+# macOS: keep the machine from sleeping (caffeinate -i -s) while an agent
+# works, runs workflows in the background, or waits up to 6h for its usage
+# limit to reset to be resumed. Closing a laptop's lid still sleeps it on
+# battery. Default true; no effect on other systems.
+stay_awake = true
+
 # tmux -L socket name. Default "fleet" for ~/.fleet, and
 # "fleet-<hash of FLEET_HOME>" for any other FLEET_HOME.
 tmux_socket = "fleet"
