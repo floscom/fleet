@@ -356,7 +356,9 @@ there needed. That browser then shows **admin** in the header and can:
 - **Add folders as roots**: *Roots → Add folder* opens a folder picker
   over the server's file system. Walk into folders (click, or type to
   filter and press Enter; Backspace goes up), paste a path, show hidden
-  folders; git repositories and existing roots are marked. Then pick a
+  folders; git repositories and existing roots are marked. *New folder*
+  makes a folder in the one shown and opens it (ticking *Trust*, since a
+  new, empty folder has nothing to run). Then pick a
   name, optionally limit it to some agents, optionally trust it (see
   [Folder trust](#folder-trust)) and add the current folder.
 - **Edit roots**: *Roots → edit* opens the folder picker with the current
@@ -486,8 +488,17 @@ With the admin link, every agent row has an **open** button (**answer** when
 it needs input), and *Agents → New session* (or the **N** key, or **▸ start**
 on a root, which picks that folder) starts one:
 
-- **Start**: pick the machine, the agent (Claude Code, Codex, shell), a
-  root and a folder inside it, and optionally a prompt.
+- **Start**: one line of pickers (the folder, the agent: Claude Code,
+  Codex or a shell, its model and effort; the machine next to the title
+  when the fleet has more than one), then the prompt, which is optional.
+  The folder is the last one a session started in; click it (or
+  Ctrl/⌘+K) for recent folders, the other roots, a search over all of
+  them and the folders inside them, and › to look inside one. A folder
+  starts in the most specific root around it, so `~/app` gets the agents
+  and trust of the root `~/app` even when found through a root `~`.
+  **New folder** (or a search that finds nothing) makes a folder anywhere
+  on the machine, `~/` or an absolute path, adds it as a root, trusted
+  unless unticked, and chooses it (`POST /api/fs`, then `POST /api/roots`).
   Agent rows show a small provider logo on the right. The launcher remembers
   the last successfully used provider for each root on each machine, using
   recent sessions on other browsers and local storage after sessions are
@@ -495,13 +506,14 @@ on a root, which picks that folder) starts one:
   installed provider the root allows.
   *Model* and *Effort* choose what the agent runs at (Claude Code: Opus,
   Fable, Sonnet, Haiku at Low to Max or Ultracode; Codex: the models it
-  lists), *Default* leaves it to the CLI's own settings; the page remembers
-  the pick per agent. *Checkout* (worktree or the folder itself) and
+  lists), *default* leaves it to the CLI's own settings; the page remembers
+  the pick per agent. Folded under *Options*, which sums up whatever is
+  not the default: *Checkout* (worktree or the folder itself) and
   *Sandbox* (Docker or not) are click choices like `fleet run`'s flags, *Then*
   opens the chat, the chat with the terminal screen, or stays on the list;
-  the page remembers them. *Name & branch* are optional. Keys: Ctrl/⌘+Enter
-  starts, Ctrl/⌘+Shift+Enter starts and shows the screen, Alt+1–9 picks the
-  agent.
+  the page remembers them. *Name* and *Branch* are optional. Keys:
+  Ctrl/⌘+Enter starts, Ctrl/⌘+Shift+Enter starts and shows the screen,
+  Ctrl/⌘+K opens the folders, Alt+1–9 picks the agent.
 - **Roots**: with more than six, the list shows the first six, a filter and
   *Show all*.
 - **Model and effort.** Under the message box, *model* and *effort* show

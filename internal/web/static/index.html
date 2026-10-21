@@ -268,9 +268,17 @@
       <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <nav id="picker-crumbs" aria-label="Current folder" class="flex min-w-0 flex-wrap items-center font-mono text-xs"></nav>
         <div class="flex shrink-0 items-center gap-3">
+          <button id="picker-new" type="button" class="touch:min-h-11 rounded px-1.5 py-0.5 text-xs font-medium text-emerald-300 hover:bg-ink-800 hover:text-emerald-200 focus-visible:outline-2 focus-visible:outline-emerald-400"><span aria-hidden="true">+</span> New folder</button>
           <button id="picker-home" type="button" class="touch:min-h-11 rounded px-1.5 py-0.5 font-mono text-xs text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400">~ home</button>
           <label class="touch:min-h-11 inline-flex cursor-pointer select-none items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-300"><input id="picker-hidden" type="checkbox" class="accent-emerald-400"> hidden folders</label>
         </div>
+      </div>
+      <!-- A new folder in the one shown; it is opened, ready to be added. -->
+      <div id="picker-new-row" hidden class="flex gap-2">
+        <label for="picker-new-name" class="sr-only">Name of the new folder</label>
+        <input id="picker-new-name" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="name of the new folder" class="touch:min-h-11 min-w-0 flex-1 rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+        <button id="picker-new-create" type="button" class="touch:min-h-11 shrink-0 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-3 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Create</button>
+        <button id="picker-new-cancel" type="button" aria-label="Cancel the new folder" class="touch:min-h-11 touch:min-w-11 shrink-0 rounded-md px-2 py-1 text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400">✕</button>
       </div>
     </div>
 
@@ -307,68 +315,92 @@
   </form>
 </dialog>
 
-<!-- Phones: full screen, like the chat. Only the middle scrolls, so Start stays in reach. -->
+<!-- Phones: full screen, like the chat. Only the middle scrolls, so Start stays in reach.
+     Where and with what on one line of pickers, then the prompt; the rest is folded. -->
 <dialog id="launch" aria-labelledby="launch-h" class="m-auto max-h-[calc(100dvh-1.5rem)] w-[min(720px,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-xl border border-ink-600 bg-ink-900 p-0 text-[14px] text-zinc-300 shadow-2xl shadow-black/60 backdrop:bg-black/70 open:flex max-sm:h-dvh max-sm:max-h-none max-sm:w-screen max-sm:max-w-none max-sm:rounded-none max-sm:border-0">
   <form id="launch-form" class="flex min-h-0 flex-1 flex-col" novalidate>
-    <div class="flex shrink-0 items-start justify-between gap-3 border-b border-ink-700 px-4 py-3">
-      <div class="min-w-0">
+    <div class="flex shrink-0 items-center justify-between gap-3 border-b border-ink-700 px-4 py-2.5">
+      <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
         <h2 id="launch-h" class="text-sm font-semibold text-zinc-100">Start a session</h2>
-        <p class="mt-0.5 text-xs text-zinc-500">Runs an agent in tmux on <span id="launch-host" class="font-mono text-zinc-400">the server</span>. Follow it, answer it and stop it from here.</p>
+        <span class="text-xs text-zinc-500">on</span>
+        <span id="launch-host" class="font-mono text-xs text-zinc-300">the server</span>
+        <label id="launch-hosts-wrap" hidden class="touch:min-h-11 inline-flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-900 pl-2 hover:border-zinc-500 focus-within:border-emerald-400/60 focus-within:ring-2 focus-within:ring-emerald-400/20">
+          <span id="launch-host-dot" aria-hidden="true"></span>
+          <span class="sr-only">Machine</span>
+          <select id="launch-hosts" class="min-w-0 max-w-48 field-sizing-content bg-transparent py-1 pr-1 font-mono text-xs max-sm:text-base pointer-coarse:text-base text-zinc-200 focus:outline-none"></select>
+        </label>
       </div>
       <button id="launch-close" type="button" aria-label="Close" class="touch:min-h-11 touch:min-w-11 -mr-1 rounded-md px-2 py-1 text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400">✕</button>
     </div>
 
-    <div id="launch-body" class="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-      <div class="flex flex-col gap-3 border-b border-ink-700 px-4 py-3 sm:gap-2.5">
-        <div class="flex flex-col gap-1.5 sm:grid sm:grid-cols-[4.5rem_1fr] sm:items-baseline sm:gap-3">
-          <span id="launch-hosts-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Machine</span>
-          <div id="launch-hosts" role="radiogroup" aria-labelledby="launch-hosts-label" class="flex flex-wrap gap-1.5"></div>
+    <div id="launch-body" class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overscroll-contain px-4 py-3">
+      <div class="flex flex-wrap items-center gap-1.5">
+        <button id="launch-folder-btn" type="button" aria-expanded="false" aria-controls="launch-folders" class="touch:min-h-11 group inline-flex min-w-0 max-w-full items-center gap-2 rounded-md border border-ink-600 bg-ink-900 px-2 py-1 text-left hover:border-zinc-500 aria-expanded:border-emerald-400/50 aria-expanded:bg-emerald-400/5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">
+          <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" class="size-3.5 shrink-0 text-zinc-500"><path d="M1.75 4.25v8a1 1 0 0 0 1 1h10.5a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1H8L6.5 3.25H2.75a1 1 0 0 0-1 1Z"/></svg>
+          <span class="sr-only">Folder:</span>
+          <span id="launch-folder" class="min-w-0 truncate font-mono text-[12.5px] text-zinc-100">choose a folder</span>
+          <span id="launch-folder-git" hidden class="inline-flex shrink-0 items-center rounded border border-violet-400/25 bg-violet-400/10 px-1.5 py-px font-mono text-[10px] text-violet-300">git</span>
+          <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="size-3 shrink-0 text-zinc-500 transition-transform group-aria-expanded:rotate-180 motion-reduce:transition-none"><path d="m4 6 4 4 4-4"/></svg>
+        </button>
+        <label id="launch-adapter-wrap" class="touch:min-h-11 inline-flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-900 pl-2 hover:border-zinc-500 focus-within:border-emerald-400/60 focus-within:ring-2 focus-within:ring-emerald-400/20">
+          <span id="launch-adapter-logo" class="contents"></span>
+          <span class="sr-only">Agent</span>
+          <select id="launch-adapters" class="min-w-0 field-sizing-content bg-transparent py-1 pr-1 font-mono text-[12px] max-sm:text-base pointer-coarse:text-base text-zinc-200 focus:outline-none disabled:text-zinc-500"></select>
+        </label>
+        <label id="launch-model-wrap" hidden class="touch:min-h-11 inline-flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-900 pl-2 hover:border-zinc-500 focus-within:border-emerald-400/60 focus-within:ring-2 focus-within:ring-emerald-400/20">
+          <span class="text-[11px] text-zinc-500">model</span>
+          <select id="launch-model" class="min-w-0 field-sizing-content bg-transparent py-1 pr-1 font-mono text-[12px] max-sm:text-base pointer-coarse:text-base text-zinc-200 focus:outline-none"></select>
+        </label>
+        <label id="launch-effort-wrap" hidden class="touch:min-h-11 inline-flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-900 pl-2 hover:border-zinc-500 focus-within:border-emerald-400/60 focus-within:ring-2 focus-within:ring-emerald-400/20">
+          <span class="text-[11px] text-zinc-500">effort</span>
+          <select id="launch-effort" class="min-w-0 field-sizing-content bg-transparent py-1 pr-1 font-mono text-[12px] max-sm:text-base pointer-coarse:text-base text-zinc-200 focus:outline-none"></select>
+        </label>
+      </div>
+
+      <!-- The folder picker, open while choosing: recent folders and roots, search, look inside (›), new folder. -->
+      <div id="launch-folders" hidden class="-mt-1 flex h-80 shrink-0 flex-col overflow-hidden rounded-md border border-ink-700 bg-ink-950/60 focus-within:border-emerald-400/40 max-sm:h-auto">
+        <div class="flex shrink-0 items-center gap-2 border-b border-ink-700 px-2.5">
+          <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="size-3.5 shrink-0 text-zinc-600"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></svg>
+          <label for="launch-search" class="sr-only">Search folders</label>
+          <input id="launch-search" type="search" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="Search folders · ↓ to move · → to look inside" class="touch:min-h-11 min-w-0 flex-1 bg-transparent py-2 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:outline-none">
         </div>
-        <div class="flex flex-col gap-1.5 sm:grid sm:grid-cols-[4.5rem_1fr] sm:items-baseline sm:gap-3">
-          <span id="launch-adapters-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Agent</span>
-          <div id="launch-adapters" role="radiogroup" aria-labelledby="launch-adapters-label" class="flex min-h-8 flex-wrap items-center gap-1.5"></div>
-        </div>
-        <div id="launch-model-row" hidden class="flex flex-col gap-3 sm:gap-2.5">
-          <div class="flex flex-col gap-1.5 sm:grid sm:grid-cols-[4.5rem_1fr] sm:items-baseline sm:gap-3">
-            <span id="launch-model-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Model</span>
-            <div id="launch-model" role="radiogroup" aria-labelledby="launch-model-label" class="flex flex-wrap items-center gap-1.5"></div>
-          </div>
-          <div class="flex flex-col gap-1.5 sm:grid sm:grid-cols-[4.5rem_1fr] sm:items-baseline sm:gap-3">
-            <span id="launch-effort-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Effort</span>
-            <div id="launch-effort" role="radiogroup" aria-labelledby="launch-effort-label" class="flex min-h-8 flex-wrap items-center gap-1.5"></div>
+        <nav id="launch-crumbs" hidden aria-label="Folder you are looking into" class="flex min-w-0 shrink-0 items-center gap-1 border-b border-ink-700 bg-ink-900/60 py-1 pl-1 pr-2.5 font-mono text-xs"></nav>
+        <ul id="launch-list" aria-label="Folders" class="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1 transition-opacity max-sm:max-h-[50dvh]"></ul>
+        <div class="shrink-0 border-t border-ink-700 bg-ink-900/60">
+          <button id="launch-new-open" type="button" class="touch:min-h-11 flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs font-medium text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400"><span aria-hidden="true" class="w-3 text-center text-emerald-400">+</span> New folder <span class="font-normal text-zinc-600">· becomes a root</span></button>
+          <div id="launch-new" hidden class="flex flex-col gap-1.5 px-2.5 py-2">
+            <div class="flex gap-1.5">
+              <label for="launch-new-path" class="sr-only">New folder</label>
+              <input id="launch-new-path" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="~/new-project" class="touch:min-h-11 min-w-0 flex-1 rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
+              <button id="launch-new-create" type="button" class="touch:min-h-11 shrink-0 rounded-md border border-emerald-400/30 bg-emerald-400/10 px-2.5 py-1 text-xs font-medium text-emerald-300 hover:bg-emerald-400/20 disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Create</button>
+              <button id="launch-new-cancel" type="button" aria-label="Cancel the new folder" class="touch:min-h-11 touch:min-w-11 shrink-0 rounded-md px-2 py-1 text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400">✕</button>
+            </div>
+            <label class="touch:min-h-11 flex cursor-pointer items-start gap-2 text-xs leading-relaxed text-zinc-500">
+              <input id="launch-new-trust" type="checkbox" checked class="mt-0.5 accent-amber-400">
+              <span><span class="text-zinc-300">Trust it</span>: agents skip the "Do you trust this folder?" prompt. Safe for a new, empty folder.</span>
+            </label>
+            <div id="launch-new-status" role="status" aria-live="polite" class="min-h-4 break-words text-xs text-zinc-500"></div>
           </div>
         </div>
       </div>
 
-      <div class="flex flex-col gap-1.5 border-b border-ink-700 px-4 py-3">
-        <div class="flex min-w-0 items-baseline gap-3">
-          <label for="launch-search" class="shrink-0 text-[11px] font-medium uppercase tracking-wider text-zinc-500">Folder</label>
-          <span id="launch-folder" class="min-w-0 truncate font-mono text-xs text-zinc-200"></span>
-        </div>
-        <div class="flex h-80 flex-col overflow-hidden rounded-md border border-ink-700 bg-ink-950/60 focus-within:border-emerald-400/40 max-sm:h-auto">
-          <div class="flex shrink-0 items-center gap-2 border-b border-ink-700 px-2.5">
-            <svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" class="size-3.5 shrink-0 text-zinc-600"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></svg>
-            <input id="launch-search" type="search" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="Search folders · ↓ to move · → to look inside" class="touch:min-h-11 min-w-0 flex-1 bg-transparent py-2 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:outline-none">
-          </div>
-          <nav id="launch-crumbs" hidden aria-label="Folder you are looking into" class="flex min-w-0 shrink-0 items-center gap-1 border-b border-ink-700 bg-ink-900/60 py-1 pl-1 pr-2.5 font-mono text-xs"></nav>
-          <ul id="launch-list" aria-label="Folders" class="min-h-0 flex-1 overflow-y-auto overscroll-contain p-1 transition-opacity max-sm:max-h-[50dvh]"></ul>
+      <div class="flex shrink-0 flex-col rounded-md border border-ink-600 bg-ink-950 focus-within:border-emerald-400/60 focus-within:ring-2 focus-within:ring-emerald-400/20">
+        <label for="launch-prompt" class="sr-only">Prompt</label>
+        <textarea id="launch-prompt" rows="4" spellcheck="true" placeholder="What should the agent do? · Ctrl+Enter starts" class="block max-h-[40dvh] min-h-24 w-full resize-none bg-transparent max-sm:min-h-[35dvh] px-2.5 py-2 text-[13px] leading-relaxed max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:outline-none"></textarea>
+        <!-- Images and videos that go with the prompt, for agents that take them. -->
+        <ul id="launch-images" hidden aria-label="Images and videos to send with the prompt" class="flex flex-wrap gap-2 px-2.5 pb-1.5"></ul>
+        <div class="flex items-center gap-2 px-1.5 pb-1.5">
+          <input id="launch-file" type="file" accept="image/*,video/*" multiple hidden>
+          <button id="launch-attach" type="button" title="Attach images or videos to the prompt (or paste / drop them)" class="touch:min-h-11 inline-flex items-center gap-1.5 rounded-md px-1.5 py-1 text-xs text-zinc-500 hover:bg-ink-800 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-500 focus-visible:outline-2 focus-visible:outline-emerald-400"><svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="size-4"><rect x="2.5" y="3.5" width="15" height="13" rx="2"/><circle cx="7" cy="8" r="1.5"/><path d="m17.5 13-4-4-7.5 7.5"/></svg>Attach</button>
+          <span class="ml-auto min-w-0 truncate pr-1 text-[11px] text-zinc-600">optional: without one the agent waits for your first message</span>
         </div>
       </div>
 
-      <div class="flex flex-col gap-3 px-4 py-3">
-        <div>
-          <label class="block">
-            <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Prompt <span class="normal-case tracking-normal text-zinc-600">· optional, the agent waits for your first message without one</span></span>
-            <textarea id="launch-prompt" rows="3" spellcheck="true" placeholder="What should the agent do? · Ctrl+Enter starts" class="mt-1 block max-h-[40dvh] min-h-20 w-full resize-none rounded-md border border-ink-600 bg-ink-950 px-2.5 py-2 text-[13px] leading-relaxed max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20"></textarea>
-          </label>
-          <!-- Images that go with the prompt, for agents that take them. -->
-          <div class="mt-1.5 flex flex-wrap items-start gap-2">
-            <input id="launch-file" type="file" accept="image/*,video/*" multiple hidden>
-            <button id="launch-attach" type="button" title="Attach images or videos to the prompt (or paste / drop them)" class="touch:min-h-11 inline-flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-900 px-2 py-1 text-xs text-zinc-400 hover:border-zinc-500 hover:bg-ink-800 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-ink-600 disabled:hover:bg-ink-900 disabled:hover:text-zinc-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400"><svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="size-4"><rect x="2.5" y="3.5" width="15" height="13" rx="2"/><circle cx="7" cy="8" r="1.5"/><path d="m17.5 13-4-4-7.5 7.5"/></svg>Attach</button>
-            <ul id="launch-images" hidden aria-label="Images and videos to send with the prompt" class="flex flex-wrap gap-2 pt-1.5"></ul>
-          </div>
-        </div>
-        <div class="flex flex-col gap-3 sm:gap-2.5">
+      <details id="launch-more" class="group shrink-0 rounded-md border border-ink-700 bg-ink-850/40">
+        <summary class="touch:min-h-11 flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400">
+          <span class="inline-block transition-transform group-open:rotate-90 motion-reduce:transition-none">▸</span> Options <span id="launch-more-note" class="min-w-0 truncate font-normal text-zinc-600"></span>
+        </summary>
+        <div class="flex flex-col gap-3 border-t border-ink-700 px-3 py-3 sm:gap-2.5">
           <div class="flex flex-col gap-1.5 sm:grid sm:grid-cols-[4.5rem_1fr] sm:items-baseline sm:gap-3">
             <span id="launch-iso-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Checkout</span>
             <div id="launch-iso" role="radiogroup" aria-labelledby="launch-iso-label" class="flex flex-wrap items-center gap-1.5"></div>
@@ -381,12 +413,7 @@
             <span id="launch-then-label" class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Then</span>
             <div id="launch-then" role="radiogroup" aria-labelledby="launch-then-label" class="flex flex-wrap items-center gap-1.5"></div>
           </div>
-        </div>
-        <details id="launch-more" class="group rounded-md border border-ink-700 bg-ink-850/40">
-          <summary class="touch:min-h-11 flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-xs font-medium text-zinc-400 hover:text-zinc-200 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400">
-            <span class="inline-block transition-transform group-open:rotate-90 motion-reduce:transition-none">▸</span> Name &amp; branch <span id="launch-more-note" class="font-normal text-zinc-600">· generated</span>
-          </summary>
-          <div class="grid gap-3 border-t border-ink-700 px-3 py-3 sm:grid-cols-2">
+          <div class="grid gap-3 sm:grid-cols-2">
             <label class="block">
               <span class="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Name</span>
               <input id="launch-name" type="text" spellcheck="false" autocomplete="off" maxlength="64" placeholder="generated" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
@@ -396,13 +423,12 @@
               <input id="launch-branch" type="text" spellcheck="false" autocomplete="off" maxlength="200" placeholder="fleet/&lt;name&gt;" class="touch:min-h-11 mt-1 w-full rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 font-mono text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-400/60 focus:outline-none focus:ring-2 focus:ring-emerald-400/20">
             </label>
           </div>
-        </details>
-      </div>
+        </div>
+      </details>
     </div>
 
     <div class="flex shrink-0 flex-wrap items-center justify-end gap-x-3 gap-y-2 border-t border-ink-700 px-4 py-3 max-sm:pb-[max(0.75rem,env(safe-area-inset-bottom))]">
       <div id="launch-status" role="status" aria-live="polite" class="min-h-5 min-w-0 basis-full text-xs sm:basis-0 sm:flex-1"></div>
-      <div id="launch-keys" hidden class="flex touch:hidden basis-full flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-zinc-600 sm:order-last"></div>
       <button id="launch-cancel" type="button" class="touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Cancel</button>
       <button id="launch-start" type="submit" class="touch:min-h-11 rounded-md bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400">Start</button>
     </div>

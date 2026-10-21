@@ -7,17 +7,19 @@ const { join } = require('node:path');
 const vm = require('node:vm');
 
 const app = readFileSync(join(__dirname, 'static/app.js'), 'utf8');
+const places = app.slice(app.indexOf('  const within ='), app.indexOf('  // tilde writes'));
 const providers = app.slice(app.indexOf("  const LAUNCH_PROVIDERS ="), app.indexOf('  function renderLaunch()'));
 const start = app.slice(app.indexOf('  async function startSession('), app.indexOf('  function wireLaunch()'));
 const adapters = [{ id: 'claude', available: true }, { id: 'codex', available: true }, { id: 'shell', available: true }];
 
 function dashboard(storage = new Map(), storageBlocked = false) {
   const roots = [{ name: 'one', path: '/code/one' }, { name: 'two', path: '/code/two' }];
-  const launch = { host: '', root: 'one', adapter: '', adapterRoot: '', adapters, images: [] };
+  const launch = { host: '', path: '/code/one', adapter: '', adapterRoot: '', adapters, images: [] };
   const S = { server: { id: 'local' }, agents: new Map(), remote: new Map() };
   const context = vm.createContext({
     S, launch, Date, root: roots[0],
-    launchRoot: () => roots.find((r) => r.name === launch.root),
+    launchRoots: () => roots,
+    joinPath: (dir, name) => (dir.endsWith('/') ? dir : dir + '/') + name,
     localStorage: {
       getItem: (key) => { if (storageBlocked) throw Error('blocked'); return storage.get(key) || null; },
       setItem: (key, value) => { if (storageBlocked) throw Error('blocked'); storage.set(key, value); },
@@ -25,9 +27,10 @@ function dashboard(storage = new Map(), storageBlocked = false) {
     $: () => ({ value: '' }), checkedValue: () => '', launchImagesProblem: () => '',
     renderLaunch: () => {}, launchPick: () => null, launchAPI: () => '/api/agents',
     closeLaunch: () => {}, toast: () => {}, hostName: () => '', openChat: () => {}, invalidate: () => {},
+    withVideos: (prompt) => prompt,
     api: async () => ({ agent: { id: 'new', name: 'new' } }),
   });
-  vm.runInContext(providers + '\n' + start, context);
+  vm.runInContext(places + '\n' + providers + '\n' + start, context);
   const pick = (list = adapters) => { context.list = list; vm.runInContext('pickAdapter(list)', context); return launch.adapter; };
   const remember = (host, root, adapter) => {
     Object.assign(context, { rememberedHost: host, rememberedRoot: root, rememberedAdapter: adapter });
@@ -42,9 +45,9 @@ test('restores different providers per root, including after a page reload', () 
   d.remember('', d.roots[0], 'codex');
   d.remember('', d.roots[1], 'shell');
   assert.equal(d.pick(), 'codex');
-  d.launch.root = 'two';
+  d.launch.path = '/code/two';
   assert.equal(d.pick(), 'shell');
-  d.launch.root = 'one';
+  d.launch.path = '/code/one';
   assert.equal(d.pick(), 'codex');
   assert.equal(dashboard(storage).pick(), 'codex');
 });
@@ -63,7 +66,7 @@ test('explicit choices survive rerenders and changes of subfolder', () => {
   d.remember('', d.roots[0], 'codex');
   assert.equal(d.pick(), 'codex');
   d.launch.adapter = 'shell';
-  d.launch.sub = 'nested';
+  d.launch.path = '/code/one/nested';
   assert.equal(d.pick(), 'shell');
   d.launch.adapterRoot = ''; // opening the dialog again restores the last launch
   assert.equal(d.pick(), 'codex');
@@ -127,7 +130,7 @@ test('successful launches remember the submitted root/provider even if the UI ch
   let resolve;
   d.context.api = () => new Promise((r) => { resolve = r; });
   const pending = vm.runInContext('startSession({ preventDefault() {} })', d.context);
-  d.launch.root = 'two';
+  d.launch.path = '/code/two';
   d.launch.adapter = 'shell';
   resolve({ agent: { id: 'new', name: 'new' } });
   await pending;
@@ -145,4 +148,32 @@ test('failed launches keep the previous successful preference', async () => {
   d.context.api = async () => { throw Error('start failed'); };
   await vm.runInContext('startSession({ preventDefault() {} })', d.context);
   assert.equal(dashboard(storage).pick(), 'codex');
+});
+
+test('a folder starts in the most specific root around it, however it was found', async () => {
+  const d = dashboard();
+  d.roots.push({ name: 'code', path: '/code' }, { name: 'top', path: '/' });
+  const place = (path) => {
+    d.context.asked = path;
+    const p = vm.runInContext('placeOf(asked)', d.context);
+    return p && [p.root.name, p.sub];
+  };
+  assert.deepEqual(place('/code/one'), ['one', '']);
+  assert.deepEqual(place('/code/one/a/b'), ['one', 'a/b']);
+  assert.deepEqual(place('/code/onesie'), ['code', 'onesie']);
+  assert.deepEqual(place('/code'), ['code', '']);
+  assert.deepEqual(place('/etc'), ['top', 'etc']);
+  assert.deepEqual(place('/'), ['top', '']);
+  d.roots.pop();
+  assert.equal(place('/etc'), null);
+  assert.equal(place(''), null);
+
+  let sent;
+  d.context.api = async (method, path, body) => { sent = body; return { agent: { id: 'new', name: 'new' } }; };
+  d.launch.path = '/code/two/sub';
+  d.launch.adapter = 'shell';
+  d.launch.then = 'stay';
+  await vm.runInContext('startSession({ preventDefault() {} })', d.context);
+  assert.equal(sent.root, 'two');
+  assert.equal(sent.path, 'sub');
 });

@@ -299,6 +299,8 @@ func TestForwardable(t *testing.T) {
 		{"GET", "agents/a1/b/chat", false},
 		{"DELETE", "agents/a1", false},
 		{"GET", "roots", true},
+		{"POST", "fs", true},
+		{"PUT", "fs", false},
 		{"PUT", "roots/my root", true},
 		{"PUT", "roots", false},
 		{"PUT", "roots/", false},

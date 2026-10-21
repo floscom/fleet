@@ -32,6 +32,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	fleetv1 "fleet/gen/fleetv1"
@@ -247,6 +248,7 @@ func holds(path, got string) bool {
 func (s *Server) apiHandler() http.Handler {
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /api/fs", s.apiListDir)
+	admin.HandleFunc("POST /api/fs", s.apiMakeDir)
 	admin.HandleFunc("GET /api/adapters", s.apiAdapters)
 	admin.HandleFunc("GET /api/usage", s.apiUsage)
 	admin.HandleFunc("GET /api/host", s.apiHostStats)
@@ -383,6 +385,24 @@ func (s *Server) apiListDir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, dir)
+}
+
+// apiMakeDir creates the folder {"path"} and answers {"path"} with its
+// real path, for a new root or a folder to start in.
+func (s *Server) apiMakeDir(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	path, err := makeDir(req.Path)
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"path": path})
 }
 
 func (s *Server) apiAdapters(w http.ResponseWriter, r *http.Request) {
@@ -534,6 +554,39 @@ func listDir(path string, hidden bool) (Dir, error) {
 		out.Entries, out.Truncated = out.Entries[:maxDirEntries], true
 	}
 	return out, nil
+}
+
+// makeDir creates the folder path, absolute or under "~/", and the
+// folders leading to it. It must not exist yet: a new folder is asked for.
+func makeDir(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", &Error{http.StatusBadRequest, "no home directory to put " + path + " in"}
+		}
+		path = filepath.Join(home, path[1:])
+	}
+	if !filepath.IsAbs(path) {
+		return "", &Error{http.StatusBadRequest, fmt.Sprintf("%q is not an absolute path", path)}
+	}
+	path = filepath.Clean(path)
+	if _, err := os.Lstat(path); err == nil {
+		return "", &Error{http.StatusConflict, path + " already exists"}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return "", fsError(path, err)
+	}
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		if errors.Is(err, syscall.ENOTDIR) {
+			return "", &Error{http.StatusBadRequest, path + ": a file is in the way"}
+		}
+		return "", fsError(path, err)
+	}
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fsError(path, err)
+	}
+	return real, nil
 }
 
 // fsError maps a filesystem error on path to an *Error.

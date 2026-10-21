@@ -1690,6 +1690,7 @@
     error: '',
     busy: false, // a save is in flight
     editing: null, // original root while editing; its name identifies the update
+    making: false, // a new folder is being made
     adapters: null, // [{id, name, available}] once loaded
     roots: null, // roots of another machine, once loaded
     joinCmd: '', // `fleet start --join <key>`, once loaded
@@ -1756,6 +1757,7 @@
     $('picker-name').value = editing ? editing.name : '';
     $('picker-trust').checked = !!editing && !!editing.trust;
     $('picker-filter').value = '';
+    showNewFolder(false);
     picker.error = '';
     picker.open = true;
     if (picker.host && !pickerHosts().some((x) => x.id === picker.host)) resetHost('');
@@ -1922,6 +1924,7 @@
   function selectHost(id) {
     if (picker.host === id || picker.editing || picker.busy) return;
     resetHost(id);
+    showNewFolder(false);
     $('picker-path').value = '';
     $('picker-filter').value = '';
     $('picker-name').value = '';
@@ -2152,6 +2155,47 @@
     return h('li', '', b);
   }
 
+  // New folder: made in the folder shown, which then shows it, ready to be
+  // added. A folder of one's own is trusted unless unticked.
+
+  function showNewFolder(open) {
+    $('picker-new-row').hidden = !open;
+    $('picker-new').setAttribute('aria-expanded', String(open));
+    $('picker-new-name').value = '';
+    renderNewPickerFolder();
+    if (open) $('picker-new-name').focus();
+  }
+
+  function renderNewPickerFolder() {
+    const name = $('picker-new-name').value.trim();
+    $('picker-new-create').disabled = picker.making || !picker.dir || !name || name.startsWith('/');
+    $('picker-new-create').textContent = picker.making ? 'Creating…' : 'Create';
+  }
+
+  async function makePickerFolder() {
+    const name = $('picker-new-name').value.trim();
+    const dir = picker.dir;
+    if (picker.making || !dir || !name || name.startsWith('/')) return;
+    const host = picker.host;
+    picker.making = true;
+    renderNewPickerFolder();
+    try {
+      const made = await api('POST', hostAPI('fs'), { path: joinPath(dir.path, name) });
+      if (host === picker.host && picker.open) {
+        showNewFolder(false);
+        $('picker-trust').checked = true;
+        browse(made.path);
+      }
+    } catch (e) {
+      if (host === picker.host) {
+        picker.error = e.status === 405 ? `${hostName(host)} runs an older fleet: update it to make folders from here` : e.message;
+        renderPicker();
+      }
+    }
+    picker.making = false;
+    renderNewPickerFolder();
+  }
+
   async function saveRoot(ev) {
     ev.preventDefault();
     const dir = picker.dir;
@@ -2196,6 +2240,23 @@
     $('picker-close').addEventListener('click', closePicker);
     $('picker-cancel').addEventListener('click', closePicker);
     $('picker-home').addEventListener('click', () => browse(''));
+    $('picker-new').addEventListener('click', () => showNewFolder($('picker-new-row').hidden));
+    $('picker-new-cancel').addEventListener('click', () => {
+      showNewFolder(false);
+      $('picker-new').focus();
+    });
+    $('picker-new-create').addEventListener('click', makePickerFolder);
+    $('picker-new-name').addEventListener('input', renderNewPickerFolder);
+    $('picker-new-name').addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault(); // makes the folder, never adds the root
+        makePickerFolder();
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        showNewFolder(false);
+        $('picker-new').focus();
+      }
+    });
     $('picker-go').addEventListener('click', goToTyped);
     $('picker-hidden').addEventListener('change', () => browse(picker.dir ? picker.dir.path : ''));
     $('picker-hosts').addEventListener('change', (ev) => {
@@ -2510,24 +2571,33 @@
 
   // --------------------------------------------------------------- launcher
   //
-  // Start a session: machine, agent CLI, a folder inside one of its roots,
-  // an optional prompt, with images. Other machines are reached through
-  // /api/hosts/.
+  // Start a session: a folder on a machine, the agent CLI with its model
+  // and effort, and a prompt, with images. One line of pickers, then the
+  // prompt; checkout, sandbox, name and branch are folded under Options.
+  // Other machines are reached through /api/hosts/.
+  //
+  // A folder starts in the most specific root around it, however it was
+  // found (a recent session, a root, inside another root), so it always
+  // gets the same agents and trust.
 
   const launch = {
     open: false,
     host: '', // server id; '' = this daemon
     adapters: null, // [{id, name, available, images, models, efforts}] of the machine
     roots: null, // roots of another machine (this one's are S.roots)
-    root: '', // chosen folder: a root name
-    sub: '', // and a folder inside it, relative, '' = the root itself
-    look: null, // {root, sub} the folder list looks into; null = recent folders and roots
-    dirs: new Map(), // dirKey -> {root, sub, entries, truncated, error}, entries null while listed
+    path: '', // chosen folder, absolute; '' = none yet
+    want: null, // {root, sub} asked for before the machine's roots are known
+    home: '', // the machine's home folder, as its listings say
+    folders: false, // the folder picker is open
+    look: '', // folder the picker looks into; '' = recent folders and roots
+    dirs: new Map(), // path -> {path, entries, truncated, error}, entries null while listed
     adapter: '',
     adapterRoot: '', // host/root whose provider was restored during this opening
     gen: 0, // bumped for another machine or on close: stale replies are dropped
     busy: false, // a start is in flight
+    making: false, // a new folder is being made
     error: '',
+    hostSig: '', // what the machine picker shows
     listSig: '', // what the folder list shows (see renderLaunchList)
     listView: '', // and which list: a new one scrolls back to the top
     listShown: false, // the chosen folder was scrolled into view in it
@@ -2540,9 +2610,25 @@
 
   const launchAPI = (path) => (launch.host ? `/api/hosts/${encodeURIComponent(launch.host)}/${path}` : '/api/' + path);
   const launchRoots = () => (launch.host ? launch.roots || [] : S.roots);
-  const launchRoot = () => launchRoots().find((r) => r.name === launch.root);
-  const dirKey = (root, sub) => JSON.stringify([root, sub]);
   const inRoot = (r, sub) => (sub ? joinPath(r.path, sub) : r.path);
+  const within = (path, dir) => path === dir || path.startsWith(joinPath(dir, ''));
+  const parentOf = (p) => (p.lastIndexOf('/') > 0 ? p.slice(0, p.lastIndexOf('/')) : p.length > 1 ? '/' : '');
+
+  // placeOf is where a session in path starts: {root, sub} of the most
+  // specific root around it, or null outside every root.
+  function placeOf(path) {
+    let best = null;
+    for (const r of launchRoots()) {
+      if (path && within(path, r.path) && (!best || r.path.length > best.path.length)) best = r;
+    }
+    return best && { root: best, sub: path === best.path ? '' : path.slice(joinPath(best.path, '').length) };
+  }
+
+  const launchPlace = () => placeOf(launch.path);
+  const launchRoot = () => (launchPlace() || {}).root;
+
+  // tilde writes path from the machine's home as ~, for a path typed on.
+  const tilde = (p) => (launch.home && within(p, launch.home) ? '~' + p.slice(launch.home.replace(/\/$/, '').length) : p);
 
   // openLaunch opens the dialog; opts.root (with opts.host, opts.sub)
   // chooses the folder to start in.
@@ -2553,8 +2639,8 @@
     launch.busy = false;
     if (opts && opts.root) {
       launch.host = opts.host || '';
-      launch.root = opts.root;
-      launch.sub = opts.sub || '';
+      launch.want = { root: opts.root, sub: opts.sub || '' };
+      launch.path = '';
     }
     if (launch.host && !pickerHosts().some((x) => x.id === launch.host)) launch.host = '';
     launch.seq++;
@@ -2569,9 +2655,9 @@
     $('launch-name').value = '';
     $('launch-branch').value = '';
     $('launch-more').open = false;
-    renderLaunchMore();
     renderLaunchOptions();
-    renderLaunchKeys();
+    renderLaunchMore();
+    showFolders(false);
     $('launch').showModal();
     $('launch-body').scrollTop = 0;
     fitHeight($('launch-prompt'));
@@ -2582,12 +2668,12 @@
   }
 
   // Checkout, sandbox and what to show once started: click chips, kept
-  // for the next session.
+  // for the next session. [value, label, title, as Options sums it up]
   const LAUNCH_OPTS = 'fleet.launch.options';
   const LAUNCH_CHOICES = {
-    iso: [['', 'Auto', 'an own worktree in git repos, else the folder itself'], ['worktree', 'Own worktree', 'a git worktree on a branch of its own'], ['pinned', 'The folder itself', 'works in the folder, next to you and other agents']],
-    sandbox: [['', 'Server default', "the server's [sandbox] setting"], ['docker', 'Docker', 'in a Docker container'], ['none', 'None', 'right on the server']],
-    then: [['chat', 'Show chat', 'open the conversation'], ['screen', 'Show screen', 'open the conversation with the terminal screen'], ['stay', 'Stay here', 'keep this dialog closed and the list in view']],
+    iso: [['', 'Auto', 'an own worktree in git repos, else the folder itself'], ['worktree', 'Own worktree', 'a git worktree on a branch of its own', 'own worktree'], ['pinned', 'The folder itself', 'works in the folder, next to you and other agents', 'in the folder itself']],
+    sandbox: [['', 'Server default', "the server's [sandbox] setting"], ['docker', 'Docker', 'in a Docker container', 'in Docker'], ['none', 'None', 'right on the server', 'no sandbox']],
+    then: [['chat', 'Show chat', 'open the conversation'], ['screen', 'Show screen', 'open the conversation with the terminal screen', 'then the screen'], ['stay', 'Stay here', 'keep this dialog closed and the list in view', 'then stay here']],
   };
   const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   const MOD = MAC ? '⌘' : 'Ctrl';
@@ -2618,21 +2704,24 @@
     } catch {
       // private mode: kept until the dialog opens again
     }
+    renderLaunchMore();
   }
 
-  // renderLaunchMore sums up the name and branch while they are folded.
+  // renderLaunchMore sums up the options while they are folded: what is
+  // not the default, so a remembered Docker or worktree stays in sight.
   function renderLaunchMore() {
-    const set = [$('launch-name').value.trim(), $('launch-branch').value.trim()].filter(Boolean);
-    $('launch-more-note').textContent = '· ' + (set.length ? set.join(' · ') : 'generated');
-  }
-
-  function renderLaunchKeys() {
-    const box = $('launch-keys');
-    box.hidden = touch();
-    if (box.hidden) return;
-    const key = (k, what) => h('span', '', h('kbd', 'rounded border border-ink-600 bg-ink-850 px-1 font-mono text-[10px] text-zinc-400', k), ' ' + what);
-    box.replaceChildren(key(MOD + '+Enter', 'start'), key(MOD + '+Shift+Enter', 'start, show screen'),
-      key((MAC ? '⌥' : 'Alt+') + '1–9', 'agent'), key('Esc', 'close'));
+    const set = [];
+    for (const [key, choices] of Object.entries(LAUNCH_CHOICES)) {
+      const c = choices.find(([v]) => v === checkedValue('launch-' + key));
+      if (c && c[3]) set.push(c[3]);
+    }
+    const name = $('launch-name').value.trim();
+    const branch = $('launch-branch').value.trim();
+    if (name) set.push('name ' + name);
+    if (branch) set.push('branch ' + branch);
+    const note = $('launch-more-note');
+    note.textContent = '· ' + (set.length ? set.join(' · ') : 'checkout, sandbox, name, branch');
+    note.className = 'min-w-0 truncate font-normal ' + (set.length ? 'text-zinc-300' : 'text-zinc-600');
   }
 
   function closeLaunch() {
@@ -2647,8 +2736,9 @@
     launch.adapters = null;
     launch.adapterRoot = '';
     launch.roots = null;
+    launch.home = '';
     launch.dirs = new Map();
-    launch.look = null;
+    launch.look = '';
     launch.error = '';
     renderLaunch();
     let err = '';
@@ -2667,35 +2757,36 @@
     launch.roots = roots;
     launch.error = err;
     launchRootsChanged();
+    // Nothing to start in yet: the folder is the first thing to choose.
+    if (!launch.path && !err && !launch.folders) toggleFolders(true);
   }
 
   // launchRootsChanged lists new roots for the search, and chooses the
-  // last folder a session started in if the chosen root is gone.
+  // last folder a session started in if the chosen one is outside them.
   function launchRootsChanged() {
-    if (!launchRoot()) {
-      const r = launchRoots()[0];
-      const pick = launchRecent(1)[0] || (r ? { root: r.name, sub: '' } : { root: '', sub: '' });
-      launch.root = pick.root;
-      launch.sub = pick.sub;
+    if (launch.want && (!launch.host || launch.roots)) {
+      const r = launchRoots().find((x) => x.name === launch.want.root);
+      if (r) launch.path = inRoot(r, launch.want.sub);
+      launch.want = null;
     }
-    if (launch.look && !launchRoots().some((r) => r.name === launch.look.root)) launch.look = null;
-    for (const r of launchRoots()) listDir(r.name, '');
+    if (!launch.want && !launchPlace()) launch.path = launchRecent(1)[0] || '';
+    if (launch.look && !placeOf(launch.look)) launch.look = '';
+    for (const r of launchRoots()) listDir(r.path);
     renderLaunch();
   }
 
   // listDir lists the subfolders of a folder into launch.dirs, once per
   // opening of the dialog: the search looks through every listing.
-  async function listDir(root, sub) {
-    const key = dirKey(root, sub);
-    const r = launchRoots().find((x) => x.name === root);
-    if (!r || launch.dirs.has(key)) return;
+  async function listDir(path) {
+    if (!path || launch.dirs.has(path)) return;
     const gen = launch.gen;
-    const d = { root, sub, entries: null, truncated: false, error: '' };
-    launch.dirs.set(key, d);
+    const d = { path, entries: null, truncated: false, error: '' };
+    launch.dirs.set(path, d);
     try {
-      const dir = await api('GET', launchAPI('fs?' + new URLSearchParams({ path: inRoot(r, sub) })));
+      const dir = await api('GET', launchAPI('fs?' + new URLSearchParams({ path })));
       d.entries = dir.entries || [];
       d.truncated = !!dir.truncated;
+      if (dir.home && gen === launch.gen) launch.home = dir.home;
     } catch (e) {
       d.entries = [];
       d.error = e.message;
@@ -2711,16 +2802,9 @@
   function launchRecent(max) {
     const agents = launch.host ? (S.remote.get(launch.host) || { agents: new Map() }).agents : S.agents;
     const out = [];
-    const seen = new Set();
     for (const a of [...agents.values()].sort((x, y) => y.createdAtMs - x.createdAtMs)) {
-      const r = launchRoots().find((x) => x.name === a.root);
-      if (!r || a.isolation === 'clone' || !a.path) continue; // a clone runs outside the root
-      const base = joinPath(r.path, '');
-      const sub = a.path === r.path ? '' : a.path.startsWith(base) ? a.path.slice(base.length) : null;
-      const key = sub == null ? '' : dirKey(r.name, sub);
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      out.push({ root: r.name, sub });
+      if (a.isolation === 'clone' || !a.path || out.includes(a.path) || !placeOf(a.path)) continue; // a clone runs outside the root
+      out.push(a.path);
       if (out.length === max) break;
     }
     return out;
@@ -2734,26 +2818,30 @@
       renderLaunchThumbs();
     }
     launch.host = id;
-    launch.root = '';
-    launch.sub = '';
+    launch.path = '';
+    launch.want = null;
     $('launch-search').value = '';
+    closeNewFolder();
     renderLaunchHosts();
     loadLaunchHost();
   }
 
+  // renderLaunchHosts names the machine, or offers the fleet's machines
+  // when there are more.
   function renderLaunchHosts() {
-    const box = $('launch-hosts');
-    box.replaceChildren(...pickerHosts().map((x) => {
-      const rb = h('input', 'sr-only');
-      rb.type = 'radio';
-      rb.name = 'launch-host';
-      rb.value = x.id;
-      rb.checked = x.id === launch.host;
-      const [dot, note] = HOST_STATE[x.id ? picker.hosts.get(x.id) || 'checking' : 'self'];
-      return h('label', HOST_CHIP, rb, h('span', dot), x.name,
-        note ? h('span', 'font-sans text-[11px] text-zinc-500', note) : null);
-    }));
+    const hosts = pickerHosts();
+    const many = hosts.length > 1 || !!launch.host;
+    const stateOf = (id) => HOST_STATE[id ? picker.hosts.get(id) || 'checking' : 'self'];
+    $('launch-host').hidden = many;
     $('launch-host').textContent = hostName(launch.host);
+    $('launch-hosts-wrap').hidden = !many;
+    if (!many) return;
+    $('launch-host-dot').className = stateOf(launch.host)[0];
+    const items = hosts.map((x) => [x.id, x.name + (x.id && stateOf(x.id)[1] ? ` · ${stateOf(x.id)[1]}` : '')]);
+    const sig = JSON.stringify([items, launch.host]);
+    if (sig === launch.hostSig) return;
+    launch.hostSig = sig;
+    fillSelect($('launch-hosts'), items, launch.host);
   }
 
   // refill replaces the chips of a radio group, and keeps the focus on
@@ -2774,6 +2862,17 @@
     const chipEl = h('label', HOST_CHIP, rb, label);
     if (title) chipEl.title = title;
     return chipEl;
+  }
+
+  // fillSelect replaces the options of a select: [value, label, disabled].
+  function fillSelect(sel, items, value) {
+    sel.replaceChildren(...items.map(([v, label, disabled]) => {
+      const o = h('option', '', label);
+      o.value = v;
+      o.disabled = !!disabled;
+      return o;
+    }));
+    sel.value = value;
   }
 
   // Model and effort picks, per agent CLI, kept for the next session.
@@ -2801,30 +2900,27 @@
   }
 
   // renderLaunchModel offers the chosen agent's models, and the efforts of
-  // the chosen model. "Default" leaves either to the CLI's own settings.
+  // the chosen model. "default" leaves either to the CLI's own settings.
   function renderLaunchModel() {
     const p = launchPick();
-    $('launch-model-row').hidden = !p;
+    $('launch-model-wrap').hidden = !p || !(p.ad.models || []).length;
+    $('launch-effort-wrap').hidden = !p || !p.efforts.length;
     if (!p) return;
     // Rebuilt only when they change: the dialog renders again as folders
-    // are listed, and would swallow a click on a chip.
+    // are listed, and would close an open select.
     const sig = JSON.stringify([p.ad.id, p.ad.models, p.ad.efforts, p.model && p.model.id, p.effort && p.effort.id]);
     if (sig === launch.modelSig) return;
     launch.modelSig = sig;
+    fillSelect($('launch-model'), [['', 'default'], ...(p.ad.models || []).map((m) => [m.id, m.label])], p.model ? p.model.id : '');
+    fillSelect($('launch-effort'), [['', 'default'], ...p.efforts.map((e) => [e.id, e.label])], p.effort ? p.effort.id : '');
     const dflt = "the CLI's own setting";
-    refill($('launch-model'), radioChip('launch-model', '', 'Default', !p.model, dflt),
-      ...(p.ad.models || []).map((m) => radioChip('launch-model', m.id, m.label, p.model === m)));
-    if (!p.efforts.length) {
-      refill($('launch-effort'), h('span', 'text-xs text-zinc-600', p.model ? `${p.model.label} has no effort levels` : 'none'));
-    } else {
-      refill($('launch-effort'), radioChip('launch-effort', '', 'Default', !p.effort, dflt),
-        ...p.efforts.map((e) => radioChip('launch-effort', e.id, e.label, p.effort === e)));
-    }
+    $('launch-model').title = p.model ? '' : dflt;
+    $('launch-effort').title = p.effort ? '' : dflt;
   }
 
   function saveLaunchPick() {
     const picks = launchPicks();
-    picks[launch.adapter] = { model: checkedValue('launch-model'), effort: checkedValue('launch-effort') };
+    picks[launch.adapter] = { model: $('launch-model').value, effort: $('launch-effort').value };
     try {
       localStorage.setItem(LAUNCH_PICKS, JSON.stringify(picks));
     } catch {
@@ -2932,36 +3028,27 @@
     const notJoined = launch.host && picker.hosts.get(launch.host) === 'not_joined';
 
     // agents: those the root allows
-    const box = $('launch-adapters');
+    const sel = $('launch-adapters');
     const allowed = (launch.adapters || []).filter((a) => !root || !root.adapters.length || root.adapters.includes(a.id));
     pickAdapter(allowed);
-    if (!launch.adapters) box.replaceChildren(h('span', 'text-xs text-zinc-600', 'loading…'));
-    else if (!allowed.length) box.replaceChildren(h('span', 'text-xs text-zinc-600', 'no agent CLI allowed here'));
-    else {
-      const sig = JSON.stringify([allowed, launch.adapter, launch.host]);
-      if (box.dataset.sig !== sig) {
-        box.dataset.sig = sig;
-        refill(box, ...allowed.map((a) => {
-          const label = radioChip('launch-adapter', a.id, a.name || a.id, a.id === launch.adapter);
-          if (!a.available) {
-            label.querySelector('input').disabled = true;
-            label.className = 'touch:min-h-11 inline-flex cursor-not-allowed select-none items-center gap-1.5 rounded-md border border-ink-700 bg-ink-900 px-2 py-1 font-mono text-[12px] text-zinc-600';
-            label.append(h('span', 'font-sans text-[11px]', 'not installed'));
-            label.title = `${a.name} is not installed on ${hostName(launch.host)}`;
-          }
-          return label;
-        }));
-      }
+    const items = !launch.adapters ? [['', 'loading…']]
+      : !allowed.length ? [['', launch.adapters.length ? 'no agent CLI allowed here' : 'no agent CLI']]
+      : allowed.map((a) => [a.id, (a.name || a.id) + (a.available ? '' : ' · not installed'), !a.available]);
+    const sig = JSON.stringify([items, launch.adapter]);
+    if (sel.dataset.sig !== sig) {
+      sel.dataset.sig = sig;
+      fillSelect(sel, items, launch.adapter);
+      sel.disabled = !launch.adapter;
+      const logo = providerLogo(launch.adapter);
+      if (logo) logo.className = 'size-4 shrink-0 object-contain';
+      $('launch-adapter-logo').replaceChildren(...(logo ? [logo] : []));
     }
-    if (!launch.adapters || !allowed.length) delete box.dataset.sig;
 
     renderLaunchModel();
-
-    const folder = $('launch-folder');
-    folder.textContent = root ? `${root.name}:${launch.sub}` : '';
-    folder.title = root ? shortPath(inRoot(root, launch.sub)) : '';
+    renderLaunchFolder(root);
     renderLaunchCrumbs();
     renderLaunchList(notJoined);
+    renderNewFolder();
 
     $('launch-attach').disabled = launch.busy;
     $('launch-attach').title = launchImages() || !launch.adapter
@@ -2969,76 +3056,95 @@
       : `Attach videos to the prompt (${launch.adapter} takes no images at start)`;
     const problem = launchImagesProblem();
 
+    // The footer only speaks up when something is in the way; otherwise
+    // it lists the keys.
     const st = $('launch-status');
-    const roots = launchRoots();
-    if (notJoined) {
-      st.className = 'min-h-5 min-w-0 basis-full text-xs text-amber-200/90 sm:basis-0 sm:flex-1';
-      st.textContent = `${hostName(launch.host)} does not have this fleet's key: run \`fleet start --join <key>\` there (see Add folder).`;
-    } else if (launch.error) {
-      st.className = 'min-h-5 min-w-0 basis-full text-xs text-rose-300 sm:basis-0 sm:flex-1';
-      st.textContent = launch.error;
-    } else if (problem) {
-      st.className = 'min-h-5 min-w-0 basis-full text-xs text-amber-200/90 sm:basis-0 sm:flex-1';
-      st.textContent = problem;
-    } else if (root) {
-      st.className = 'min-h-5 min-w-0 basis-full break-words text-xs text-zinc-500 sm:basis-0 sm:flex-1';
-      const p = launchPick();
-      const runs = p && [p.model && p.model.label, p.effort && p.effort.label + ' effort'].filter(Boolean).join(' · ');
-      const n = launch.images.length;
-      const nv = launch.videos.length;
-      const with_ = [n && `${n} image${n > 1 ? 's' : ''}`, nv && `${nv} video${nv > 1 ? 's' : ''}`].filter(Boolean).join(' and ');
-      st.replaceChildren(h('span', '', 'starts ', h('span', 'font-mono text-zinc-200', launch.adapter || '…'),
-        runs ? h('span', 'text-zinc-400', ` (${runs})`) : null, with_ ? ` with ${with_}` : '', ' in ',
-        h('span', 'font-mono text-zinc-200', ...pathBreaks(shortPath(inRoot(root, launch.sub))))));
-    } else {
-      st.className = 'min-h-5 min-w-0 basis-full text-xs text-zinc-500 sm:basis-0 sm:flex-1';
-      st.textContent = launch.adapters && !roots.length ? 'Add a root folder on this machine first (Roots → Add folder).' : '';
+    const say = (cls, text) => {
+      st.className = 'min-h-5 min-w-0 basis-full break-words text-xs sm:basis-0 sm:flex-1 ' + cls;
+      st.textContent = text;
+      st.hidden = !text && touch(); // phones: no empty line above the buttons
+    };
+    if (notJoined) say('text-amber-200/90', `${hostName(launch.host)} does not have this fleet's key: run \`fleet start --join <key>\` there (see Add folder).`);
+    else if (launch.error) say('text-rose-300', launch.error);
+    else if (problem) say('text-amber-200/90', problem);
+    else if (launch.adapters && !launchRoots().length) say('text-zinc-500', `No root folders on ${hostName(launch.host)} yet: make one with New folder.`);
+    else if (touch()) say('', '');
+    else {
+      say('text-zinc-600', '');
+      const key = (k, what) => h('span', 'whitespace-nowrap', h('kbd', 'rounded border border-ink-600 bg-ink-850 px-1 font-mono text-[10px] text-zinc-400', k), ' ' + what);
+      st.replaceChildren(h('span', 'flex flex-wrap gap-x-3 gap-y-1', key(MOD + '+Enter', 'start'), key(MOD + '+Shift+Enter', 'start, show screen'),
+        key(MOD + '+K', 'folder'), key((MAC ? '⌥' : 'Alt+') + '1–9', 'agent')));
     }
     const start = $('launch-start');
     start.disabled = !root || !launch.adapter || launch.busy || notJoined || !!problem;
     start.textContent = launch.busy ? 'Starting…' : 'Start';
   }
 
-  // The folder list: recent folders and roots, the search results, or the
-  // subfolders of one folder. A click on a row chooses it, › looks inside.
-
-  function chooseFolder(root, sub) {
-    launch.root = root;
-    launch.sub = sub;
-    renderLaunch();
+  // renderLaunchFolder shows the chosen folder on its picker button.
+  function renderLaunchFolder(root) {
+    const name = $('launch-folder');
+    name.textContent = launch.path ? shortPath(launch.path) : !launch.adapters ? 'loading…' : 'choose a folder';
+    name.className = 'min-w-0 truncate font-mono text-[12.5px] ' + (launch.path ? 'text-zinc-100' : 'text-zinc-500');
+    $('launch-folder-git').hidden = !launch.path || !folderRow(launch.path).git;
+    $('launch-folder-btn').title = root ? `${launch.path} · root ${root.name}` : 'Choose the folder to start in';
   }
 
-  // lookInto shows the subfolders of root/sub; a null root goes back to
-  // recent folders and roots.
-  function lookInto(root, sub) {
-    launch.look = root == null ? null : { root, sub };
+  // The folder picker: recent folders and roots, the search results, or
+  // the subfolders of one folder. A click on a row chooses it, › looks
+  // inside; New folder makes one, as a root.
+
+  function showFolders(open) {
+    launch.folders = open;
+    $('launch-folders').hidden = !open;
+    $('launch-folder-btn').setAttribute('aria-expanded', String(open));
+    launch.listSig = ''; // listed again once shown, scrolled to the chosen folder
+    launch.listShown = false;
+    if (!open) {
+      launch.look = '';
+      $('launch-search').value = '';
+      closeNewFolder();
+    }
+  }
+
+  function toggleFolders(open) {
+    showFolders(open);
+    renderLaunch();
+    if (open && !touch()) $('launch-search').focus();
+  }
+
+  function chooseFolder(path) {
+    launch.path = path;
+    showFolders(false);
+    renderLaunch();
+    if (!touch()) $('launch-prompt').focus();
+  }
+
+  // lookInto shows the subfolders of path; '' goes back to recent folders
+  // and roots.
+  function lookInto(path) {
+    launch.look = path;
     $('launch-search').value = '';
-    if (launch.look) listDir(root, sub);
+    if (path) listDir(path);
     renderLaunch();
     if (!touch()) $('launch-search').focus();
   }
 
   function lookUp() {
-    const l = launch.look;
-    if (!l) return;
-    if (!l.sub) lookInto(null);
-    else lookInto(l.root, l.sub.split('/').slice(0, -1).join('/'));
+    const up = launch.look && parentOf(launch.look);
+    if (launch.look) lookInto(up && placeOf(up) ? up : '');
   }
 
-  // folderRow describes the row of root/sub: its name, where it is, and
-  // whether it is a git repo (if not given, as its parent's listing says).
-  function folderRow(root, sub, git) {
-    const r = launchRoots().find((x) => x.name === root);
-    const parts = sub ? sub.split('/') : [];
-    const name = parts.length ? parts[parts.length - 1] : root;
-    if (git == null && parts.length) {
-      const d = launch.dirs.get(dirKey(root, parts.slice(0, -1).join('/')));
-      git = d && d.entries && (d.entries.find((e) => e.name === name) || {}).git;
+  // folderRow describes the row of path: its name (a root's own name, or
+  // the folder's), where it is, and whether it is a git repo (if not
+  // given, as its parent's listing says).
+  function folderRow(path, git) {
+    const root = launchRoots().find((r) => r.path === path);
+    const name = root ? root.name : baseName(path) || '/';
+    if (git == null) {
+      const d = launch.dirs.get(parentOf(path));
+      git = d && d.entries && (d.entries.find((e) => e.name === baseName(path)) || {}).git;
     }
-    return {
-      root, sub, name, git: !!git,
-      where: parts.length ? [root, ...parts.slice(0, -1)].join('/') : shortPath(r ? r.path : ''),
-    };
+    return { path, name, git: !!git, where: shortPath(path) };
   }
 
   const LAUNCH_FOUND_MAX = 50;
@@ -3050,55 +3156,56 @@
     if (notJoined) return [note('not in this fleet yet')];
     if (!launch.adapters) return [note('loading…')];
     const roots = launchRoots();
-    if (!roots.length) return [note('no roots on this machine')];
+    if (!roots.length) return [note('no roots on this machine: make a new folder below')];
     const q = $('launch-search').value.trim().toLowerCase();
     if (q) return searchRows(q);
 
     const l = launch.look;
     if (l) {
-      const d = launch.dirs.get(dirKey(l.root, l.sub));
-      const rows = [{ ...folderRow(l.root, l.sub), where: 'this folder', here: true }];
+      const d = launch.dirs.get(l);
+      const rows = [{ ...folderRow(l), where: 'this folder', here: true }];
       if (!d || !d.entries) rows.push(note('loading…'));
       else if (d.error) rows.push(note(d.error));
       else {
-        for (const e of d.entries) rows.push({ ...folderRow(l.root, l.sub ? l.sub + '/' + e.name : e.name, e.git), where: '' });
+        for (const e of d.entries) rows.push({ ...folderRow(joinPath(l, e.name), e.git), where: '' });
         if (!d.entries.length) rows.push(note('no subfolders'));
         if (d.truncated) rows.push(note(`only the first ${d.entries.length} folders are listed: search to find others`));
       }
       return rows;
     }
 
-    const rows = [];
+    // A folder is listed once: recent, else as a root.
     const recent = launchRecent(LAUNCH_RECENT);
-    if (recent.length) rows.push({ head: 'Recent' }, ...recent.map((f) => folderRow(f.root, f.sub)));
-    rows.push({ head: 'Roots' }, ...roots.map((r) => folderRow(r.name, '')));
+    const rows = [];
+    if (recent.length) rows.push({ head: 'Recent' }, ...recent.map((p) => folderRow(p)));
+    const others = roots.filter((r) => !recent.includes(r.path)).map((r) => folderRow(r.path));
+    others.sort((a, b) => a.name.localeCompare(b.name));
+    if (others.length) rows.push({ head: recent.length ? 'Other roots' : 'Roots' }, ...others);
     return rows;
   }
 
-  // searchRows finds folders whose root:path has every word of q: folders
-  // of past sessions, roots, the folders in them and in every folder
-  // looked into.
+  // searchRows finds folders whose name or path has every word of q:
+  // folders of past sessions, roots, the folders in them and in every
+  // folder looked into. A name that is nowhere can be made.
   function searchRows(q) {
     const words = q.split(/\s+/);
     const last = words[words.length - 1];
     const found = new Map();
-    const add = (root, sub, git, rank) => {
-      const key = dirKey(root, sub);
-      if (found.has(key)) return;
-      const hay = (root + ':' + sub).toLowerCase();
-      if (!words.every((w) => hay.includes(w))) return;
-      const row = folderRow(root, sub, git);
+    const add = (path, git, rank) => {
+      if (found.has(path) || !placeOf(path)) return;
+      const row = folderRow(path, git);
       const name = row.name.toLowerCase();
+      if (!words.every((w) => (name + ' ' + row.where.toLowerCase()).includes(w))) return;
       const score = name === last ? 0 : name.startsWith(last) ? 1 : name.includes(last) ? 2 : 3;
-      found.set(key, { row, score, rank, depth: sub ? sub.split('/').length : 0 });
+      found.set(path, { row, score, rank, depth: path.split('/').length });
     };
     const recent = launchRecent();
-    recent.forEach((f, i) => add(f.root, f.sub, null, i));
-    for (const r of launchRoots()) add(r.name, '', null, recent.length);
+    recent.forEach((p, i) => add(p, null, i));
+    for (const r of launchRoots()) add(r.path, null, recent.length);
     let listing = false;
     for (const d of launch.dirs.values()) {
       if (!d.entries) listing = true;
-      else for (const e of d.entries) add(d.root, d.sub ? d.sub + '/' + e.name : e.name, e.git, recent.length);
+      else for (const e of d.entries) add(joinPath(d.path, e.name), e.git, recent.length);
     }
     const hits = [...found.values()].sort((a, b) => a.score - b.score || a.rank - b.rank || a.depth - b.depth ||
       a.row.name.localeCompare(b.row.name));
@@ -3106,18 +3213,24 @@
     if (hits.length > LAUNCH_FOUND_MAX) rows.push({ note: `${hits.length - LAUNCH_FOUND_MAX} more: type more to narrow them down` });
     if (listing) rows.push({ note: 'still listing folders…' });
     else if (!hits.length) rows.push({ note: `no folder matches "${q}": look inside one (›) to search its folders too` });
+    const typed = $('launch-search').value.trim();
+    if (words.length === 1 && !hits.some((x) => x.score === 0)) {
+      rows.push({ make: /^[~/]/.test(typed) ? typed : joinPath('~', typed) });
+    }
     return rows;
   }
 
   const LAUNCH_ROW = 'touch:min-h-11 flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1 text-left font-mono text-[12.5px] text-zinc-300 hover:bg-ink-800 hover:text-zinc-50 focus-visible:bg-ink-800 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-emerald-400/60 aria-pressed:bg-emerald-400/10 aria-pressed:text-emerald-100 aria-pressed:hover:bg-emerald-400/15';
+  const LAUNCH_MAKE = 'touch:min-h-11 flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1 text-left font-mono text-[12.5px] text-emerald-300 hover:bg-ink-800 focus-visible:bg-ink-800 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-emerald-400/60';
   const LAUNCH_LOOK = 'touch:min-h-11 touch:min-w-11 shrink-0 rounded px-2.5 font-mono text-sm text-zinc-600 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-emerald-400/60';
   const GIT_CHIP = 'inline-flex shrink-0 items-center rounded border border-violet-400/25 bg-violet-400/10 px-1.5 py-px font-mono text-[10px] text-violet-300';
 
   function renderLaunchList(notJoined) {
+    if (!launch.folders) return;
     const ul = $('launch-list');
     const rows = launchRows(notJoined);
     const view = JSON.stringify([launch.host, $('launch-search').value.trim(), launch.look]);
-    const sig = JSON.stringify([view, rows, launch.root, launch.sub]);
+    const sig = JSON.stringify([view, rows, launch.path]);
     if (sig === launch.listSig) return;
     const sameView = view === launch.listView;
     launch.listSig = sig;
@@ -3126,25 +3239,33 @@
     ul.replaceChildren(...rows.map((row) => {
       if (row.head) return h('li', 'px-2 pb-1 pt-2.5 text-[10px] font-medium uppercase tracking-wider text-zinc-600 first:pt-1', row.head);
       if (row.note) return h('li', 'px-2 py-4 text-center font-mono text-xs text-zinc-600', '// ' + row.note);
-      const chosen = row.root === launch.root && row.sub === launch.sub;
+      if (row.make) {
+        const b = h('button', LAUNCH_MAKE, h('span', 'w-3 shrink-0 text-center text-emerald-400', '+'),
+          h('span', 'min-w-0 truncate', 'New folder ', h('span', 'text-zinc-100', row.make)),
+          h('span', 'ml-auto shrink-0 pl-2 font-sans text-[11px] text-zinc-500', 'becomes a root'));
+        b.type = 'button';
+        b.dataset.key = 'make:' + row.make;
+        b.addEventListener('click', () => openNewFolder(row.make));
+        return h('li', 'flex', b);
+      }
+      const chosen = row.path === launch.path;
       const b = h('button', LAUNCH_ROW,
         h('span', 'w-3 shrink-0 text-emerald-400', chosen ? '✓' : ''),
         h('span', 'min-w-0 max-w-[70%] shrink-0 truncate', row.name, row.here ? '' : h('span', 'text-zinc-600', '/')),
         row.git ? chip('git', GIT_CHIP) : null,
         h('span', 'ml-auto min-w-0 truncate pl-2 font-sans text-[11px] text-zinc-500', row.where));
       b.type = 'button';
-      b.dataset.key = dirKey(row.root, row.sub);
+      b.dataset.key = row.path;
       b.setAttribute('aria-pressed', String(chosen));
-      const r = launchRoots().find((x) => x.name === row.root);
-      if (r) b.title = shortPath(inRoot(r, row.sub));
-      b.addEventListener('click', () => chooseFolder(row.root, row.sub));
+      b.title = shortPath(row.path);
+      b.addEventListener('click', () => chooseFolder(row.path));
       if (row.here) return h('li', 'flex', b);
       const look = h('button', LAUNCH_LOOK, '›');
       look.type = 'button';
       look.tabIndex = -1; // → does it from the keyboard
       look.setAttribute('aria-label', `Look inside ${row.name}`);
       look.title = 'look inside';
-      look.addEventListener('click', () => lookInto(row.root, row.sub));
+      look.addEventListener('click', () => lookInto(row.path));
       return h('li', 'flex items-stretch gap-0.5', b, look);
     }));
     ul.classList.toggle('opacity-60', rows.length === 1 && rows[0].note === 'loading…');
@@ -3166,6 +3287,8 @@
     }
   }
 
+  // renderLaunchCrumbs shows the folder looked into, from the outermost
+  // root around it.
   function renderLaunchCrumbs() {
     const nav = $('launch-crumbs');
     const l = launch.look;
@@ -3173,33 +3296,107 @@
     if (nav.hidden) return nav.replaceChildren();
     const up = h('button', 'touch:min-h-11 touch:min-w-11 shrink-0 rounded px-2 py-0.5 text-sm text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', '‹');
     up.type = 'button';
-    up.setAttribute('aria-label', l.sub ? 'Parent folder' : 'Back to recent folders and roots');
-    up.title = l.sub ? 'parent folder' : 'recent folders and roots';
+    const top = !placeOf(parentOf(l));
+    up.setAttribute('aria-label', top ? 'Back to recent folders and roots' : 'Parent folder');
+    up.title = top ? 'recent folders and roots' : 'parent folder';
     up.addEventListener('click', lookUp);
-    const crumb = (label, sub, current) => {
-      if (current) {
+    const chain = [];
+    for (let p = l; p && placeOf(p); p = parentOf(p)) {
+      chain.unshift(p);
+      if (p === '/') break;
+    }
+    const items = [up];
+    chain.forEach((p, i) => {
+      if (i > 0) items.push(h('span', 'shrink-0 text-zinc-700', '/'));
+      const label = i ? baseName(p) : shortPath(p);
+      if (p === l) {
         const el = h('span', 'min-w-0 truncate rounded px-1 py-0.5 font-semibold text-zinc-100', label);
         el.setAttribute('aria-current', 'location');
-        return el;
+        items.push(el);
+        return;
       }
       const b = h('button', 'touch:min-h-11 shrink-0 rounded px-1 py-0.5 text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', label);
       b.type = 'button';
-      b.addEventListener('click', () => lookInto(l.root, sub));
-      return b;
-    };
-    const parts = l.sub ? l.sub.split('/') : [];
-    const items = [up, crumb(l.root + ':', '', !parts.length)];
-    parts.forEach((p, i) => {
-      if (i > 0) items.push(h('span', 'shrink-0 text-zinc-700', '/'));
-      items.push(crumb(p, parts.slice(0, i + 1).join('/'), i === parts.length - 1));
+      b.addEventListener('click', () => lookInto(p));
+      items.push(b);
     });
     nav.replaceChildren(...items);
   }
 
+  // New folder: made on the machine and added as a root (an own root, so
+  // its agents and trust are its own), then chosen.
+
+  function openNewFolder(path) {
+    $('launch-new-open').hidden = true;
+    $('launch-new').hidden = false;
+    const f = $('launch-new-path');
+    f.value = path || joinPath(launch.look ? tilde(launch.look) : '~', '');
+    $('launch-new-trust').checked = true;
+    newFolderSays('');
+    renderNewFolder();
+    f.focus();
+    f.setSelectionRange(f.value.length, f.value.length);
+  }
+
+  function closeNewFolder() {
+    $('launch-new-open').hidden = false;
+    $('launch-new').hidden = true;
+  }
+
+  function newFolderSays(text, cls) {
+    const st = $('launch-new-status');
+    st.className = 'min-h-4 break-words text-xs ' + (cls || 'text-zinc-500');
+    st.textContent = text || `Made on ${hostName(launch.host)}, added as a root, and chosen to start in.`;
+  }
+
+  function renderNewFolder() {
+    const path = $('launch-new-path').value.trim();
+    $('launch-new-create').disabled = launch.making || !path || /^~?\/*$/.test(path);
+    $('launch-new-create').textContent = launch.making ? 'Creating…' : 'Create';
+    $('launch-new-path').disabled = launch.making;
+  }
+
+  async function createFolder() {
+    const path = $('launch-new-path').value.trim();
+    if (launch.making || !path || /^~?\/*$/.test(path)) return;
+    const host = launch.host;
+    const gen = launch.gen;
+    const older = (e) => (e.status === 405 ? `${hostName(host)} runs an older fleet: update it to make folders from here.` : e.message);
+    launch.making = true;
+    newFolderSays('creating…');
+    renderNewFolder();
+    let made = null;
+    let root = null;
+    try {
+      made = await api('POST', launchAPI('fs'), { path });
+      root = (await api('POST', launchAPI('roots'), { path: made.path, adapters: [], trust: $('launch-new-trust').checked })).root;
+    } catch (e) {
+      if (gen === launch.gen) newFolderSays(made ? `Made ${shortPath(made.path)}, but could not add it as a root: ${e.message}` : older(e), 'text-rose-300');
+    }
+    launch.making = false;
+    if (gen !== launch.gen) return;
+    if (!root) return renderNewFolder();
+    // Known before the roots are sent again.
+    const roots = host ? launch.roots : S.roots;
+    if (roots && !roots.some((r) => r.name === root.name)) {
+      roots.push(root);
+      if (!host) invalidate('roots');
+    }
+    const parent = parentOf(root.path);
+    if (launch.dirs.has(parent)) {
+      launch.dirs.delete(parent);
+      listDir(parent);
+    }
+    listDir(root.path);
+    if (!host) markChanged('root:' + root.name);
+    toast(`made ${shortPath(root.path)}${host ? ' on ' + hostName(host) : ''}, a new root`);
+    chooseFolder(root.path);
+  }
+
   async function startSession(ev) {
     ev.preventDefault();
-    const root = launchRoot();
-    if (!root || !launch.adapter || launch.busy || launchImagesProblem()) return;
+    const place = launchPlace();
+    if (!place || !launch.adapter || launch.busy || launchImagesProblem()) return;
     const host = launch.host;
     const adapter = launch.adapter;
     const then = launch.then || checkedValue('launch-then') || 'chat';
@@ -3213,8 +3410,8 @@
         model: (pick && pick.model && pick.model.id) || '',
         effort: (pick && pick.effort && pick.effort.id) || '',
         adapter,
-        root: root.name,
-        path: launch.sub,
+        root: place.root.name,
+        path: place.sub,
         prompt: withVideos($('launch-prompt').value, launch.videos),
         name: $('launch-name').value.trim(),
         branch: $('launch-branch').value.trim(),
@@ -3222,7 +3419,7 @@
         sandbox: checkedValue('launch-sandbox'),
         images: launch.images.map((im) => im.data),
       });
-      rememberRootProvider(host, root, adapter);
+      rememberRootProvider(host, place.root, adapter);
       launch.busy = false;
       closeLaunch();
       toast(`started ${r.agent.name}${host ? ' on ' + hostName(host) : ''}`);
@@ -3246,15 +3443,13 @@
     const search = $('launch-search');
     const list = $('launch-list');
     const prompt = $('launch-prompt');
+    const newPath = $('launch-new-path');
     $('agents-new').addEventListener('click', () => openLaunch());
     $('launch-form').addEventListener('submit', startSession);
     $('launch-close').addEventListener('click', closeLaunch);
     $('launch-cancel').addEventListener('click', closeLaunch);
-    $('launch-hosts').addEventListener('change', (ev) => {
-      if (ev.target.name === 'launch-host') selectLaunchHost(ev.target.value);
-    });
+    $('launch-hosts').addEventListener('change', (ev) => selectLaunchHost(ev.target.value));
     $('launch-adapters').addEventListener('change', (ev) => {
-      if (ev.target.name !== 'launch-adapter') return;
       launch.adapter = ev.target.value;
       renderLaunch();
     });
@@ -3263,6 +3458,24 @@
     for (const key of Object.keys(LAUNCH_CHOICES)) $('launch-' + key).addEventListener('change', saveLaunchOptions);
     $('launch-name').addEventListener('input', renderLaunchMore);
     $('launch-branch').addEventListener('input', renderLaunchMore);
+    $('launch-folder-btn').addEventListener('click', () => toggleFolders(!launch.folders));
+    $('launch-new-open').addEventListener('click', () => openNewFolder());
+    $('launch-new-cancel').addEventListener('click', () => {
+      closeNewFolder();
+      $('launch-new-open').focus();
+    });
+    $('launch-new-create').addEventListener('click', createFolder);
+    newPath.addEventListener('input', renderNewFolder);
+    newPath.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && !ev.ctrlKey && !ev.metaKey) {
+        ev.preventDefault(); // makes the folder, never starts the session
+        createFolder();
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        closeNewFolder();
+        $('launch-new-open').focus();
+      }
+    });
     search.addEventListener('input', renderLaunch);
     search.addEventListener('keydown', (ev) => {
       const first = list.querySelector('button[data-key]');
@@ -3275,10 +3488,15 @@
       } else if (ev.key === 'Backspace' && !search.value && launch.look) {
         ev.preventDefault();
         lookUp();
-      } else if (ev.key === 'Escape' && search.value) {
-        ev.preventDefault(); // clear the search instead of closing the dialog
-        search.value = '';
-        renderLaunch();
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault(); // clears the search, then closes the picker, not the dialog
+        if (search.value) {
+          search.value = '';
+          renderLaunch();
+        } else {
+          toggleFolders(false);
+          $('launch-folder-btn').focus();
+        }
       }
     });
     list.addEventListener('keydown', (ev) => {
@@ -3299,6 +3517,10 @@
       } else if ((ev.key === 'ArrowLeft' || ev.key === 'Backspace') && launch.look) {
         ev.preventDefault();
         lookUp();
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        toggleFolders(false);
+        $('launch-folder-btn').focus();
       }
     });
     // The prompt grows as it is typed into; keep its end in view.
@@ -3310,19 +3532,23 @@
       if (below > 0) body.scrollTop += below;
     });
     // Anywhere in the dialog: Ctrl/Cmd+Enter starts the session, with
-    // Shift it shows the screen too; Alt+1–9 chooses the agent CLI.
+    // Shift it shows the screen too; Ctrl/Cmd+K opens the folders;
+    // Alt+1–9 chooses the agent CLI.
     dlg.addEventListener('keydown', (ev) => {
       if (ev.isComposing) return;
       if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
         ev.preventDefault();
         launch.then = ev.shiftKey ? 'screen' : '';
         $('launch-form').requestSubmit();
-      } else if (ev.altKey && !ev.ctrlKey && !ev.metaKey && /^Digit[1-9]$/.test(ev.code)) {
-        const rb = $('launch-adapters').querySelectorAll('input[name="launch-adapter"]')[Number(ev.code.slice(5)) - 1];
-        if (!rb || rb.disabled) return;
+      } else if (ev.code === 'KeyK' && (ev.ctrlKey || ev.metaKey) && !ev.altKey && !ev.shiftKey) {
         ev.preventDefault();
-        rb.checked = true;
-        launch.adapter = rb.value;
+        if (!launch.folders) toggleFolders(true);
+        else if (!touch()) search.focus();
+      } else if (ev.altKey && !ev.ctrlKey && !ev.metaKey && /^Digit[1-9]$/.test(ev.code)) {
+        const opt = [...$('launch-adapters').options].filter((o) => o.value && !o.disabled)[Number(ev.code.slice(5)) - 1];
+        if (!opt) return;
+        ev.preventDefault();
+        launch.adapter = opt.value;
         renderLaunch();
       }
     });
@@ -3362,8 +3588,10 @@
       launch.gen++;
       launch.listSig = '';
       launch.listView = '';
+      launch.hostSig = '';
+      launch.modelSig = '';
     });
-    wireBackdrop(dlg, closeLaunch, () => !launch.busy);
+    wireBackdrop(dlg, closeLaunch, () => !launch.busy && !launch.making);
   }
 
   // ------------------------------------------------------------------- chat

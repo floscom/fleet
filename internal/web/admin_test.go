@@ -2,7 +2,9 @@ package web
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -320,6 +322,51 @@ func TestAdminListDir(t *testing.T) {
 		if code := api(t, ts, "GET", "/api/fs?path="+p, tok, "", &e); code != status || e.Error == "" {
 			t.Errorf("%s: %d %+v, want %d", p, code, e, status)
 		}
+	}
+}
+
+func TestAdminMakeDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "web-token")
+	tok, _ := LoadOrCreateToken(path)
+	ts := startServerToken(t, newFakeSource(), path)
+
+	dir := t.TempDir()
+	real, _ := filepath.EvalSymlinks(dir)
+	must(t, os.WriteFile(filepath.Join(dir, "file.txt"), nil, 0o644))
+	var got struct{ Path string }
+	// The folders leading to it are made too.
+	if code := api(t, ts, "POST", "/api/fs", tok, `{"path":"`+filepath.Join(dir, "a", "new")+`/"}`, &got); code != 201 || got.Path != filepath.Join(real, "a", "new") {
+		t.Fatalf("make: %d %+v", code, got)
+	}
+	if fi, err := os.Stat(got.Path); err != nil || !fi.IsDir() {
+		t.Fatalf("made: %v %v", fi, err)
+	}
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	realHome, _ := filepath.EvalSymlinks(home)
+	if code := api(t, ts, "POST", "/api/fs", tok, `{"path":" ~/proj "}`, &got); code != 201 || got.Path != filepath.Join(realHome, "proj") {
+		t.Fatalf("under home: %d %+v", code, got)
+	}
+
+	var e struct{ Error string }
+	for body, status := range map[string]int{
+		`{"path":"` + filepath.Join(dir, "a") + `"}`:               409, // exists
+		`{"path":"` + filepath.Join(dir, "file.txt") + `"}`:        409,
+		`{"path":"` + filepath.Join(dir, "file.txt", "sub") + `"}`: 400,
+		`{"path":"relative/dir"}`:                                  400,
+		`{"path":""}`:                                              400,
+		`not json`:                                                 400,
+	} {
+		if code := api(t, ts, "POST", "/api/fs", tok, body, &e); code != status || e.Error == "" {
+			t.Errorf("%s: %d %+v, want %d", body, code, e, status)
+		}
+	}
+	if code := api(t, ts, "POST", "/api/fs", "", `{"path":"`+filepath.Join(dir, "nope")+`"}`, &e); code != 401 {
+		t.Fatalf("without the token: %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "nope")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("made without the token: %v", err)
 	}
 }
 
