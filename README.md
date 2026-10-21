@@ -573,10 +573,9 @@ on a root, which picks that folder) starts one:
   first; formats the agents cannot read (HEIC) become JPEG. From the CLI:
   `fleet send <agent> --image a.png --image b.png "what changed?"`.
 - **Stop a turn.** While the agent works or waits on a dialog, *Stop*
-  beside *Send* interrupts its turn as Esc in its terminal does; so do Esc
-  (while it works) and Ctrl+C (with no text selected) in the session. The
-  agent keeps running and waits for your next message; a second Esc closes
-  the session. The daemon marks the agent idle once its transcript records
+  beside *Send* interrupts its turn as Esc in its terminal does; so does
+  Ctrl+C (with no text selected) in the session, while Esc still closes it.
+  The agent keeps running and waits for your next message. The daemon marks the agent idle once its transcript records
   the interruption. From the CLI: `fleet interrupt <agent>`.
 - **Screen and keys.** Permission prompts, folder trust and menus are not
   part of the transcript. *Screen* shows the agent's terminal as text

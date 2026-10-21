@@ -3390,7 +3390,6 @@
     switching: false, // a model switch is in flight
     switchedAt: 0, // when the last one ended: replies read before it are stale
     interrupting: false, // an interrupt is in flight
-    interruptedAt: 0, // when the last one was asked for: Esc soon after closes the session again
     confirmStop: false,
     dropWt: false, // the confirmation's "delete its worktree" choice
     stopping: false,
@@ -3411,10 +3410,8 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const chatLive = () => chat.agent && !isFinished(chat.agent);
   const chatDialog = () => chatLive() && chat.agent.state === 'needs_input';
-  // ESC_AGAIN: for this long after an interrupt, Esc closes the session.
-  const ESC_AGAIN = 4000;
-  // chatBusy: the agent works on a turn, or waits on a dialog of one; Esc
-  // interrupts it then.
+  // chatBusy: the agent works on a turn, or waits on a dialog of one;
+  // Stop and Ctrl+C interrupt it then.
   const chatBusy = () => chatLive() && (chat.agent.state === 'working' || chat.agent.state === 'needs_input');
 
   // A session's draft: what is typed into its message box stays in
@@ -3443,7 +3440,7 @@
     Object.assign(chat, {
       open: true, host, id, agent: agent || null, view,
       sending: false, held: false, confirmStop: false, stopping: false, screenAuto: true,
-      model: null, switching: false, switchedAt: 0, interrupting: false, interruptedAt: 0, screenAutoOpened: false, asks: [], askForm: null, images: [], videos: [],
+      model: null, switching: false, switchedAt: 0, interrupting: false, screenAutoOpened: false, asks: [], askForm: null, images: [], videos: [],
     });
     chat.answered.clear();
     chat.prUI.clear();
@@ -5745,7 +5742,7 @@
       : askShown() ? 'a message sent now answers none of the questions: the agent reads it instead'
       : chat.interrupting ? 'interrupting…'
       : chatDialog() ? 'in a dialog, Send types your text without pressing Enter: Enter picks the highlighted option'
-      : a.state === 'working' ? 'working… new messages appear as the agent writes them' + (touch() ? '' : ' · Esc or Ctrl+C interrupts it') : '';
+      : a.state === 'working' ? 'working… new messages appear as the agent writes them' + (touch() ? '' : ' · Ctrl+C interrupts it') : '';
   }
 
   // ---------------------------------------------------------------- model
@@ -6115,7 +6112,6 @@
     if (!chatBusy() || chat.interrupting) return;
     const { host, id, seq } = chat;
     chat.interrupting = true;
-    chat.interruptedAt = Date.now();
     renderChatInput();
     let r = null;
     try {
@@ -6620,18 +6616,14 @@
       $('chat-stop-box').querySelector('button').click();
       if (!chat.confirmStop && !touch()) ta.focus();
     });
-    // Esc while the agent works, and Ctrl+C with no text selected while it
-    // works or waits on a dialog, interrupt its turn as in its terminal.
-    // Esc again soon after closes the session as usual.
+    // Ctrl+C with no text selected, while the agent works or waits on a
+    // dialog, interrupts its turn as in its terminal. Esc keeps closing the
+    // session.
     dlg.addEventListener('keydown', (ev) => {
       if (ev.isComposing || ev.altKey || ev.metaKey || ev.shiftKey) return;
-      const esc = ev.key === 'Escape' && !ev.ctrlKey;
-      const ctrlC = ev.ctrlKey && ev.key.toLowerCase() === 'c';
-      if (!esc && !ctrlC || chat.view !== 'chat' || chat.confirmStop || !chatBusy()) return;
+      if (!ev.ctrlKey || ev.key.toLowerCase() !== 'c' || chat.view !== 'chat' || chat.confirmStop || !chatBusy()) return;
       const t = ev.target;
-      if (esc && (chat.agent.state !== 'working' || Date.now() - chat.interruptedAt < ESC_AGAIN ||
-        t !== ta && t.closest('input, select, textarea'))) return;
-      if (ctrlC && ((t.selectionStart ?? 0) !== (t.selectionEnd ?? 0) || String(getSelection()))) return;
+      if ((t.selectionStart ?? 0) !== (t.selectionEnd ?? 0) || String(getSelection())) return;
       ev.preventDefault();
       interruptChat();
     });
