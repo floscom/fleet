@@ -99,6 +99,9 @@ type Notice struct {
 	Tag string `json:"tag"`
 	// Agent is the agent to open when the notification is tapped.
 	Agent string `json:"agent,omitempty"`
+	// Badge is the number of agents that need the user, for the app's
+	// badge; nil leaves the badge as it is.
+	Badge *int `json:"badge,omitempty"`
 }
 
 type cachedJWT struct {
@@ -501,10 +504,10 @@ func (h *hub) noticeLocked(prev agentEntry, a Agent) {
 		h.dropDoneLocked(a.ID)
 	}
 	if n, ok := pullNotice(prev.pulls, a); ok {
-		h.notify(n)
+		h.sendLocked(n)
 	}
 	if n, ok := limitNotice(prev.limit, a); ok {
-		h.notify(n)
+		h.sendLocked(n)
 		return
 	}
 	n, ok := notice(prev.state, a)
@@ -515,8 +518,20 @@ func (h *hub) noticeLocked(prev agentEntry, a Agent) {
 			h.holdDoneLocked(a.ID, n)
 		}
 	default:
-		h.notify(n)
+		h.sendLocked(n)
 	}
+}
+
+// sendLocked sends n with the number of agents that need the user.
+func (h *hub) sendLocked(n Notice) {
+	waiting := 0
+	for _, e := range h.agents {
+		if e.state == "needs_input" {
+			waiting++
+		}
+	}
+	n.Badge = &waiting
+	h.notify(n)
 }
 
 // holdDoneLocked sends n, the "is done" of agent id, once the agent stayed
@@ -543,7 +558,7 @@ func (h *hub) holdDoneLocked(id string, n Notice) {
 			h.holdDoneLocked(id, n)
 		default:
 			delete(h.done, id)
-			h.notify(n)
+			h.sendLocked(n)
 		}
 	})
 	h.done[id] = t

@@ -388,9 +388,12 @@ Changes apply at once, rewrite `config.toml`, and show up in the CLI
   **Ctrl+C** (no text selected) interrupts the turn, **Esc** closes a
   dialog or goes back. Settings lists them all.
 - Installable to a phone's home screen (manifest, launch screens) and
-  cached by a service worker, so the dashboard opens instantly and
-  refreshes itself after a daemon upgrade. Everything is embedded in the
-  binary — no build step (`internal/web/static`; see `DESIGN.md`).
+  cached by a service worker, so the dashboard opens instantly — with the
+  sessions and the conversations it showed last, even while the daemon is
+  out of reach — and refreshes itself after a daemon upgrade. The app's
+  badge counts the sessions that need you, and on Android images, videos
+  and text can be shared into it as a new session. Everything is embedded
+  in the binary — no build step (`internal/web/static`; see `DESIGN.md`).
 
 ### Notifications
 

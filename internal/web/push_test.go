@@ -258,12 +258,15 @@ func TestHoldDone(t *testing.T) {
 	set := func(state fleetv1.AgentState) {
 		src.events <- &fleetv1.Event{Kind: &fleetv1.Event_AgentUpserted{AgentUpserted: agent(state)}}
 	}
-	expect := func(title string) {
+	expect := func(title string, badge int) {
 		t.Helper()
 		select {
 		case n := <-got:
 			if n.Title != title {
 				t.Fatalf("got %q, want %q", n.Title, title)
+			}
+			if n.Badge == nil || *n.Badge != badge {
+				t.Fatalf("%q: badge %v, want %d", title, n.Badge, badge)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatalf("no %q", title)
@@ -285,7 +288,7 @@ func TestHoldDone(t *testing.T) {
 
 	// A dialog is told at once.
 	set(fleetv1.AgentState_AGENT_STATE_NEEDS_INPUT)
-	expect("claude-1 needs you")
+	expect("claude-1 needs you", 1)
 	set(fleetv1.AgentState_AGENT_STATE_WORKING)
 
 	// Idle while a background workflow runs: held until it ended.
@@ -298,7 +301,7 @@ func TestHoldDone(t *testing.T) {
 	src.mu.Lock()
 	src.wfRuns[0].Status = workflow.Completed
 	src.mu.Unlock()
-	expect("claude-1 is done")
+	expect("claude-1 is done", 0)
 
 	// A run quiet for long does not hold it back.
 	set(fleetv1.AgentState_AGENT_STATE_WORKING)
@@ -307,7 +310,7 @@ func TestHoldDone(t *testing.T) {
 	src.wfRuns = []workflow.Run{{ID: "wf_2", Status: workflow.Running, StartedMs: old, UpdatedMs: old}}
 	src.mu.Unlock()
 	set(fleetv1.AgentState_AGENT_STATE_IDLE)
-	expect("claude-1 is done")
+	expect("claude-1 is done", 0)
 	quiet(150 * time.Millisecond)
 }
 

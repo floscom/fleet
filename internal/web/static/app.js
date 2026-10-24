@@ -26,8 +26,10 @@
     host: new Map(), // server id -> how its machine is doing (see pollUsage)
     peerRoots: new Map(), // server id of another fleet -> its roots, for Devices
     snapshotDone: false,
+    unseen: null, // ids of the agents shown that the coming snapshot has not named yet (see resetState)
     peersSeen: false, // first complete (post-browse) peers list of this connection received
     online: false, // the socket is up
+    connShown: false, // the banner says it is not
   };
 
   // What the page shows, and choices kept in this browser.
@@ -179,6 +181,8 @@
   const keyboard = () => !touch() && !small();
   const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   const MOD = MAC ? '⌘' : 'Ctrl';
+  // viewHeight is the height the on-screen keyboard leaves.
+  const viewHeight = () => (window.visualViewport ? visualViewport.height : innerHeight);
   const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
   // rel is how long ago ms was, short: now, 4m, 3h, Tue, Oct 12.
@@ -449,7 +453,8 @@
 
   // ---------------------------------------------------------------- theme
 
-  const THEME_COLORS = { light: '#f4f6f5', dark: '#111213' };
+  const THEME_COLORS = { light: '#f4f6f5', dark: '#111213' }; // --bg-side
+  const SCREEN_COLORS = { light: '#ffffff', dark: '#18191a' }; // --bg
   const theme = () => document.documentElement.dataset.theme || 'system';
 
   function setTheme(t) {
@@ -457,8 +462,17 @@
     try {
       localStorage.setItem('fleet.theme', t);
     } catch {}
+    paintThemeColor();
+  }
+
+  // paintThemeColor colours the browser's bars as the page under them: the
+  // sidebar, or on phones the screen over it.
+  function paintThemeColor() {
+    const t = theme();
+    const c = small() && $('app').dataset.screen === 'main' ? SCREEN_COLORS : THEME_COLORS;
     document.querySelectorAll('meta[name="theme-color"]').forEach((m, i) => {
-      m.content = t === 'system' ? (i === 0 ? THEME_COLORS.light : THEME_COLORS.dark) : THEME_COLORS[t];
+      const want = t === 'system' ? (i === 0 ? c.light : c.dark) : c[t];
+      if (m.content !== want) m.content = want;
     });
   }
 
@@ -515,6 +529,7 @@
       if (wasChat && r.view !== 'chat') leaveChat();
     }
     $('app').dataset.screen = U.view === 'home' ? 'list' : 'main';
+    paintThemeColor();
     applyShell();
     renderSideList();
     renderSideFoot();
@@ -532,6 +547,7 @@
     const base = S.server && S.server.name ? `fleet · ${S.server.name}` : 'fleet';
     const t = n ? `(${n}) ${base}` : base;
     if (document.title !== t) document.title = t;
+    setBadge(n);
   }
 
   function renderMain() {
@@ -554,7 +570,7 @@
     const app = $('app');
     app.classList.toggle('side-off', U.sideOff && !narrow());
     app.classList.toggle('drawer', U.drawer && narrow() && !small());
-    app.classList.toggle('offline', !S.online);
+    app.classList.toggle('offline', !S.online && !!S.connShown);
     $('side-scrim').hidden = !(U.drawer && narrow() && !small());
   }
 
@@ -565,7 +581,7 @@
     // The views put a button to bring it back in their bars.
     if (U.view === 'chat') renderChatHead();
     else if (U.view !== 'home' || !small()) renderMain();
-    if (open && narrow()) setTimeout(() => $('side-q')?.focus(), 60);
+    if (open && narrow() && !touch()) setTimeout(() => $('side-q')?.focus(), 60);
   }
 
   // leadBtn brings the sessions back: a back button on phones, the drawer
@@ -707,24 +723,29 @@
   }
 
   function sideTools() {
+    const setQ = (v) => {
+      q.value = v;
+      U.q = v;
+      clear.hidden = !v;
+      renderSideList();
+    };
     const q = h('input', {
       id: 'side-q', type: 'search', placeholder: 'Search sessions', 'aria-label': 'Search sessions', autocomplete: 'off', spellcheck: 'false',
-      oninput: (ev) => {
-        U.q = ev.target.value;
-        renderSideList();
-      },
+      oninput: (ev) => setQ(ev.target.value),
       onkeydown: (ev) => {
         if (ev.key === 'Escape' && U.q) {
           ev.stopPropagation();
-          ev.target.value = '';
-          U.q = '';
-          renderSideList();
+          setQ('');
         }
       },
     });
+    const clear = h('button', { type: 'button', class: 'icon-btn q-clear', 'aria-label': 'Clear the search', title: 'Clear the search', hidden: true, onclick: () => {
+      setQ('');
+      q.focus();
+    } }, icon('x', 'i-sm'));
     return h('div', 'side-tools',
       h('a', { id: 'new-btn', class: 'new-btn not-phone', href: '#/new', title: 'Start a session (N)' }, icon('plus'), 'New session', h('kbd', null, 'N')),
-      h('div', 'search', icon('search', 'i-sm'), q,
+      h('div', 'search', icon('search', 'i-sm'), q, clear,
         h('kbd', { class: 'not-phone', 'aria-hidden': 'true' }, '/'),
         h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Group sessions', title: 'Group sessions', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => groupMenu(ev.currentTarget) }, icon('sliders', 'i-sm'))));
   }
@@ -811,7 +832,7 @@
           h('span', 'attn-go', 'Answer')))));
     }
 
-    if (!S.snapshotDone) kids.push(h('p', 'side-empty', 'Loading…'));
+    if (!S.snapshotDone && !S.agents.size) kids.push(h('p', 'side-empty', 'Loading…'));
     else if (!live.length && !done.length) {
       kids.push(h('p', 'side-empty', words.length ? `No session matches “${U.q}”.` : admin ? 'No sessions yet. Start one with New session.' : 'No sessions yet.'));
     }
@@ -981,6 +1002,30 @@
     if (swipe.open) closeSwipe(swipe.open);
     swipe.open = null;
     confirmEnd(host, a);
+  }
+
+  // A link to a session pressed, or pointed at for a moment, fetches its
+  // conversation (warmFeed): it shows at once when it opens.
+  function wireWarm() {
+    const keyOf = (ev) => {
+      const a = ev.target.closest && ev.target.closest('a[href^="#/s/"]');
+      if (!a) return '';
+      try {
+        return decodeURIComponent(a.getAttribute('href').slice(4));
+      } catch {
+        return '';
+      }
+    };
+    let timer = 0;
+    document.addEventListener('pointerdown', (ev) => {
+      const key = keyOf(ev);
+      if (key) warmFeed(key);
+    }, { passive: true });
+    document.addEventListener('pointerover', (ev) => {
+      clearTimeout(timer);
+      const key = ev.pointerType === 'mouse' && keyOf(ev);
+      if (key) timer = setTimeout(() => warmFeed(key), 120);
+    }, { passive: true });
   }
 
   function wireSwipe() {
@@ -1260,6 +1305,12 @@
     const box = $('toasts');
     box.append(t);
     while (box.children.length > 3) box.firstChild.remove();
+    // The toasts are a popover, kept open: in the top layer, but under a
+    // dialog opened later, unless shown again above it.
+    if (box.popover && document.querySelector('dialog[open]')) {
+      box.hidePopover();
+      box.showPopover();
+    }
     setTimeout(() => t.remove(), kind === 'error' || kind === 'warn' ? 7000 : 4000);
   }
 
@@ -1875,6 +1926,8 @@
         else if ((r.entries || []).some((e) => e.files && e.files.length)) filesSoon(1500);
       },
       onStatus: renderChatStatus,
+      cacheKey: agentKey(host, id),
+      onCopy: (copy) => chatModel(copy.model),
     });
     renderChatHead();
     renderBanners();
@@ -1883,6 +1936,7 @@
     wfLoop(chat.seq);
     refreshGit(chat.seq);
     if (chat.agent) markSeen(host, chat.agent);
+    clearNotices(id);
     renderInsp();
     applyPending();
     if (keyboard() && C.comp) C.comp.ta.focus({ preventScroll: true });
@@ -1907,6 +1961,7 @@
     clearTimeout(files.timer);
     revokeFileURL();
     if (chat.feed) stopFeed(chat.feed);
+    storeFeed(agentKey(chat.host, chat.id));
     stopFeed(wf.feed);
     wf.sub = null;
     if (MENU && MENU.anchor && C.root && C.root.contains(MENU.anchor)) closeMenu(false);
@@ -2001,7 +2056,7 @@
       leadBtn(),
       h('div', 'chead-title',
         h('div', 'chead-row', h('h1', { title: label(a) }, label(a)),
-          k !== 'idle' && k !== 'running' ? h('span', 'pill ' + (k === 'unspecified' ? 'idle' : k), k === 'working' ? h('span', 'spin') : h('span', 'dot'), KEY_LABEL[k]) : null),
+          k !== 'idle' && k !== 'running' ? h('span', 'pill ' + (k === 'unspecified' ? 'idle' : k), k === 'working' ? h('span', 'spin') : h('span', 'dot'), h('span', small() ? 'sr-only' : null, KEY_LABEL[k])) : null),
         h('div', 'chead-meta', meta)),
       h('div', 'chead-acts', acts));
   }
@@ -2177,7 +2232,7 @@
 
     const fit = () => {
       ta.style.height = 'auto';
-      ta.style.height = Math.min(ta.scrollHeight + 2, innerHeight * 0.4) + 'px';
+      ta.style.height = Math.min(ta.scrollHeight + 2, viewHeight() * 0.4) + 'px';
     };
     file.addEventListener('change', () => {
       addChatFiles(file.files);
@@ -2905,8 +2960,10 @@
   // of its chat requests; live() while more may be written; working() while
   // its agent works (a call without output yet is running then); empty(),
   // the note for no transcript; imageURL(query) of its images; and
-  // optionally query(q) to add to its long polls, onReply(reply), and
-  // onStatus() when its error or entries changed.
+  // optionally query(q) to add to its long polls, onReply(reply),
+  // onStatus() when its error or entries changed, and cacheKey, the agent
+  // key its copy is kept under (see the cache) with onCopy(copy) when it
+  // shows one.
   function newFeed(o) {
     return Object.assign({
       seq: 0, // bumped on start and stop: loops of an old start stop
@@ -2922,13 +2979,14 @@
       group: null, // the group the next tool call joins
       groups: [], // every group shown
       day: '', // the day of the last message shown
+      catchup: false, // a copy shows: the next request asks for what came after it, without waiting
     }, o);
   }
 
   function startFeed(f) {
     stopFeed(f);
-    Object.assign(f, { file: '', start: 0, end: 0, loaded: false, earlier: false, error: '', group: null, groups: [], day: '' });
-    fill(f.log, h('p', 'empty-note', 'Loading…'));
+    Object.assign(f, { file: '', start: 0, end: 0, loaded: false, earlier: false, error: '', group: null, groups: [], day: '', catchup: false });
+    fill(f.log, h('p', 'empty-note wait', 'Loading…'));
     feedLoop(f, f.seq);
   }
 
@@ -2943,13 +3001,25 @@
   // feedLoop follows a transcript until the feed stops or the session
   // leaves: the latest entries first, then long polls for more.
   async function feedLoop(f, seq) {
+    if (f.cacheKey) {
+      // From memory, before the page paints: no "Loading…" in between.
+      let copy = feedCopy(f.cacheKey);
+      if (copy && copy.then) copy = await copy;
+      if (seq !== f.seq) return;
+      if (copy && copy.file) {
+        feedApply(f, copy, true);
+        f.loaded = true;
+        f.catchup = true;
+        if (f.onCopy) f.onCopy(copy);
+      }
+    }
     let failures = 0;
     while (chat.open && seq === f.seq) {
       const q = new URLSearchParams();
       if (f.loaded) {
         q.set('file', f.file);
         q.set('after', String(f.end));
-        q.set('wait', '1');
+        if (!f.catchup) q.set('wait', '1');
         q.set('v', String((chat.agent && chat.agent.updatedAtMs) || 0));
         if (f.query) f.query(q);
       }
@@ -2967,9 +3037,18 @@
       if (seq !== f.seq) return;
       failures = 0;
       f.error = '';
+      if (f.catchup) {
+        f.catchup = false;
+        // Far behind: the latest entries instead, as for a first look.
+        if (r.more) {
+          f.loaded = false;
+          continue;
+        }
+      }
       const first = !f.loaded;
       f.loaded = true;
       if (f.onReply) f.onReply(r);
+      if (f.cacheKey) keepFeed(f.cacheKey, r, first);
       feedApply(f, r, first);
       // A finished transcript read to the end is done.
       if (!first && !r.more && !r.entries.length && !f.live()) return;
@@ -5622,7 +5701,7 @@
         input.value = '';
         if (path) listDir(path);
         paint();
-        input.focus();
+        if (keyboard()) input.focus();
       };
       const paint = () => {
         const notJoined = launch.host && hostState(launch.host) === 'not_joined';
@@ -5928,7 +6007,7 @@
     fill($('main'), N.root);
     const fit = () => {
       N.ta.style.height = 'auto';
-      N.ta.style.height = Math.min(N.ta.scrollHeight + 2, innerHeight * 0.4) + 'px';
+      N.ta.style.height = Math.min(N.ta.scrollHeight + 2, viewHeight() * 0.4) + 'px';
     };
     N.ta.addEventListener('input', () => {
       fit();
@@ -6836,6 +6915,7 @@
 
   function invalidate(...parts) {
     updateTitle();
+    snapshotSoon();
     for (const p of parts) dirty.add(p);
     if (rafPending) return;
     rafPending = true;
@@ -6851,12 +6931,12 @@
 
   const peerKey = (p) => p.id || p.name + '@' + p.host;
 
+  // resetState starts over for a new connection's snapshot. What shows
+  // stays meanwhile, no blank list on a reconnect or when the page opens
+  // with what it showed last (restoreSnapshot): the snapshot replaces the
+  // rest and drops the agents it lacks.
   function resetState() {
-    S.server = null;
-    S.devices = [];
-    S.peers = [];
-    S.roots = [];
-    S.agents.clear();
+    S.unseen = new Set(S.agents.keys());
     S.snapshotDone = false;
     S.peersSeen = false;
   }
@@ -6900,6 +6980,7 @@
         const a = msg.agent;
         if (!a || !a.id) break;
         S.agents.set(a.id, a);
+        if (S.unseen) S.unseen.delete(a.id);
         invalidate('agents');
         chatAgent('', a);
         break;
@@ -6909,6 +6990,8 @@
         invalidate('agents');
         break;
       case 'snapshotDone':
+        for (const id of S.unseen || []) S.agents.delete(id);
+        S.unseen = null;
         S.snapshotDone = true;
         invalidate('agents');
         tryOpenPending();
@@ -6923,30 +7006,52 @@
 
   let backoff = 500;
   const BACKOFF_MAX = 10000;
+  // The banner waits this long: a page opening, or coming back to the
+  // front, mostly connects before, with what it showed still there.
+  const CONN_GRACE_MS = 1500;
+  let ws = null;
+  let reconnectTimer = 0;
+  let connTimer = 0;
 
   function setConn(state) {
     S.online = state === 'live';
     const el = $('conn');
-    el.hidden = S.online;
-    fill(el, h('span', 'spin'), state === 'reconnecting' ? 'Connection lost · reconnecting…' : 'Connecting…');
+    if (S.online) {
+      clearTimeout(connTimer);
+      connTimer = 0;
+      el.hidden = true;
+      S.connShown = false;
+    } else {
+      fill(el, h('span', 'spin'), state === 'reconnecting' ? 'Connection lost · reconnecting…' : 'Connecting…');
+      if (el.hidden && !connTimer) {
+        connTimer = setTimeout(() => {
+          connTimer = 0;
+          el.hidden = false;
+          S.connShown = true;
+          applyShell();
+        }, CONN_GRACE_MS);
+      }
+    }
     applyShell();
   }
 
   function connect() {
     const url = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/ws';
-    let ws;
+    clearTimeout(reconnectTimer);
     try {
       ws = new WebSocket(url);
     } catch {
+      ws = null;
       scheduleReconnect();
       return;
     }
-    ws.onopen = () => {
+    const sock = ws;
+    sock.onopen = () => {
       backoff = 500;
       setConn('live');
       checkShell();
     };
-    ws.onmessage = (ev) => {
+    sock.onmessage = (ev) => {
       if (typeof ev.data !== 'string') return;
       let msg;
       try {
@@ -6956,11 +7061,13 @@
       }
       if (msg && typeof msg.type === 'string') handle(msg);
     };
-    ws.onclose = () => {
-      ws.onclose = null;
+    sock.onclose = () => {
+      sock.onclose = null;
+      if (ws !== sock) return;
+      ws = null;
       scheduleReconnect();
     };
-    ws.onerror = () => {
+    sock.onerror = () => {
       // onclose follows and handles the reconnect
     };
   }
@@ -6969,7 +7076,17 @@
     setConn('reconnecting');
     const wait = backoff;
     backoff = Math.min(BACKOFF_MAX, backoff * 2);
-    setTimeout(connect, wait);
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, wait);
+  }
+
+  // reconnectNow tries again at once when the page comes back to the front
+  // or the network returns: a phone drops the socket of an app in the
+  // background, and the backoff may have grown meanwhile.
+  function reconnectNow() {
+    if (ws || document.hidden) return;
+    backoff = 500;
+    connect();
   }
 
   // ------------------------------------------------------------------ admin
@@ -7056,6 +7173,7 @@
     if (!on) {
       leaveChat();
       closeMenu(false);
+      dropCaches();
       S.remote.clear();
       S.workflows.clear();
       S.usage.clear();
@@ -7234,8 +7352,9 @@
   }
 
   function tryOpenPending() {
-    if (!openPending || !admin || !S.snapshotDone) return;
+    if (!openPending || !admin) return;
     const a = S.agents.get(openPending);
+    if (!a && !S.snapshotDone) return;
     openPending = '';
     if (a) openChat('', a.id, a);
   }
@@ -7250,6 +7369,195 @@
     navigator.serviceWorker.addEventListener('message', (ev) => {
       if (ev.data && ev.data.type === 'openAgent') openFromPush(ev.data.agent);
     });
+  }
+
+  // ------------------------------------------------------------- the cache
+  //
+  // The page opens with what it showed last, like an app: the agents,
+  // machines and roots (restoreSnapshot), and the conversations opened
+  // lately (feedMem; Cache Storage across reloads), shown at once and
+  // brought up to date as the daemon answers: a conversation asks for what
+  // came after the copy only (see feedLoop). sw.js keeps the transcript
+  // images. Signing out drops the conversations and images.
+
+  const SNAP_KEY = 'fleet.snapshot';
+  const SNAP_V = 1;
+  let snapTimer = 0;
+
+  function restoreSnapshot() {
+    const s = load(SNAP_KEY, null);
+    if (!s || s.v !== SNAP_V) return;
+    S.server = s.server || null;
+    S.devices = s.devices || [];
+    S.peers = s.peers || [];
+    S.roots = s.roots || [];
+    for (const a of s.agents || []) if (a && a.id) S.agents.set(a.id, a);
+    if (!getToken()) return;
+    for (const [host, list] of Object.entries(s.remote || {})) {
+      S.remote.set(host, { agents: new Map(list.filter((a) => a && a.id).map((a) => [a.id, a])), fails: 0 });
+    }
+  }
+
+  // saveSnapshot keeps what the last complete snapshot and the news since
+  // made of the lists.
+  function saveSnapshot() {
+    clearTimeout(snapTimer);
+    snapTimer = 0;
+    if (!S.snapshotDone) return;
+    const remote = {};
+    for (const [host, r] of S.remote) remote[host] = [...r.agents.values()];
+    save(SNAP_KEY, { v: SNAP_V, server: S.server, devices: S.devices, peers: S.peers, roots: S.roots, agents: [...S.agents.values()], remote });
+  }
+
+  function snapshotSoon() {
+    if (!snapTimer) snapTimer = setTimeout(saveSnapshot, 2000);
+  }
+
+  const FEED_KEEP = 40; // conversations kept
+  const FEED_MAX = 600; // entries a kept one grows to with news, else it is fetched anew next time
+  const FEEDS = 'fleet-feeds';
+  const CACHES_OK = window.isSecureContext && 'caches' in window;
+  const feedMem = new Map(); // agent key -> {file, start, end, entries, model, dirty}, the latest used last
+  const feedWarm = new Map(); // agent key -> Promise of the copy warmFeed fetches
+  const feedURL = (key) => '/feeds/' + encodeURIComponent(key);
+
+  // keepFeed takes reply r of the conversation of agent key into its copy:
+  // the latest entries (first, or a reset), else the news.
+  function keepFeed(key, r, first) {
+    let m = feedMem.get(key);
+    if (first || r.reset) m = { file: r.file || '', start: r.start || 0, end: r.end || 0, entries: [...(r.entries || [])], model: r.model || null };
+    else if (!m || m.file !== (r.file || '')) return;
+    else if (r.entries && r.entries.length) {
+      if (m.entries.length + r.entries.length > FEED_MAX) {
+        feedMem.delete(key);
+        return;
+      }
+      m.entries.push(...r.entries);
+      m.end = r.end || m.end;
+      if (r.model) m.model = r.model;
+    } else return;
+    m.dirty = true;
+    feedMem.delete(key);
+    feedMem.set(key, m);
+    while (feedMem.size > FEED_KEEP) feedMem.delete(feedMem.keys().next().value);
+    if (first || r.reset) storeFeed(key);
+  }
+
+  // storeFeed writes the copy of agent key's conversation to Cache Storage,
+  // dropping the oldest beyond FEED_KEEP (keys come in the order put).
+  async function storeFeed(key) {
+    const m = feedMem.get(key);
+    if (!CACHES_OK || !m || !m.dirty) return;
+    m.dirty = false;
+    try {
+      const c = await caches.open(FEEDS);
+      await c.put(feedURL(key), new Response(JSON.stringify(m), { headers: { 'Content-Type': 'application/json' } }));
+      const keys = await c.keys();
+      for (const k of keys.slice(0, Math.max(0, keys.length - FEED_KEEP))) await c.delete(k);
+    } catch {
+      // storage full or blocked: the copy lasts this page
+    }
+  }
+
+  async function readFeed(key) {
+    if (!CACHES_OK) return null;
+    try {
+      const res = await caches.match(feedURL(key), { cacheName: FEEDS });
+      const m = res && (await res.json());
+      if (!m || !Array.isArray(m.entries)) return null;
+      if (!feedMem.has(key)) feedMem.set(key, m);
+      return m;
+    } catch {
+      return null;
+    }
+  }
+
+  // feedCopy is the copy of agent key's conversation, if there is one: at
+  // once from memory, else what warmFeed is fetching, else Cache Storage.
+  function feedCopy(key) {
+    return feedMem.get(key) || feedWarm.get(key) || readFeed(key);
+  }
+
+  // warmFeed fetches a conversation about to open (a session row pressed or
+  // pointed at), unless a copy is there already.
+  function warmFeed(key) {
+    if (!admin || feedMem.has(key) || feedWarm.has(key)) return;
+    const { host, id } = splitKey(key);
+    const base = host ? `/api/hosts/${encodeURIComponent(host)}/agents/` : '/api/agents/';
+    const p = api('GET', base + encodeURIComponent(id) + '/chat').then((r) => {
+      keepFeed(key, r, true);
+      return feedMem.get(key) || null;
+    }, () => null);
+    feedWarm.set(key, p);
+    p.then(() => feedWarm.delete(key));
+  }
+
+  function storeAll() {
+    if (snapTimer) saveSnapshot();
+    for (const key of feedMem.keys()) storeFeed(key);
+  }
+
+  function dropCaches() {
+    feedMem.clear();
+    if (!CACHES_OK) return;
+    for (const name of [FEEDS, 'fleet-img', 'fleet-share']) caches.delete(name).catch(() => {});
+  }
+
+  // The app's badge counts the sessions that need you; sw.js sets it from
+  // the daemon's count when a notification comes.
+  let badgeShown = -1;
+  function setBadge(n) {
+    if (n === badgeShown || !navigator.setAppBadge) return;
+    badgeShown = n;
+    (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
+  }
+
+  // clearNotices closes the notifications about agent id, once its
+  // session shows.
+  function clearNotices(id) {
+    if (!SHELL_OK || document.hidden || !id) return;
+    navigator.serviceWorker.getRegistration()
+      .then((reg) => (reg ? reg.getNotifications() : []))
+      .then((list) => {
+        for (const n of list) if (n.data && n.data.agent === id) n.close();
+      })
+      .catch(() => {});
+  }
+
+  // takeShare opens a new session with what another app shared with fleet
+  // (sw.js keeps it): the text as the prompt, images and videos attached.
+  let sharing = false;
+  async function takeShare() {
+    if (!CACHES_OK || sharing) return;
+    sharing = true;
+    let text = '';
+    const files = [];
+    try {
+      const c = await caches.open('fleet-share');
+      for (const req of await c.keys()) {
+        const res = await c.match(req);
+        if (!res) continue;
+        if (new URL(req.url).pathname === '/share/text') text = (await res.text()).trim();
+        else files.push(new File([await res.blob()], decodeURIComponent(res.headers.get('X-Name') || '') || 'shared', { type: res.headers.get('Content-Type') || '' }));
+      }
+      await caches.delete('fleet-share');
+    } catch {
+      // nothing to take
+    }
+    if (text || files.length) {
+      go('#/new');
+      const ready = () => admin && U.view === 'new' && N.ta && N.ta.isConnected && launch.loaded === launch.host && !!launch.adapters && !!launch.adapter;
+      for (let t = 0; !ready() && t < 100; t++) await sleep(100);
+      if (ready()) {
+        if (text) {
+          N.ta.value = N.ta.value.trim() ? N.ta.value.trimEnd() + '\n\n' + text : text;
+          N.ta.dispatchEvent(new Event('input'));
+        }
+        if (files.length) addLaunchFiles(files);
+        if (keyboard()) N.ta.focus();
+      } else toast('Could not take what was shared: unlock this browser first', 'warn');
+    }
+    sharing = false;
   }
 
   // ------------------------------------------------------------ app shell
@@ -7277,6 +7585,21 @@
     });
     addEventListener('visibilitychange', () => {
       if (!document.hidden) checkShell();
+    });
+  }
+
+  // wireLaunchQueue takes the launches of the installed app while it is
+  // open (manifest launch_handler: focus-existing): a shortcut, a share.
+  // The first one is the launch that opened the page, taken already.
+  function wireLaunchQueue() {
+    if (!('launchQueue' in window)) return;
+    window.launchQueue.setConsumer((p) => {
+      if (!p.targetURL || p.targetURL === LAUNCH_URL) return;
+      const u = new URL(p.targetURL);
+      const agent = u.searchParams.get('agent');
+      if (u.searchParams.has('share')) takeShare();
+      else if (agent) openFromPush(agent);
+      else if (u.hash && u.hash !== location.hash) location.hash = u.hash;
     });
   }
 
@@ -7358,7 +7681,8 @@
   // under a session with it; let go past a third of the width, or flicked,
   // it slides out and only then goes back, else it slides back in.
 
-  const SLIDE_MS = 260; // .main, .insp and .side transitions on phones
+  const SLIDE_MS = 260;
+  const standalone = () => !!navigator.standalone || matchMedia('(display-mode: standalone)').matches; // .main, .insp and .side transitions on phones
 
   function wireGestures() {
     for (const el of [$('main'), $('insp')]) {
@@ -7384,6 +7708,8 @@
         if (el === $('main') && U.view === 'home') return;
         if (ev.target.closest('input, textarea, select, [contenteditable], .keys, .ctoolbar') || scrolledLeft(ev.target)) return;
         const t = ev.touches[0];
+        // In the browser the edge swipe is its own back: not twice.
+        if (t.clientX < 24 && !standalone()) return;
         g = { id: t.identifier, x0: t.clientX, y0: t.clientY, dx: 0, on: false, t: ev.timeStamp, v: 0, w: el.offsetWidth || innerWidth };
       }, { passive: true });
       el.addEventListener('touchmove', (ev) => {
@@ -7518,6 +7844,38 @@
     });
   }
 
+  // ------------------------------------------------------------- keyboard
+  //
+  // Phones: the screens fill the part of the page the on-screen keyboard
+  // leaves (--vvh, from the top of what shows, --vvt), so the message box
+  // sits on the keyboard and the header stays; iOS pans the page instead of
+  // making it shorter. While the keyboard shows, the bottom safe area (the
+  // home indicator, under the keyboard now) is no gap (.kb).
+
+  function wireViewport() {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const root = document.documentElement;
+    let tall = 0; // the most height seen at this width: without a keyboard
+    let width = 0;
+    const fit = () => {
+      if (innerWidth !== width) {
+        width = innerWidth;
+        tall = 0;
+      }
+      tall = Math.max(tall, vv.height);
+      root.style.setProperty('--vvh', Math.round(vv.height) + 'px');
+      root.style.setProperty('--vvt', Math.round(vv.offsetTop) + 'px');
+      const t = document.activeElement;
+      root.classList.toggle('kb', touch() && !!t && t.matches(TYPING) && vv.height < tall - 120);
+    };
+    vv.addEventListener('resize', fit);
+    vv.addEventListener('scroll', fit);
+    document.addEventListener('focusin', fit);
+    document.addEventListener('focusout', () => setTimeout(fit, 50));
+    fit();
+  }
+
   function wireTouch() {
     // Without a touch listener iOS Safari skips :active.
     document.addEventListener('touchstart', () => {}, { passive: true });
@@ -7552,18 +7910,27 @@
     }
   }
 
+  const LAUNCH_URL = location.href;
+  const SHARED = new URLSearchParams(location.search).has('share');
   linkToken = takeLinkToken();
   setTheme(theme());
+  restoreSnapshot();
   buildSide();
+  if ($('toasts').showPopover) {
+    $('toasts').popover = 'manual';
+    $('toasts').showPopover();
+  }
   wireMenus();
   wireDialog();
   wireViewer();
   wireSwipe();
+  wireWarm();
   wireLaunch();
   wireKeys();
   wirePush();
   wireShell();
   wireTouch();
+  wireViewport();
   wireGestures();
   $('side-scrim').addEventListener('click', () => toggleSide(false));
   addEventListener('hashchange', () => {
@@ -7586,6 +7953,7 @@
     if (now === layout) return;
     layout = now;
     U.drawer = false;
+    paintThemeColor();
     N.root = null;
     applyShell();
     renderSideList();
@@ -7594,8 +7962,25 @@
       renderInsp();
     } else renderMain();
   });
+  // Back to the front: connect again at once, and keep what shows for the
+  // next start when going to the back (an app in the back may be ended).
+  addEventListener('visibilitychange', () => {
+    if (document.hidden) return storeAll();
+    reconnectNow();
+    if (U.view === 'chat') clearNotices(chat.id);
+  });
+  addEventListener('pagehide', storeAll);
+  addEventListener('online', reconnectNow);
+  wireLaunchQueue();
   setInterval(tick, 1000);
   setConn('connecting');
   route();
+  // A saved token is taken as good until the daemon says otherwise, so the
+  // page opens unlocked (checkSession asks on the socket's hello).
+  if (getToken()) setAdmin(true);
   connect();
+  if (SHARED) {
+    history.replaceState(null, '', location.pathname + location.hash);
+    takeShare();
+  }
 })();

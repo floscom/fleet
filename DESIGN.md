@@ -76,7 +76,13 @@ component), `theme.js` (applies the theme before the first paint) and
 
 - Phones: list → chat → inspector as stacked screens with a back button and
   swipe back; swipe a row left to archive; bottom sheets for pickers; prompt
-  box above the safe area; 16 px inputs (no iOS zoom).
+  box above the safe area, and on the keyboard while it shows (the screens
+  fill the visual viewport); 16 px inputs (no iOS zoom); toasts at the top,
+  like system banners; no page bounce, no text selection or link callouts
+  on the app's chrome, hover styles only where there is hover.
+- Opens like an app: the last lists and conversations show at once from
+  the cache and catch up as the daemon answers; "Connecting…" only shows
+  after 1.5 s without it.
 - Access: muted text ≥ 4.5:1 and control borders ≥ 3:1 in both themes
   (checked with antislop's contrast-check); focus ring 2 px in the action
   color; native `<dialog>`; menus with arrow keys and Esc; live region for
