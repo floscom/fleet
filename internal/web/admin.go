@@ -50,6 +50,8 @@ const (
 	usageTimeout = 10 * time.Second
 	// hostTimeout bounds reading the machine's stats.
 	hostTimeout = 5 * time.Second
+	// updateTimeout bounds looking for a fleet release and installing it.
+	updateTimeout = 100 * time.Second
 )
 
 // Error is a Source error shown to the user with an HTTP status.
@@ -252,6 +254,8 @@ func (s *Server) apiHandler() http.Handler {
 	admin.HandleFunc("GET /api/adapters", s.apiAdapters)
 	admin.HandleFunc("GET /api/usage", s.apiUsage)
 	admin.HandleFunc("GET /api/host", s.apiHostStats)
+	admin.HandleFunc("GET /api/update", s.apiUpdate)
+	admin.HandleFunc("POST /api/update", s.apiUpdate)
 	admin.HandleFunc("GET /api/roots", s.apiRoots)
 	admin.HandleFunc("POST /api/roots", s.apiAddRoot)
 	admin.HandleFunc("PUT /api/roots/{name}", s.apiUpdateRoot)
@@ -423,6 +427,51 @@ func (s *Server) apiHostStats(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), hostTimeout)
 	defer cancel()
 	writeJSON(w, http.StatusOK, map[string]HostStats{"host": hostStatsOf(s.opts.Source.HostStats(ctx))})
+}
+
+// UpdateStatus is where a fleet daemon stands with updates
+// (fleetv1.UpdateStatus).
+type UpdateStatus struct {
+	Version     string `json:"version"`
+	Auto        bool   `json:"auto"`
+	Unsupported string `json:"unsupported,omitempty"`
+	Latest      string `json:"latest,omitempty"`
+	CheckedAtMs int64  `json:"checkedAtMs,omitempty"`
+	Installed   string `json:"installed,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+// apiUpdate answers {"update": UpdateStatus}. POST {"auto": bool} turns
+// automatic updates on or off, {"check": true} looks for a newer release,
+// {"install": true} installs it (the daemon restarts on it once no agent
+// works).
+func (s *Server) apiUpdate(w http.ResponseWriter, r *http.Request) {
+	var req fleetv1.UpdateRequest
+	if r.Method == http.MethodPost {
+		var body struct {
+			Auto    *bool `json:"auto"`
+			Check   bool  `json:"check"`
+			Install bool  `json:"install"`
+		}
+		if !decode(w, r, &body) {
+			return
+		}
+		req.Check, req.Install = body.Check, body.Install
+		if body.Auto != nil {
+			req.SetAuto, req.Auto = true, *body.Auto
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), updateTimeout)
+	defer cancel()
+	st, err := s.opts.Source.Update(ctx, &req)
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]UpdateStatus{"update": {
+		Version: st.GetVersion(), Auto: st.GetAuto(), Unsupported: st.GetUnsupported(), Latest: st.GetLatest(),
+		CheckedAtMs: st.GetCheckedAtMs(), Installed: st.GetInstalled(), Error: st.GetError(),
+	}})
 }
 
 func (s *Server) apiAddRoot(w http.ResponseWriter, r *http.Request) {

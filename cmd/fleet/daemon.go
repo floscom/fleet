@@ -176,7 +176,7 @@ func newDaemonCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("locate fleet binary: %w", err)
 			}
-			return daemon.Run(cmd.Context(), daemon.Options{
+			err = daemon.Run(cmd.Context(), daemon.Options{
 				Adapters:    registry(cfg),
 				Version:     version,
 				FleetBinary: exe,
@@ -185,6 +185,13 @@ func newDaemonCmd() *cobra.Command {
 				NoMDNS:      f.noMDNS,
 				Roots:       roots,
 			})
+			if errors.Is(err, daemon.ErrRestart) {
+				// Same pid, arguments, log and service manager; the new
+				// binary takes over the agents like any daemon start.
+				err = syscall.Exec(exe, os.Args, os.Environ())
+				return fmt.Errorf("restart on the update: %w", err)
+			}
+			return err
 		},
 	}
 	f.register(cmd)
@@ -416,6 +423,10 @@ func newStatusCmd() *cobra.Command {
 			fmt.Fprintf(out, "server id: %s\n", info.ServerId)
 			fmt.Fprintf(out, "agents:    %s\n", agentSummary(agents))
 			fmt.Fprintf(out, "roots:     %d\n", len(roots))
+			// Daemons before updates answer with an error: no line.
+			if st, err := c.Update(ctx, &fleetv1.UpdateRequest{}); err == nil {
+				fmt.Fprintf(out, "updates:   %s\n", updateSummary(st))
+			}
 			if devs, err := c.ListDevices(ctx); err == nil {
 				connected := 0
 				for _, d := range devs {

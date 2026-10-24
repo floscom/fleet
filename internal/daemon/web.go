@@ -85,6 +85,10 @@ func (s *webSource) HostStats(ctx context.Context) *fleetv1.HostStats {
 	return s.d.hostStats(ctx)
 }
 
+func (s *webSource) Update(ctx context.Context, req *fleetv1.UpdateRequest) (*fleetv1.UpdateStatus, error) {
+	return s.d.handleUpdate(ctx, req)
+}
+
 func (s *webSource) UploadDir() string { return uploadsDir(s.d.config()) }
 
 func (s *webSource) Usage(ctx context.Context) []web.AgentUsage {

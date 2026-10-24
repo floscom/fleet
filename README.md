@@ -38,6 +38,8 @@ machines on the same LAN start, watch, stop and type into them.
   plan limit resume themselves once it resets.
 - **Agents outlive the daemon** — restarts re-adopt running agents; tmux
   sessions are always cleaned up.
+- **Updates itself** — the daemon installs new releases and restarts on
+  them once no agent is working; `fleet update --auto off` turns that off.
 
 The protocol is protobuf over TLS, documented for native clients (a macOS
 app is next) in [docs/PROTOCOL.md](docs/PROTOCOL.md).
@@ -58,9 +60,22 @@ The script verifies the download against the release's `checksums.txt` and
 installs to `/usr/local/bin` if writable, else `~/.local/bin`. Set
 `FLEET_VERSION=v0.1.0` for a specific release or `FLEET_INSTALL_DIR` for
 another directory (both go before `sh`, e.g. `... | FLEET_VERSION=v0.1.0 sh`).
-Run it again to update, then restart the daemon (`fleet stop && fleet
-start`; running agents are re-adopted). The archives are also on the
+The archives are also on the
 [releases page](https://github.com/floscom/fleet/releases).
+
+**Updates are automatic.** A few minutes after it starts, and every 6
+hours after that, the daemon checks for a newer release. When it finds one,
+it downloads the archive and verifies it against `checksums.txt`, like
+install.sh. Then it replaces its own binary and restarts once no agent is
+working, no question is waiting for an answer and no terminal is attached
+through it. Running agents carry on in tmux and are re-adopted, like after
+`fleet stop && fleet start`. The restart keeps the pid, arguments and log,
+so it also works under systemd or launchd. `fleet update` updates right
+away, `fleet update --check` only checks, and `fleet update --auto off`
+(or `auto_update = false` in `config.toml`) turns automatic updates off.
+Builds from source never update themselves. Neither does a binary in a
+folder the daemon cannot write to (e.g. `/usr/local/bin` after a `sudo`
+install); `fleet status` says so.
 
 From source (needs Go 1.26):
 
@@ -121,6 +136,7 @@ address. Without it, commands talk to the local daemon.
 | `fleet status` | Daemon version, uptime, a line on the machine's load, memory and disks, server id, agent, root and device counts. |
 | `fleet host [--json]` | The daemon's machine: OS, kernel, CPU, uptime, load, memory, swap and the disks of `/`, the home folder, the roots and `~/.fleet`. A line ends in `!` when the load passes one per CPU or memory, swap or a disk is 90% full. With `-H`, of a paired server. |
 | `fleet version` | Print the version. |
+| `fleet update [--check] [--auto on\|off]` | Install the newest release now (the daemon restarts on it once no agent works), only check for one, or turn automatic updates on or off. With `-H`, a paired server's daemon; without a running daemon, this binary. |
 | `fleet roots` / `roots add <path> [--name N] [--adapters a,b] [--trust]` / `roots rm <name>` | Manage the folders agents may run in. `--trust`: see [Folder trust](#folder-trust). |
 | `fleet browse [root[/path]] [-a]` | List folders inside a root, marking git repos and running agents. |
 | `fleet adapters` | Adapters, whether their CLI is installed, version and features, and the models and efforts `fleet run --model/--effort` take. |
@@ -281,6 +297,10 @@ mdns = true
 # limit to reset to be resumed. Closing a laptop's lid still sleeps it on
 # battery. Default true; no effect on other systems.
 stay_awake = true
+
+# Install new fleet releases and restart on them once no agent works (see
+# "Install"). Default true. `fleet update --auto off|on` sets it at runtime.
+auto_update = true
 
 # tmux -L socket name. Default "fleet" for ~/.fleet, and
 # "fleet-<hash of FLEET_HOME>" for any other FLEET_HOME.

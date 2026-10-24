@@ -196,3 +196,14 @@ func (c *Client) Subscribe(ctx context.Context) (<-chan *fleetv1.Event, error) {
 	context.AfterFunc(ctx, unsubscribe)
 	return s.ch, nil
 }
+
+// Update asks how the daemon keeps itself up to date, and can change that
+// (see UpdateRequest).
+func (c *Client) Update(ctx context.Context, req *fleetv1.UpdateRequest) (*fleetv1.UpdateStatus, error) {
+	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_Update{Update: req}},
+		(*fleetv1.ServerMessage).GetUpdate)
+	if err != nil {
+		return nil, err
+	}
+	return r.GetStatus(), nil
+}

@@ -53,6 +53,7 @@ message ClientMessage {
     RemoveRootRequest remove_root = 24;
     BrowseRequest browse = 25;
     GetHostStatsRequest get_host_stats = 26;
+    UpdateRequest update = 27;
 
     // Agents
     ListAgentsRequest list_agents = 30;
@@ -103,6 +104,7 @@ message ServerMessage {
     RemoveRootResponse remove_root = 24;
     BrowseResponse browse = 25;
     GetHostStatsResponse get_host_stats = 26;
+    UpdateResponse update = 27;
 
     ListAgentsResponse list_agents = 30;
     RunAgentResponse run_agent = 31;
@@ -247,6 +249,43 @@ message GetInfoResponse {
 }
 
 message GetHostStatsRequest {}
+
+// UpdateRequest asks how the daemon keeps itself up to date, and can
+// change that. With no field set it only reports.
+message UpdateRequest {
+  // Look for a newer release now.
+  bool check = 1;
+  // Look for a newer release now and install it; the daemon restarts on
+  // it once no agent works.
+  bool install = 2;
+  // Turn automatic updates on or off (auto), saved in config.toml.
+  bool set_auto = 3;
+  bool auto = 4;
+}
+
+message UpdateResponse {
+  UpdateStatus status = 1;
+}
+
+// UpdateStatus is where the daemon stands with updates.
+message UpdateStatus {
+  // The version running now.
+  string version = 1;
+  // Whether it looks for and installs new releases by itself.
+  bool auto = 2;
+  // Why this daemon cannot update itself ("" = it can): a development
+  // build, or a binary in a folder it cannot write to.
+  string unsupported = 3;
+  // The newest release seen, and when it was looked for (Unix ms); "" and
+  // 0 before the first look.
+  string latest = 4;
+  int64 checked_at_ms = 5;
+  // A newer version installed and waiting for the daemon to restart,
+  // which it does once no agent works.
+  string installed = 6;
+  // Why the last look or install failed ("" = it did not).
+  string error = 7;
+}
 
 message GetHostStatsResponse {
   HostStats stats = 1;

@@ -54,7 +54,7 @@ Every command that talks to a daemon uses the local one unless --host
 	root.PersistentFlags().StringVarP(&host, "host", "H", os.Getenv("FLEET_HOST"),
 		`daemon to talk to: paired server name, id prefix or address ("" or "local" = this machine)`)
 	root.AddCommand(
-		newDaemonCmd(), newStartCmd(), newStopCmd(), newStatusCmd(), newHostCmd(), newVersionCmd(),
+		newDaemonCmd(), newStartCmd(), newStopCmd(), newStatusCmd(), newHostCmd(), newVersionCmd(), newUpdateCmd(),
 		newPairCmd(), newConnectCmd(), newDiscoverCmd(), newServersCmd(), newDevicesCmd(),
 		newRootsCmd(), newBrowseCmd(), newAdaptersCmd(),
 		newLsCmd(), newRunCmd(), newAttachCmd(), newSendCmd(), newInterruptCmd(), newKillCmd(), newWatchCmd(),

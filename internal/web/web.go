@@ -84,6 +84,9 @@ type Source interface {
 	Usage(ctx context.Context) []AgentUsage
 	// HostStats reads how this machine is doing.
 	HostStats(ctx context.Context) *fleetv1.HostStats
+	// Update reports how the daemon keeps itself up to date, and can
+	// change that (see fleetv1.UpdateRequest).
+	Update(ctx context.Context, req *fleetv1.UpdateRequest) (*fleetv1.UpdateStatus, error)
 	// UploadDir is where uploaded files go (see uploads.go), a folder
 	// agents can read, sandboxed ones too; "" takes no uploads.
 	UploadDir() string

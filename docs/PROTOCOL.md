@@ -658,6 +658,20 @@ other than root, as df's "Avail"; how full a disk is, as df shows it, is
 No errors. A daemon older than this message finds no request in it and
 answers `INVALID_ARGUMENT` ("empty message").
 
+**`UpdateRequest{check, install, set_auto, auto}` → `UpdateResponse{status}`**:
+how the daemon keeps itself up to date. With no field set it only
+reports. `check` looks for the newest release now; `install` looks and
+installs it if it is newer, after which the daemon restarts on it once no
+agent works (the connection closes then; reconnect). `set_auto` turns
+automatic updates on or off (`auto`), saved in `config.toml`.
+`UpdateStatus` has `version` (running), `auto`, `unsupported` (why this
+daemon cannot update itself, e.g. a development build or an unwritable
+binary; it then only looks), `latest` and `checked_at_ms` (Unix ms; empty
+and 0 before the first look), `installed` (a newer version waiting for the
+restart) and `error` (why the last look or install failed). A failed look
+is reported in `error`, not as an Error. A daemon older than this message
+answers `INVALID_ARGUMENT` ("empty message").
+
 **`ListAdaptersRequest` → `ListAdaptersResponse`**: every registered
 adapter (v1: `claude`, `codex`, `shell`), whether its CLI was found, its
 path and version, `unavailable_reason` when not found, and

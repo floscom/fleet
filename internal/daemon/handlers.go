@@ -97,6 +97,12 @@ func (c *conn) dispatch(id uint64, m *fleetv1.ClientMessage) error {
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_GetInfo{GetInfo: d.info()}})
 	case *fleetv1.ClientMessage_GetHostStats:
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_GetHostStats{GetHostStats: &fleetv1.GetHostStatsResponse{Stats: d.hostStats(c.ctx)}}})
+	case *fleetv1.ClientMessage_Update:
+		st, err := d.handleUpdate(c.ctx, msg.Update)
+		if err != nil {
+			return err
+		}
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_Update{Update: &fleetv1.UpdateResponse{Status: st}}})
 	case *fleetv1.ClientMessage_ListAdapters:
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_ListAdapters{ListAdapters: d.listAdapters(c.ctx)}})
 	case *fleetv1.ClientMessage_ListRoots:

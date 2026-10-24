@@ -1308,6 +1308,8 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
 .mach-off-note { padding: 0 16px 14px 66px; font-size: 13px; color: var(--fg-3); margin-top: -4px; }
 .mach-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; padding: 10px 16px; border-top: 1px solid var(--line-soft); font-size: 13px; color: var(--fg-3); }
 .mach-foot .link-btn { font-size: 13px; }
+.mach-upd { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 16px; border-top: 1px solid var(--line-soft); }
+.mach-upd > .set-row { flex: 1 1 260px; min-width: 0; }
 .roots { border-top: 1px solid var(--line-soft); }
 .roots-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px 6px 16px; }
 .roots-h .search { flex: 0 1 240px; height: 32px; margin-left: auto; }

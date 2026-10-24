@@ -53,6 +53,9 @@ type daemon struct {
 	started time.Time
 	// ctx is Run's context; it ends when the daemon stops.
 	ctx context.Context
+	// stop ends ctx; restarting says it was to restart (update.go).
+	stop       context.CancelFunc
+	restarting atomic.Bool
 
 	cfgMu sync.Mutex
 	cfg   *config.Config
@@ -73,6 +76,9 @@ type daemon struct {
 	// usage caches what the providers said about plan limits (usage.go).
 	usage usageCache
 
+	// upd is where the daemon stands with updates (update.go).
+	upd updater
+
 	connsMu sync.Mutex
 	conns   map[*conn]struct{}
 	connWG  sync.WaitGroup
@@ -82,8 +88,11 @@ type daemon struct {
 
 // Run starts the daemon and blocks until ctx is cancelled. On return, all
 // listeners are closed; agents keep running in tmux and are re-adopted by
-// the next daemon start.
+// the next daemon start. It returns ErrRestart when it stopped to restart
+// on an updated binary.
 func Run(ctx context.Context, opts Options) error {
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
 	if opts.Adapters == nil {
 		opts.Adapters = adapter.NewRegistry()
 	}
@@ -122,6 +131,7 @@ func Run(ctx context.Context, opts Options) error {
 		cfg:     cfg,
 		codes:   identity.NewPairingCodes(),
 		ctx:     ctx,
+		stop:    stop,
 		tmux:    tmux.New(cfg.TmuxSocket),
 		docker:  &sandbox.Docker{Binary: cfg.Sandbox.DockerOrDefault()},
 		conns:   map[*conn]struct{}{},
@@ -130,6 +140,7 @@ func Run(ctx context.Context, opts Options) error {
 		sbProbed: map[string]bool{},
 		sbFleet:  map[string]string{},
 	}
+	d.upd.kick = make(chan struct{}, 1)
 	// The identity lives in <home>/identity; LoadOrCreateServer appends it.
 	if d.server, err = identity.LoadOrCreateServer(home, cfg.Name); err != nil {
 		return err
@@ -241,6 +252,11 @@ func Run(ctx context.Context, opts Options) error {
 		defer bg.Done()
 		d.agents.awakeLoop(ctx)
 	}()
+	bg.Add(1)
+	go func() {
+		defer bg.Done()
+		d.updateLoop(ctx)
+	}()
 	for i, ln := range lns {
 		bg.Add(1)
 		go func(ln net.Listener, local bool) {
@@ -269,7 +285,16 @@ func Run(ctx context.Context, opts Options) error {
 	bg.Wait()
 	d.connWG.Wait()
 	d.log.Info("fleet daemon stopped")
+	if d.restarting.Load() {
+		return ErrRestart
+	}
 	return nil
+}
+
+// restart stops the daemon for Run to return ErrRestart.
+func (d *daemon) restart() {
+	d.restarting.Store(true)
+	d.stop()
 }
 
 // lanPort returns ln's port if other machines can reach it (it does not

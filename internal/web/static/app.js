@@ -24,6 +24,7 @@
     workflows: new Map(), // agentKey -> workflow runs going on (see pollWorkflows)
     usage: new Map(), // server id -> agent CLIs and their plan usage (see pollUsage)
     host: new Map(), // server id -> how its machine is doing (see pollUsage)
+    update: new Map(), // server id -> where its daemon stands with updates (see pollUsage)
     peerRoots: new Map(), // server id of another fleet -> its roots, for Devices
     snapshotDone: false,
     unseen: null, // ids of the agents shown that the coming snapshot has not named yet (see resetState)
@@ -6243,9 +6244,60 @@
           if (small()) go('#/');
           else toast('The sessions are grouped by machine now');
         } }, 'Show them') : null));
-      if (admin) out.push(rootsSec(m));
+      if (admin) out.push(updateSec(m), rootsSec(m));
     }
     return h('section', { class: 'mach' + (up ? '' : m.state === 'not_joined' ? ' warn' : ' off'), 'aria-label': m.name }, out);
+  }
+
+  // newerRelease: whether release a (v1.2.3) is newer than release b.
+  // Development builds are never newer.
+  function newerRelease(a, b) {
+    const re = /^v(\d+)\.(\d+)\.(\d+)$/;
+    const x = re.exec(a || ''), y = re.exec(b || '');
+    if (!x || !y) return false;
+    for (let i = 1; i <= 3; i++) if (+x[i] !== +y[i]) return +x[i] > +y[i];
+    return false;
+  }
+
+  // updateSec: whether the machine's daemon updates itself, and what it
+  // found. Turning it off, or updating now, asks the daemon.
+  function updateSec(m) {
+    const id = m.id === '' ? (S.server && S.server.id) : m.id;
+    const u = S.update.get(id);
+    if (!u) return null;
+    const newer = !u.installed && newerRelease(u.latest, u.version);
+    const sub = u.installed ? `${u.installed} is installed. fleet restarts on it once no agent is working; the sessions keep running.`
+      : newer && u.error ? `${u.latest} is out, but the update failed: ${u.error}`
+        : newer ? `${u.latest} is out (this is ${u.version}).`
+          : u.unsupported ? `Not on this machine: ${u.unsupported}.`
+            : u.error ? `${u.version}. Could not check for updates: ${u.error}`
+              : u.latest ? `${u.version} is the newest release.`
+                : u.auto ? `${u.version}. Checks for new releases every 6 hours.`
+                  : `${u.version}. New releases are not installed.`;
+    const sw = h('input', {
+      type: 'checkbox', class: 'switch', checked: u.auto, 'aria-label': 'Automatic updates on ' + m.name,
+      onchange: (ev) => postUpdate(m, id, { auto: ev.target.checked }, ev.target),
+    });
+    const now = u.unsupported || u.installed ? null
+      : newer ? h('button', { type: 'button', class: 'btn sm', onclick: (ev) => postUpdate(m, id, { install: true }, ev.currentTarget) }, icon('refresh'), 'Update now')
+        : h('button', { type: 'button', class: 'btn ghost sm', onclick: (ev) => postUpdate(m, id, { check: true }, ev.currentTarget) }, 'Check now');
+    return h('div', 'mach-upd',
+      h('label', 'set-row grow', h('div', 'grow', h('div', null, 'Automatic updates'), h('div', 'sub', sub)), sw), now);
+  }
+
+  async function postUpdate(m, id, body, el) {
+    const base = id === (S.server && S.server.id) ? '/api/' : `/api/hosts/${encodeURIComponent(id)}/`;
+    el.disabled = true;
+    if (body.install || body.check) el.lastChild.textContent = body.install ? 'Updating…' : 'Checking…';
+    try {
+      const r = await api('POST', base + 'update', body);
+      S.update.set(id, r.update);
+      if ((body.install || body.check) && r.update.error) toast(`Could not ${body.install ? 'update' : 'check'} ${m.name}: ${r.update.error}`, 'error');
+      else if (body.install && r.update.installed) toast(`${m.name} restarts on ${r.update.installed} once no agent is working`);
+    } catch (e) {
+      toast(`Could not change the updates of ${m.name}: ${e.message}`, 'error');
+    }
+    renderDevices();
   }
 
   function healthSec(s) {
@@ -6857,7 +6909,7 @@
     const self = S.server && S.server.id;
     const ids = S.peers.filter((p) => p.id).map((p) => p.id);
     if (self && !ids.includes(self)) ids.push(self);
-    for (const m of [S.usage, S.host]) for (const id of [...m.keys()]) if (!ids.includes(id)) m.delete(id);
+    for (const m of [S.usage, S.host, S.update]) for (const id of [...m.keys()]) if (!ids.includes(id)) m.delete(id);
     await Promise.all(ids.map((id) => {
       const base = id === self ? '/api/' : `/api/hosts/${encodeURIComponent(id)}/`;
       // Not joined: nothing to show. Unreachable: keep the last answer.
@@ -6867,6 +6919,10 @@
         }),
         api('GET', base + 'host').then((r) => S.host.set(id, (r && r.host) || null), (e) => {
           if (e.notJoined || e.status === 404 || !S.host.has(id)) S.host.set(id, null);
+        }),
+        // A daemon older than updates answers 404: no Updates row.
+        api('GET', base + 'update').then((r) => S.update.set(id, (r && r.update) || null), (e) => {
+          if (e.notJoined || e.status === 404 || !S.update.has(id)) S.update.set(id, null);
         }),
       ]);
     }));
@@ -7178,6 +7234,7 @@
       S.workflows.clear();
       S.usage.clear();
       S.host.clear();
+      S.update.clear();
       S.peerRoots.clear();
     } else if (dialogShows('unlock')) closeDialog();
     syncPush();

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -157,6 +158,10 @@ type env struct {
 	web    string
 	cancel context.CancelFunc
 	done   chan error
+
+	// version and binary are Options.Version and FleetBinary for the next
+	// start: "test" and /bin/true when empty.
+	version, binary string
 }
 
 func newEnv(t *testing.T) *env {
@@ -220,10 +225,11 @@ func (e *env) start() {
 	e.t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel, e.done = cancel, make(chan error, 1)
+	version, binary := cmp.Or(e.version, "test"), cmp.Or(e.binary, "/bin/true")
 	opts := Options{
 		Adapters:    adapter.NewRegistry(testAdapter{}, unavailableAdapter{}, modelAdapter{}, limitAdapter{}, pullAdapter{}),
-		Version:     "test",
-		FleetBinary: "/bin/true",
+		Version:     version,
+		FleetBinary: binary,
 		Listen:      e.listen,
 		Web:         e.web,
 		NoMDNS:      true,
