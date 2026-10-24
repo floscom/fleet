@@ -984,8 +984,9 @@
 
   function wireSwipe() {
     const box = $('side-list');
-    let g = null; // {row, x0, y0, base, dx, on, w, full, t, v}
+    let g = null; // {row, id, x0, y0, base, dx, on, w, full, t, v}
     box.addEventListener('touchstart', (ev) => {
+      if (g && g.on) return; // a second finger: the first one leads
       g = null;
       const row = ev.target.closest('.row');
       if (!admin || !small() || !row || ev.touches.length !== 1) return;
@@ -994,22 +995,24 @@
         swipe.open = null;
       }
       const t = ev.touches[0];
-      g = { row, x0: t.clientX, y0: t.clientY, base: swipe.open === row ? -SWIPE_W : 0, dx: 0, on: false, w: row.offsetWidth, full: false, t: ev.timeStamp, v: 0 };
+      g = { row, id: t.identifier, x0: t.clientX, y0: t.clientY, base: swipe.open === row ? -SWIPE_W : 0, dx: 0, on: false, w: row.offsetWidth, full: false, t: ev.timeStamp, v: 0 };
     }, { passive: true });
     box.addEventListener('touchmove', (ev) => {
-      if (!g) return;
-      const t = ev.touches[0];
+      const t = g && [...ev.touches].find((x) => x.identifier === g.id);
+      if (!t) return;
       const mx = t.clientX - g.x0;
       const my = t.clientY - g.y0;
       if (!g.on) {
-        if (Math.abs(my) > 10 && Math.abs(my) > Math.abs(mx)) return (g = null);
-        if (Math.abs(mx) < 10) return;
+        // The list scrolls already, or the finger goes up or down.
+        if (!ev.cancelable || (Math.abs(my) > 10 && Math.abs(my) > Math.abs(mx))) return (g = null);
+        if (Math.abs(mx) < 10 || Math.abs(mx) < 1.5 * Math.abs(my)) return;
         g.on = true;
         swipe.drag = true;
         g.row.parentElement.classList.add('swiping');
         g.row.style.transition = 'none';
         g.x0 = t.clientX - (mx > 0 ? 10 : -10); // no jump by the slop
       }
+      ev.preventDefault(); // the list holds still while a row moves
       let dx = g.base + t.clientX - g.x0;
       // To the right of closed it gives a little, then stops.
       if (dx > 0) dx = Math.min(dx * 0.25, 16);
@@ -1022,8 +1025,9 @@
       if (full !== g.full && navigator.vibrate) navigator.vibrate(8);
       g.full = full;
       setSwipe(g.row, dx, full);
-    }, { passive: true });
-    const end = () => {
+    }, { passive: false });
+    const end = (ev) => {
+      if (ev.touches.length) return; // fingers still down
       const s = g;
       g = null;
       if (!s || !s.on) return;
@@ -1032,12 +1036,12 @@
       // A click follows the touch: it must not open the session.
       s.row.dataset.swiped = String(Date.now());
       let open = false;
-      if (s.full) {
+      if (s.full && ev.type === 'touchend') {
         swipe.open = s.row;
         s.row.parentElement._end();
       } else {
         const flick = Math.abs(s.v) > 0.45;
-        open = flick ? s.v < 0 : s.dx < -SWIPE_W / 2;
+        open = ev.type === 'touchend' && (flick ? s.v < 0 : s.dx < -SWIPE_W / 2);
         if (open) setSwipe(s.row, -SWIPE_W);
         else closeSwipe(s.row);
         swipe.open = open ? s.row : null;
@@ -4658,20 +4662,78 @@
       ev.preventDefault();
       openMedia(viewer.i + (ev.key === 'ArrowLeft' ? -1 : 1));
     });
-    // Swiping sideways steps through the images too.
-    let x0 = null;
+    // Swiping sideways steps through the images too. The image follows the
+    // finger, held back past the first and the last; let go far enough or
+    // flicked, it slides out and the next one comes in from the other side.
+    const img = $('viewer-img');
+    let g = null; // {id, x0, y0, dx, on, t, v}
+    const move = (x, fade) => {
+      img.style.transform = x ? `translateX(${x}px)` : '';
+      img.style.opacity = fade ? '0' : '';
+    };
     d.addEventListener('touchstart', (ev) => {
-      x0 = viewer.list && ev.touches.length === 1 ? ev.touches[0] : null;
+      if (g && g.on) return;
+      g = null;
+      if (!viewer.list || ev.touches.length !== 1) return;
+      const t = ev.touches[0];
+      g = { id: t.identifier, x0: t.clientX, y0: t.clientY, dx: 0, on: false, t: ev.timeStamp, v: 0 };
     }, { passive: true });
-    d.addEventListener('touchend', (ev) => {
-      const t = ev.changedTouches[0];
-      if (!x0 || !t) return;
-      const dx = t.clientX - x0.clientX;
-      const dy = t.clientY - x0.clientY;
-      x0 = null;
-      if (Math.abs(dx) < 50 || Math.abs(dx) < 2 * Math.abs(dy)) return;
+    d.addEventListener('touchmove', (ev) => {
+      const t = g && [...ev.touches].find((x) => x.identifier === g.id);
+      if (!t) return;
+      if (ev.touches.length > 1 && !g.on) return (g = null); // pinching
+      const dx = t.clientX - g.x0;
+      const dy = t.clientY - g.y0;
+      if (!g.on) {
+        if (!ev.cancelable || (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx))) return (g = null);
+        if (Math.abs(dx) < 10) return;
+        g.on = true;
+        img.style.transition = 'none';
+      }
+      ev.preventDefault();
+      const edge = (dx > 0 && viewer.i === 0) || (dx < 0 && viewer.i === viewer.list.length - 1);
+      const x = edge ? dx * 0.3 : dx;
+      const dt = ev.timeStamp - g.t;
+      if (dt > 0) g.v = 0.6 * g.v + 0.4 * ((x - g.dx) / dt);
+      g.t = ev.timeStamp;
+      g.dx = x;
+      move(x);
+    }, { passive: false });
+    const end = (ev) => {
+      if (ev.touches.length) return;
+      const s = g;
+      g = null;
+      if (!s || !s.on) return;
       ev.preventDefault(); // no click: it would close the view
-      openMedia(viewer.i + (dx > 0 ? -1 : 1));
+      img.style.transition = 'transform 0.2s var(--ease), opacity 0.2s';
+      const flick = Math.abs(s.v) > 0.45;
+      const dir = ev.type !== 'touchend' ? 0 : flick ? -Math.sign(s.v) : Math.abs(s.dx) > 60 ? -Math.sign(s.dx) : 0;
+      const to = viewer.i + dir;
+      if (!dir || to < 0 || to >= viewer.list.length) return move(0);
+      move(-dir * innerWidth * 0.5, true);
+      setTimeout(() => {
+        img.style.transition = 'none';
+        move(dir * innerWidth * 0.3, true);
+        // In once the new image is there (or could not be loaded).
+        let done = false;
+        const slideIn = () => {
+          if (done) return;
+          done = true;
+          img.removeEventListener('load', slideIn);
+          img.style.transition = 'transform 0.22s var(--ease), opacity 0.22s';
+          move(0);
+        };
+        img.addEventListener('load', slideIn);
+        setTimeout(slideIn, 1500);
+        openMedia(to);
+      }, 200);
+    };
+    d.addEventListener('touchend', end);
+    d.addEventListener('touchcancel', end);
+    d.addEventListener('close', () => {
+      g = null;
+      img.style.transition = '';
+      move(0);
     });
   }
 
@@ -7202,26 +7264,41 @@
   // Phones: a session or a view swiped to the right goes back to the list,
   // the panel swiped to the right goes back to the chat. The swipe starts
   // anywhere but in a text field or a box scrolled sideways, which the
-  // finger scrolls back instead.
+  // finger scrolls back instead. The screen follows the finger, the list
+  // under a session with it; let go past a third of the width, or flicked,
+  // it slides out and only then goes back, else it slides back in.
+
+  const SLIDE_MS = 260; // .main, .insp and .side transitions on phones
 
   function wireGestures() {
     for (const el of [$('main'), $('insp')]) {
-      let g = null; // {x0, y0, dx, on, t, v}
+      const under = el === $('main') ? $('side') : null;
+      let g = null; // {id, x0, y0, dx, on, t, v, w}
       const scrolledLeft = (n) => {
         for (; n && n !== el; n = n.parentElement) if (n.scrollLeft > 0) return true;
         return false;
       };
+      const place = (x, w) => {
+        el.style.transform = x == null ? '' : `translateX(${x}px)`;
+        // The list comes in from 22% to the left, as the screen goes.
+        if (under) under.style.transform = x == null ? '' : `translateX(${-22 * (1 - x / w)}%)`;
+      };
+      const animate = (on) => {
+        el.style.transition = on ? '' : 'none';
+        if (under) under.style.transition = on ? '' : 'none';
+      };
       el.addEventListener('touchstart', (ev) => {
+        if (g && g.on) return; // a second finger: the first one leads
         g = null;
-        if (!small() || ev.touches.length !== 1) return;
+        if (!small() || ev.touches.length !== 1 || el.dataset.leaving) return;
         if (el === $('main') && U.view === 'home') return;
         if (ev.target.closest('input, textarea, select, [contenteditable], .keys, .ctoolbar') || scrolledLeft(ev.target)) return;
         const t = ev.touches[0];
-        g = { x0: t.clientX, y0: t.clientY, dx: 0, on: false, t: ev.timeStamp, v: 0 };
+        g = { id: t.identifier, x0: t.clientX, y0: t.clientY, dx: 0, on: false, t: ev.timeStamp, v: 0, w: el.offsetWidth || innerWidth };
       }, { passive: true });
       el.addEventListener('touchmove', (ev) => {
-        if (!g) return;
-        const t = ev.touches[0];
+        const t = g && [...ev.touches].find((x) => x.identifier === g.id);
+        if (!t) return;
         const dx = t.clientX - g.x0;
         const dy = t.clientY - g.y0;
         if (!g.on) {
@@ -7229,26 +7306,39 @@
           if (Math.abs(dy) > 10 || dx < -10 || !ev.cancelable) return (g = null);
           if (dx < 12 || dx < 2 * Math.abs(dy)) return;
           g.on = true;
-          el.style.transition = 'none';
+          g.x0 += 12; // from here on, no jump by the slop
+          animate(false);
         }
         ev.preventDefault();
-        const x = Math.max(0, dx);
-        g.v = (x - g.dx) / Math.max(1, ev.timeStamp - g.t); // px/ms
+        const x = Math.max(0, t.clientX - g.x0);
+        const dt = ev.timeStamp - g.t;
+        if (dt > 0) g.v = 0.6 * g.v + 0.4 * ((x - g.dx) / dt); // px/ms
         g.t = ev.timeStamp;
         g.dx = x;
-        el.style.transform = `translateX(${x}px)`;
+        place(x, g.w);
       }, { passive: false });
       const end = (ev) => {
         const s = g;
+        if (ev.touches.length) return; // fingers still down
         g = null;
         if (!s || !s.on) return;
-        const w = el.getBoundingClientRect().width;
-        const back = ev.type === 'touchend' && (s.dx > w / 3 || (s.dx > 40 && s.v > 0.5));
-        el.style.transition = '';
-        el.style.transform = '';
-        if (!back) return;
-        if (el === $('insp')) closeInsp();
-        else go('#/');
+        const flick = Math.abs(s.v) > 0.45;
+        const back = ev.type === 'touchend' && (flick ? s.v > 0 && s.dx > 24 : s.dx > s.w / 3);
+        animate(true);
+        if (!back) return place(null);
+        // Out first; going back now would hide the panel or empty the
+        // screen while it still slides.
+        place(s.w, s.w);
+        el.dataset.leaving = '1';
+        setTimeout(() => {
+          if (el === $('insp')) closeInsp();
+          else go('#/');
+          // The page's own rules now put it where it is: no jump.
+          animate(false);
+          place(null);
+          requestAnimationFrame(() => requestAnimationFrame(() => animate(true)));
+          delete el.dataset.leaving;
+        }, SLIDE_MS);
       };
       el.addEventListener('touchend', end);
       el.addEventListener('touchcancel', end);

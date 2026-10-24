@@ -132,6 +132,10 @@ kbd {
 
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: var(--r-xs); }
+/* Screens and the image view take the focus so keys and screen readers
+   start there, not to show a ring: around a whole screen it only shows as
+   a green edge when a swipe moves it. */
+:is(.main, .insp, .side, .viewer):focus { outline: none; }
 
 ::selection { background: light-dark(rgb(10 127 90 / 0.2), rgb(62 207 152 / 0.28)); }
 
