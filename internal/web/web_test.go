@@ -286,15 +286,10 @@ func TestStaticAndHeaders(t *testing.T) {
 	if resp.Header.Get("X-Content-Type-Options") != "nosniff" || resp.Header.Get("Cache-Control") != "no-cache" {
 		t.Fatalf("headers: %v", resp.Header)
 	}
-	// The Tailwind source is not served under any spelling of its path
-	// (sent raw, without client-side path cleaning).
-	for _, path := range []string{"/input.css", "//input.css", "/./input.css", "/x/../input.css", "/%2e/input.css"} {
-		if code := rawGet(t, ts, path); code != 404 {
-			t.Fatalf("%s: %d, want 404", path, code)
+	for _, path := range []string{"/app.css", "/app.js", "/theme.js", "/sw.js"} {
+		if code := rawGet(t, ts, path); code != 200 {
+			t.Fatalf("%s: %d, want 200", path, code)
 		}
-	}
-	if code := rawGet(t, ts, "/app.css"); code != 200 {
-		t.Fatalf("app.css: %d, want 200", code)
 	}
 }
 
@@ -334,7 +329,6 @@ func TestIcons(t *testing.T) {
 	if len(paths) < 6 {
 		t.Fatalf("icons: %v", paths)
 	}
-	paths = append(paths, "/providers/claude.svg", "/providers/openai.svg", "/providers/shell.svg")
 	for _, p := range paths {
 		if resp, _ := get(p); !strings.HasPrefix(resp.Header.Get("Content-Type"), "image/") {
 			t.Fatalf("%s: Content-Type %q", p, resp.Header.Get("Content-Type"))

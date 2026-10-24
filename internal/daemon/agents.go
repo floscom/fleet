@@ -88,6 +88,12 @@ type agentRec struct {
 	Git *fleetv1.GitStatus `json:"git,omitempty"`
 	// Note is what the user noted on the agent (note.go).
 	Note string `json:"note,omitempty"`
+	// Title is the conversation's title (titles.go): the CLI's own, or
+	// made from the first message (TitleFromPrompt). TitleScan is the
+	// transcript whose start was read for it.
+	Title           string `json:"title,omitempty"`
+	TitleFromPrompt bool   `json:"title_from_prompt,omitempty"`
+	TitleScan       string `json:"title_scan,omitempty"`
 
 	// limit is the usage limit that stopped the agent (limits.go).
 	limit *fleetv1.UsageLimit
@@ -140,6 +146,7 @@ func (a *agentRec) proto() *fleetv1.Agent {
 		PullRequests:    clonePulls(a.PullRequests),
 		Git:             cloneGit(a.Git),
 		Note:            a.Note,
+		Title:           a.Title,
 	}
 }
 

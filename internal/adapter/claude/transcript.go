@@ -92,6 +92,7 @@ type record struct {
 	IsMeta           bool   `json:"isMeta"`
 	IsCompactSummary bool   `json:"isCompactSummary"`
 	IsAPIError       bool   `json:"isApiErrorMessage"`
+	AITitle          string `json:"aiTitle"`
 	Message          struct {
 		Model   string          `json:"model"`
 		Content json.RawMessage `json:"content"`
@@ -128,6 +129,7 @@ type block struct {
 //	assistant API error                -> Note
 //	system compact_boundary, api_error,
 //	  informational, local_command     -> Note
+//	ai-title (the session's title)     -> Title
 //
 // Skipped: sidechain (subagent) and meta lines (injected skill text, image
 // path notes, caveats), the compaction summary, thinking blocks, synthetic
@@ -157,6 +159,10 @@ func parse(line []byte, sidechain bool) []transcript.Entry {
 		out = assistantContent(r)
 	case "system":
 		out = systemLine(r)
+	case "ai-title":
+		if t := strings.TrimSpace(r.AITitle); t != "" {
+			out = []transcript.Entry{{Kind: transcript.Title, Text: transcript.Clip(t, 200)}}
+		}
 	}
 	if ts := timeMs(r.Timestamp); ts != 0 {
 		for i := range out {

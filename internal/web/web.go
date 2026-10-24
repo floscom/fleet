@@ -427,6 +427,8 @@ type Agent struct {
 	Git *GitStatus `json:"git,omitempty"`
 	// Note is what the user noted on it, "" if nothing.
 	Note string `json:"note"`
+	// Title is the conversation's title, "" before its first message.
+	Title string `json:"title"`
 }
 
 // GitStatus is the git state of an agent's checkout (fleetv1.GitStatus).
@@ -534,6 +536,7 @@ func agentOf(a *fleetv1.Agent) Agent {
 		PullRequests:    make([]PullRequest, 0, len(a.PullRequests)),
 		Git:             gitOf(a.Git),
 		Note:            a.Note,
+		Title:           a.Title,
 	}
 	for _, p := range a.PullRequests {
 		out.PullRequests = append(out.PullRequests, pullOf(p))

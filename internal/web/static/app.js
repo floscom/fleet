@@ -1,16 +1,14 @@
-// fleet dashboard: live view fed by the daemon's /ws endpoint, plus root
-// management (a folder picker over /api/) and sessions (start an agent,
-// follow its chat, answer it, stop it) once this browser holds the admin
-// token that `fleet web` prints (or was unlocked with the fleet key). With
-// the token, agents of the other fleets that share this fleet's key are
-// listed and driven too (/api/hosts/).
+// fleet web app: sessions with coding agents on every machine of the fleet,
+// as chats. The daemon's /ws endpoint feeds it live (agents, machines,
+// roots, paired devices); the admin API (/api/, with the token `fleet web`
+// prints, or the one the unlock dialog trades the fleet key for) starts,
+// follows, answers and ends sessions, here and on the fleet's other
+// machines (/api/hosts/<id>/...).
 //
 // Vanilla ES2020, no framework, no build step. The server only ever sends
-// on the socket; we never write to it. DOM is built with
-// createElement/textContent exclusively (never innerHTML with server data).
-//
-// Every Tailwind class used here must appear as a complete literal string
-// so the Tailwind scanner (see input.css @source) picks it up.
+// on the socket; we never write to it. The DOM is built with createElement
+// and textContent only (never innerHTML with server data). Look and layout:
+// app.css and DESIGN.md.
 'use strict';
 
 (() => {
@@ -25,2530 +23,229 @@
     remote: new Map(), // server id of another fleet -> {agents: Map(id -> agent), fails}
     workflows: new Map(), // agentKey -> workflow runs going on (see pollWorkflows)
     usage: new Map(), // server id -> agent CLIs and their plan usage (see pollUsage)
-    host: new Map(), // server id -> how its machine is doing (see pollUsage, hostNode)
+    host: new Map(), // server id -> how its machine is doing (see pollUsage)
+    peerRoots: new Map(), // server id of another fleet -> its roots, for Devices
     snapshotDone: false,
     peersSeen: false, // first complete (post-browse) peers list of this connection received
+    online: false, // the socket is up
   };
-  const changedAt = new Map(); // "kind:id" -> ms when it last changed (for flash)
-  const FLASH_MS = 1600;
+
+  // What the page shows, and choices kept in this browser.
+  const U = {
+    view: 'home', // 'home' (phones: the list), 'new', 'chat', 'devices'
+    key: '', // agent key of the session shown
+    groupBy: load('fleet.groupBy', 'folder'),
+    collapsed: new Set(load('fleet.collapsed', [])),
+    q: '', // the session search
+    archivedOpen: false,
+    sideOff: false, // desktops: the sidebar is hidden
+    drawer: false, // tablets: the sidebar drawer is open
+  };
 
   // --------------------------------------------------------------- helpers
 
   const $ = (id) => document.getElementById(id);
+  const SVGNS = 'http://www.w3.org/2000/svg';
+  const DAY = 86400000;
 
-  // h('div', 'classes', child, ...) — children are nodes or strings (text).
-  function h(tag, cls, ...children) {
+  // h('div', 'classes' | {attributes}, ...children). Children are nodes or
+  // text; arrays are flattened, null, false and '' skipped. Attributes
+  // named on... are listeners.
+  function h(tag, a, ...kids) {
     const el = document.createElement(tag);
-    if (cls) el.className = cls;
-    for (const c of children) {
-      if (c == null || c === false) continue;
-      el.append(typeof c === 'string' || typeof c === 'number' ? String(c) : c);
-    }
-    return el;
-  }
-
-  function markChanged(key) {
-    changedAt.set(key, Date.now());
-  }
-
-  // Apply the flash animation to el if key changed recently. A negative
-  // animation-delay (set via CSSOM, which CSP allows) keeps the animation
-  // continuous across re-renders instead of restarting it.
-  function flash(el, key) {
-    const t = changedAt.get(key);
-    if (!t) return el;
-    const age = Date.now() - t;
-    if (age >= FLASH_MS) {
-      changedAt.delete(key);
-      return el;
-    }
-    el.classList.add('animate-flash', 'motion-reduce:animate-none');
-    el.style.animationDelay = `-${age}ms`;
-    return el;
-  }
-
-  function rel(ms) {
-    if (!ms) return 'never';
-    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
-    if (s < 5) return 'just now';
-    if (s < 60) return `${s}s ago`;
-    const m = Math.floor(s / 60);
-    if (m < 60) return `${m}m ago`;
-    const hr = Math.floor(m / 60);
-    if (hr < 48) return `${hr}h ago`;
-    return `${Math.floor(hr / 24)}d ago`;
-  }
-
-  function dur(ms) {
-    let s = Math.max(0, Math.floor(ms / 1000));
-    const d = Math.floor(s / 86400); s -= d * 86400;
-    const hr = Math.floor(s / 3600); s -= hr * 3600;
-    const m = Math.floor(s / 60); s -= m * 60;
-    if (d) return `${d}d ${hr}h ${m}m`;
-    if (hr) return `${hr}h ${m}m ${s}s`;
-    if (m) return `${m}m ${s}s`;
-    return `${s}s`;
-  }
-
-  // Element whose text is a relative time; refreshed by the 1s ticker.
-  function relTime(ms, prefix, cls) {
-    const el = h('time', cls || 'font-mono tabular-nums text-zinc-500');
-    el.dataset.ts = String(ms || 0);
-    el.dataset.prefix = prefix || '';
-    if (ms) {
-      el.dateTime = new Date(ms).toISOString();
-      el.title = new Date(ms).toLocaleString();
-    }
-    el.textContent = (prefix || '') + rel(ms);
-    return el;
-  }
-
-  // Empty state: a comment-style title plus an optional hint and command.
-  function emptyRow(title, hint, cmd) {
-    return h('li', 'px-4 py-8 text-center',
-      h('div', 'font-mono text-xs text-zinc-600', '// ' + title),
-      hint ? h('div', 'mt-1 text-xs text-zinc-500', hint) : null,
-      cmd ? h('code', 'mt-2 inline-block rounded-md border border-ink-600 bg-ink-850 px-2 py-1 font-mono text-[11px] text-zinc-300', '$ ' + cmd) : null);
-  }
-
-  function chip(text, cls) {
-    return h('span', cls || 'inline-flex items-center rounded border border-ink-600 bg-ink-800 px-1.5 py-px font-mono text-[11px] text-zinc-400', text);
-  }
-
-  function providerLogo(adapter) {
-    const providers = {
-      claude: ['claude', 'Claude · Anthropic'],
-      codex: ['openai', 'Codex · OpenAI'],
-      shell: ['shell', 'Shell'],
-    };
-    const provider = providers[adapter];
-    if (!Array.isArray(provider)) return null;
-    const img = h('img', 'size-5 shrink-0 object-contain');
-    img.src = `/providers/${provider[0]}.svg`;
-    img.alt = provider[1];
-    img.title = provider[1];
-    img.width = img.height = 20;
-    return img;
-  }
-
-  // pathBreaks lets a long path wrap before a slash rather than inside a
-  // folder name.
-  function pathBreaks(p) {
-    return p.split('/').flatMap((part, i) => (i ? [h('wbr'), '/' + part] : [part]));
-  }
-
-  // fitHeight grows a text box with its text, up to its CSS max height.
-  function fitHeight(ta) {
-    ta.style.height = 'auto';
-    ta.style.height = ta.scrollHeight + 2 + 'px';
-  }
-
-  function shortPath(p) {
-    if (!p) return '';
-    return p.replace(/^\/(home|Users)\/[^/]+/, '~');
-  }
-
-  function hostPort(addr, port) {
-    const a = addr.includes(':') ? `[${addr}]` : addr;
-    return port ? `${a}:${port}` : a;
-  }
-
-  // ---------------------------------------------------------- agent states
-
-  const STATES = {
-    needs_input: {
-      label: 'needs input', rank: 0,
-      badge: 'inline-flex items-center gap-1.5 rounded-full bg-amber-400/10 px-2 py-0.5 text-[11px] font-semibold text-amber-300 ring-1 ring-inset ring-amber-400/40',
-      dot: 'size-1.5 rounded-full bg-amber-400 animate-breathe motion-reduce:animate-none',
-      edge: 'bg-amber-400',
-    },
-    working: {
-      label: 'working', rank: 1,
-      badge: 'inline-flex items-center gap-1.5 rounded-full bg-sky-400/10 px-2 py-0.5 text-[11px] font-semibold text-sky-300 ring-1 ring-inset ring-sky-400/30',
-      dot: 'size-2.5 rounded-full border-[1.5px] border-sky-400 border-t-transparent animate-spin motion-reduce:animate-none',
-      edge: 'bg-sky-400',
-    },
-    running: {
-      label: 'running', rank: 2,
-      badge: 'inline-flex items-center gap-1.5 rounded-full bg-indigo-400/10 px-2 py-0.5 text-[11px] font-semibold text-indigo-300 ring-1 ring-inset ring-indigo-400/30',
-      dot: 'size-1.5 rounded-full bg-indigo-400',
-      edge: 'bg-indigo-400/70',
-    },
-    starting: {
-      label: 'starting', rank: 2,
-      badge: 'inline-flex items-center gap-1.5 rounded-full bg-indigo-400/10 px-2 py-0.5 text-[11px] font-semibold text-indigo-300 ring-1 ring-inset ring-indigo-400/30',
-      dot: 'size-1.5 rounded-full bg-indigo-400 animate-pulse motion-reduce:animate-none',
-      edge: 'bg-indigo-400/70',
-    },
-    idle: {
-      label: 'idle', rank: 3,
-      badge: 'inline-flex items-center gap-1.5 rounded-full bg-emerald-400/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-300/90 ring-1 ring-inset ring-emerald-400/25',
-      dot: 'size-1.5 rounded-full bg-emerald-400/80',
-      edge: 'bg-emerald-400/40',
-    },
-    unspecified: {
-      label: 'unknown', rank: 4,
-      badge: 'inline-flex items-center gap-1.5 rounded-full bg-zinc-400/10 px-2 py-0.5 text-[11px] font-semibold text-zinc-400 ring-1 ring-inset ring-zinc-400/25',
-      dot: 'size-1.5 rounded-full bg-zinc-500',
-      edge: 'bg-zinc-600',
-    },
-    failed: {
-      label: 'failed', rank: 9,
-      badge: 'inline-flex items-center gap-1.5 rounded-full bg-rose-500/10 px-2 py-0.5 text-[11px] font-semibold text-rose-300 ring-1 ring-inset ring-rose-500/40',
-      dot: 'size-1.5 rounded-full bg-rose-500',
-      edge: 'bg-rose-500/70',
-    },
-    exited: {
-      label: 'exited', rank: 9,
-      badge: 'inline-flex items-center gap-1.5 rounded-full bg-zinc-400/5 px-2 py-0.5 text-[11px] font-semibold text-zinc-500 ring-1 ring-inset ring-zinc-500/25',
-      dot: 'size-1.5 rounded-full bg-zinc-600',
-      edge: 'bg-zinc-700',
-    },
-  };
-  const stateOf = (a) => STATES[a.state] || STATES.unspecified;
-  const isFinished = (a) => a.state === 'exited' || a.state === 'failed';
-
-  function stateBadge(a) {
-    const st = stateOf(a);
-    const b = h('span', st.badge, h('span', st.dot), st.label);
-    if (a.stateDetail) b.title = a.stateDetail;
-    return b;
-  }
-
-  // limitClock is the time ms as the time of day, with the weekday when it
-  // is not today.
-  function limitClock(ms) {
-    const d = new Date(ms);
-    const t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    return d.toDateString() === new Date().toDateString() ? t : d.toLocaleDateString([], { weekday: 'short' }) + ' ' + t;
-  }
-
-  // limitNext says what happens next to an agent a usage limit l stopped.
-  function limitNext(l) {
-    if (l.detail) return l.detail;
-    if (l.resumeAtMs) return 'resumes ' + limitClock(l.resumeAtMs);
-    if (l.resetsAtMs) return 'resets ' + limitClock(l.resetsAtMs) + ', auto-resume off';
-    return 'auto-resume off';
-  }
-
-  // limitChip marks an agent a usage limit stopped.
-  function limitChip(l) {
-    const c = chip('limit' + (l.window ? ' ' + l.window : '') + ' · ' + limitNext(l),
-      'inline-flex max-w-full items-center truncate rounded border border-orange-500/30 bg-orange-500/10 px-1.5 py-px font-mono text-[11px] text-orange-300');
-    c.title = 'A usage limit' + (l.window ? ` (${l.window})` : '') + ' stopped this agent'
-      + (l.resetsAtMs ? '; it resets ' + new Date(l.resetsAtMs).toLocaleString() : '');
-    return c;
-  }
-
-  // Pull requests agents created (Agent.pullRequests).
-  const prOpen = (p) => p.state !== 'merged' && p.state !== 'closed';
-
-  // prStatus is a pull request's state in a word, and its colors.
-  function prStatus(p) {
-    if (p.state === 'merged') return ['merged', 'border-violet-400/30 bg-violet-400/10 text-violet-300'];
-    if (p.state === 'closed') return ['closed', 'border-rose-500/30 bg-rose-500/10 text-rose-300'];
-    if (p.state !== 'open') return [p.detail ? 'PR' : 'checking', 'border-ink-600 bg-ink-800 text-zinc-400'];
-    if (p.draft) return ['draft', 'border-ink-600 bg-ink-800 text-zinc-300'];
-    if (p.mergeState === 'dirty') return ['conflicts', 'border-rose-500/30 bg-rose-500/10 text-rose-300'];
-    if (p.checks === 'failing') return ['checks fail', 'border-rose-500/30 bg-rose-500/10 text-rose-300'];
-    if (p.checks === 'pending') return ['checks running', 'border-amber-400/30 bg-amber-400/10 text-amber-200'];
-    if (p.mergeState === 'blocked') return ['blocked', 'border-amber-400/30 bg-amber-400/10 text-amber-200'];
-    if (p.mergeState === 'behind') return ['behind', 'border-amber-400/30 bg-amber-400/10 text-amber-200'];
-    return ['ready', 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300'];
-  }
-
-  // prTitle is the tooltip of a pull request.
-  function prTitle(p) {
-    const parts = [`${p.repo}#${p.number}`];
-    if (p.title) parts.push(p.title);
-    if (p.headBranch) parts.push(`${p.headBranch} → ${p.baseBranch}`);
-    if (p.changedFiles || p.additions || p.deletions) parts.push(`+${p.additions} −${p.deletions} · ${p.changedFiles} file${p.changedFiles === 1 ? '' : 's'}`);
-    if (p.checks && p.checks !== 'unspecified') parts.push('checks ' + p.checks);
-    if (p.reviewDecision) parts.push(p.reviewDecision.replace('_', ' '));
-    if (p.detail) parts.push(p.detail);
-    return parts.join('\n');
-  }
-
-  // prChip links to a pull request from an agent's row.
-  function prChip(p) {
-    const [word, color] = prStatus(p);
-    const a = h('a', 'inline-flex max-w-full items-center gap-1 truncate rounded border px-1.5 py-px font-mono text-[11px] hover:brightness-125 focus-visible:outline-2 focus-visible:outline-emerald-400 ' + color,
-      h('span', 'opacity-70', 'PR'), '#' + p.number, h('span', 'opacity-80', '· ' + word));
-    a.href = p.url;
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
-    a.title = prTitle(p);
-    a.addEventListener('click', (ev) => ev.stopPropagation()); // not the row's chat
-    return a;
-  }
-
-  // The git state of agents' checkouts (Agent.git). gitUnpushed counts
-  // commits the remote lacks: ahead of the upstream, or of the base for a
-  // branch never pushed.
-  const gitUnpushed = (g) => (g.upstream ? g.ahead : g.baseAhead);
-
-  // gitTitle is the tooltip of a checkout's state.
-  function gitTitle(g) {
-    const parts = [(g.branch || 'detached HEAD') + (g.upstream ? ' → ' + g.upstream : ' (not pushed)')];
-    if (g.upstream && (g.ahead || g.behind)) parts.push(`${g.ahead} to push, ${g.behind} to pull`);
-    if (g.base && (g.baseAhead || g.baseBehind)) parts.push(`${g.base}: ${g.baseAhead} ahead, ${g.baseBehind} behind`);
-    if (g.changed) parts.push(`${g.changed} uncommitted`);
-    if (g.operation) parts.push(g.operation + ' in progress');
-    if (g.detail) parts.push(g.detail);
-    return parts.join('\n');
-  }
-
-  // gitChip says on an agent's row what its checkout has to push or pull;
-  // null if nothing.
-  function gitChip(g) {
-    if (!g) return null;
-    const parts = [];
-    if (g.operation || g.conflicts) {
-      parts.push(h('span', 'text-rose-300', g.operation || 'conflicts'));
-    } else {
-      const up = gitUnpushed(g);
-      if (up) parts.push(h('span', 'text-emerald-300/90', '↑' + up));
-      if (g.upstream && g.behind) parts.push(h('span', 'text-amber-200', '↓' + g.behind));
-    }
-    if (!parts.length) return null;
-    const c = h('span', 'inline-flex items-center gap-1 rounded border border-ink-600 bg-ink-800 px-1.5 py-px font-mono text-[11px] text-zinc-400',
-      h('span', 'opacity-70', '⎇'), ...parts);
-    c.title = gitTitle(g);
-    return c;
-  }
-
-  // noteLine is the note left on agent a (machine host), up to two lines;
-  // for an admin a button that edits it.
-  function noteLine(host, a) {
-    const el = h(admin ? 'button' : 'div', 'inline-flex max-w-full min-w-0 items-center gap-1.5 rounded border border-yellow-300/20 bg-yellow-300/[0.06] px-2 py-1 text-left text-xs text-yellow-100/90' +
-      (admin ? ' touch:min-h-11 hover:border-yellow-300/40 hover:bg-yellow-300/10 focus-visible:outline-2 focus-visible:outline-yellow-300' : ''),
-    h('span', 'shrink-0 text-yellow-300/70', '✎'),
-    h('span', 'line-clamp-2 min-w-0 whitespace-pre-line break-words', a.note));
-    el.title = a.note;
-    if (admin) {
-      el.type = 'button';
-      el.setAttribute('aria-label', `Note on ${a.name || a.id}: ${a.note}. Edit it`);
-      el.addEventListener('click', () => openNote(host, a));
-    }
-    return el;
-  }
-
-  // agentRow is the row of agent a, running on machine host ('' = here).
-  function agentRow({ a, host, shortcut = 0 }) {
-    const st = stateOf(a);
-    const done = isFinished(a);
-    const key = agentKey(host, a.id);
-    const li = h('li', admin
-      ? 'relative flex cursor-pointer touch-pan-y flex-col gap-1.5 px-4 py-3 transition-colors hover:bg-ink-850 sm:flex-row sm:gap-3'
-      : 'relative flex flex-col gap-1.5 px-4 py-3 transition-colors hover:bg-ink-850 sm:flex-row sm:gap-3');
-    li.dataset.id = a.id;
-    li.dataset.key = key;
-    li.dataset.host = host;
-    if (admin && shortcut) {
-      li.dataset.shortcut = String(shortcut);
-      li.setAttribute('aria-keyshortcuts', `Control+${shortcut}`);
-    }
-    li.append(h('span', 'absolute inset-y-2 left-0 w-0.5 rounded-r ' + st.edge));
-    // By the event's path: a button's handler may have replaced the
-    // clicked node (its iOS haptic label) before the click gets here.
-    if (admin) li.addEventListener('click', (ev) => {
-      const onButton = ev.composedPath().some((n) => n instanceof HTMLButtonElement);
-      if (!onButton && !getSelection().toString()) openChat(host, a.id, a);
-    });
-
-    const body = h('div', 'min-w-0 flex-1');
-
-    // line 1: name, adapter, badges ... updated
-    const top = h('div', 'flex flex-wrap items-center gap-x-2 gap-y-1');
-    const name = h('span', done ? 'truncate font-mono text-[13px] font-semibold text-zinc-400' : 'truncate font-mono text-[13px] font-semibold text-zinc-100', a.name || a.id);
-    name.title = a.id;
-    top.append(name, stateBadge(a));
-    if (admin && shortcut) {
-      const hint = h('kbd', 'touch:hidden rounded border border-ink-600 px-1 font-mono text-[10px] leading-4 text-zinc-500', `Ctrl+${shortcut}`);
-      hint.title = `Open this session with Ctrl+${shortcut}`;
-      hint.setAttribute('aria-hidden', 'true');
-      top.append(hint);
-    }
-    if (a.usageLimit && !done) top.append(limitChip(a.usageLimit));
-    // Its open pull requests, else the last one.
-    const prs = a.pullRequests || [];
-    const shown = prs.filter(prOpen);
-    for (const p of (shown.length ? shown : prs.slice(-1)).slice(-3)) top.append(prChip(p));
-    const gc = gitChip(a.git);
-    if (gc) top.append(gc);
-    if (S.remote.size) top.append(hostChip(host));
-    if (a.adapter) top.append(chip(a.adapter));
-    if (a.sandbox === 'docker') {
-      top.append(chip('docker', 'inline-flex items-center rounded border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-px font-mono text-[11px] text-cyan-300'));
-    }
-    if (a.isolation && a.isolation !== 'pinned' && a.isolation !== 'unspecified') {
-      top.append(chip(a.isolation));
-    }
-    if (done && a.exitCode != null) {
-      top.append(chip('exit ' + a.exitCode, a.exitCode === 0
-        ? 'inline-flex items-center rounded border border-ink-600 bg-ink-800 px-1.5 py-px font-mono text-[11px] text-zinc-500'
-        : 'inline-flex items-center rounded border border-rose-500/30 bg-rose-500/10 px-1.5 py-px font-mono text-[11px] text-rose-300'));
-    }
-    body.append(top);
-
-    // line 2: root/path, branch
-    const meta = h('div', 'mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-zinc-500');
-    const where = h('span', 'min-w-0 truncate font-mono');
-    if (a.root) where.append(h('span', 'text-zinc-400', a.root), h('span', 'text-zinc-600', ' : '));
-    where.append(shortPath(a.path || a.cwd || ''));
-    where.title = a.cwd || a.path || '';
-    meta.append(where);
-    if (a.branch) {
-      meta.append(h('span', 'inline-flex min-w-0 items-center gap-1 font-mono text-violet-300/80',
-        h('span', 'text-zinc-600', '⎇'), h('span', 'truncate', a.branch)));
-    }
-    if (a.cloneUrl) {
-      const c = h('span', 'min-w-0 truncate font-mono text-zinc-500', a.cloneUrl);
-      c.title = a.cloneUrl;
-      meta.append(c);
-    }
-    if (a.stateDetail && !done && !a.usageLimit) meta.append(h('span', 'truncate text-amber-200/70', a.stateDetail));
-    body.append(meta);
-    if (a.note) body.append(h('div', 'mt-1.5', noteLine(host, a)));
-
-    // line 3: its workflow runs going on, the latest first
-    const runs = (admin && S.workflows.get(agentKey(host, a.id))) || [];
-    for (const run of runs.slice(-3).reverse()) body.append(workflowLine(host, a, run));
-
-    // working: a thin shimmer under the row
-    if (a.state === 'working') {
-      li.append(h('span', 'shimmer-bar pointer-events-none absolute inset-x-0 bottom-0 h-px animate-shimmer motion-reduce:animate-none'));
-    }
-
-    // right column: provider, attached, updated
-    const side = h('div', 'flex shrink-0 flex-row-reverse items-center justify-between gap-3 text-xs sm:flex-col sm:items-end sm:justify-start sm:gap-1');
-    const att = a.attachedClients || 0;
-    const attEl = h('span', att > 0
-      ? 'inline-flex items-center gap-1 rounded-full bg-emerald-400/10 px-1.5 font-mono tabular-nums text-emerald-300'
-      : 'inline-flex items-center gap-1 px-1.5 font-mono tabular-nums text-zinc-600', (att > 0 ? '◉ ' : '○ ') + att);
-    attEl.title = att === 1 ? '1 client attached' : `${att} clients attached`;
-    side.append(h('div', 'flex items-center gap-2', attEl, providerLogo(a.adapter)),
-      relTime(a.updatedAtMs, 'updated ', 'whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-500'));
-    if (admin) {
-      const open = h('button', a.state === 'needs_input'
-        ? 'touch:min-h-11 rounded-md bg-amber-400/15 px-2 py-0.5 text-xs font-medium text-amber-200 ring-1 ring-inset ring-amber-400/40 hover:bg-amber-400/25 focus-visible:outline-2 focus-visible:outline-amber-400'
-        : 'touch:min-h-11 rounded-md px-2 py-0.5 text-xs text-zinc-400 hover:bg-ink-800 hover:text-emerald-300 focus-visible:outline-2 focus-visible:outline-emerald-400',
-      a.state === 'needs_input' ? 'answer ›' : 'open ›');
-      open.type = 'button';
-      open.setAttribute('aria-label', `Open the session of ${a.name || a.id}`);
-      open.addEventListener('click', () => openChat(host, a.id, a));
-      if (a.note) {
-        side.append(open);
-      } else {
-        const nb = h('button', 'touch:min-h-11 rounded-md px-2 py-0.5 text-xs text-zinc-500 hover:bg-ink-800 hover:text-yellow-200 focus-visible:outline-2 focus-visible:outline-emerald-400', '✎ note');
-        nb.type = 'button';
-        nb.title = 'Leave a note on this agent';
-        nb.setAttribute('aria-label', `Add a note to ${a.name || a.id}`);
-        nb.addEventListener('click', () => openNote(host, a));
-        side.append(h('div', 'flex items-center gap-1', nb, open));
+    if (typeof a === 'string') el.className = a;
+    else if (a) {
+      for (const [k, v] of Object.entries(a)) {
+        if (v == null || v === false) continue;
+        if (k === 'class') el.className = v;
+        else if (k === 'value') el.value = v;
+        else if (k === 'checked') el.checked = !!v;
+        else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
+        else el.setAttribute(k, v === true ? '' : String(v));
       }
     }
+    return add(el, kids);
+  }
 
-    li.append(body, side);
-    if (admin) {
-      li.append(swipeAction(host, a));
-      if (swipe.open === key) li.style.translate = `${-SWIPE_W}px 0`;
+  function add(el, kids) {
+    for (const c of kids.flat(Infinity)) {
+      if (c == null || c === false || c === '') continue;
+      el.append(c instanceof Node ? c : String(c));
     }
-    return flash(li, 'agent:' + key);
+    return el;
   }
 
-  // endAction is what ending agent a does: a live session is archived
-  // (killed, kept under History with its chat and files), a finished one
-  // deleted (forgotten). Either can remove the worktree or clone the
-  // daemon made for it (wt names it), unless it holds work that would be
-  // lost; a worktree's branch stays. Deleting removes it by default,
-  // archiving keeps it.
-  function endAction(a) {
-    const iso = a.isolation === 'clone' ? 'clone' : 'worktree';
-    // Daemons before Agent.worktree say nothing: deleting removes it, if any.
-    const wt = a.worktree || '';
-    return isFinished(a)
-      ? { label: 'Delete', busy: 'Deleting…', forget: true, wt, iso, dropWt: true,
-        note: 'It leaves History' + (a.worktree === undefined && a.isolation === iso ? `; its ${iso} is removed unless it holds unsaved work.` : '.') }
-      : { label: 'Archive', busy: 'Archiving…', forget: false, wt, iso, dropWt: false,
-        note: 'The agent is ended and moves to History; its chat' + (wt ? ' is kept.' : ' and files are kept.') };
+  // fill replaces el's children like h() adds them.
+  function fill(el, ...kids) {
+    el.replaceChildren();
+    return add(el, kids);
   }
 
-  // endAgent archives or deletes agent id on machine host (see endAction),
-  // removing its worktree or clone if dropWt (default: the action's).
-  // It returns {agent, forgot}, or null when it failed.
-  async function endAgent(host, id, a, dropWt) {
-    const act = endAction(a || {});
-    if (dropWt === undefined) dropWt = act.dropWt;
-    const name = (a && a.name) || id;
-    const base = host ? `/api/hosts/${encodeURIComponent(host)}/agents/` : '/api/agents/';
-    const body = {};
-    if (act.forget) body.forget = true;
-    if (dropWt) body.removeWorktree = true;
+  function svgUse(href, cls) {
+    const s = document.createElementNS(SVGNS, 'svg');
+    s.setAttribute('class', cls);
+    s.setAttribute('aria-hidden', 'true');
+    const u = document.createElementNS(SVGNS, 'use');
+    u.setAttribute('href', href);
+    s.append(u);
+    return s;
+  }
+  const icon = (name, cls) => svgUse('#i-' + name, 'i' + (cls ? ' ' + cls : ''));
+  const LOGOS = { claude: 'claude', codex: 'codex', shell: 'shell' };
+  const logo = (adapter, cls) => svgUse('#logo-' + (LOGOS[adapter] || 'shell'), 'logo logo-' + (LOGOS[adapter] || 'shell') + (cls ? ' ' + cls : ''));
+
+  function iconBtn(name, label, onclick, o = {}) {
+    return h('button', { type: 'button', class: 'icon-btn ' + (o.cls || ''), 'aria-label': label, title: o.title || label, onclick, ...o.attrs }, icon(name));
+  }
+
+  // The wordmark: FLEET in figlet's "ANSI Shadow" letters, drawn as
+  // vectors so it stays crisp when small. Full blocks are the letters; the
+  // box-drawing characters become a thin line shadow.
+  const WORDMARK = [
+    '███████╗██╗     ███████╗███████╗████████╗',
+    '██╔════╝██║     ██╔════╝██╔════╝╚══██╔══╝',
+    '█████╗  ██║     █████╗  █████╗     ██║',
+    '██╔══╝  ██║     ██╔══╝  ██╔══╝     ██║',
+    '██║     ███████╗███████╗███████╗   ██║',
+    '╚═╝     ╚══════╝╚══════╝╚══════╝   ╚═╝',
+  ];
+  function wordmark() {
+    const CW = 6;
+    const RH = 10;
+    let ink = '';
+    let shade = '';
+    WORDMARK.forEach((line, r) => {
+      const ch = [...line];
+      for (let c = 0; c < ch.length; c++) {
+        const x = c * CW;
+        const y = r * RH;
+        const cx = x + CW / 2;
+        const cy = y + RH / 2;
+        if (ch[c] === '█') {
+          let e = c;
+          while (ch[e + 1] === '█') e++;
+          ink += `M${x} ${y}h${(e - c + 1) * CW}v${RH}h${-(e - c + 1) * CW}z`;
+          c = e;
+        } else {
+          shade += {
+            '═': `M${x} ${cy}H${x + CW}`, '║': `M${cx} ${y}V${y + RH}`,
+            '╗': `M${x} ${cy}H${cx}V${y + RH}`, '╔': `M${x + CW} ${cy}H${cx}V${y + RH}`,
+            '╝': `M${x} ${cy}H${cx}V${y}`, '╚': `M${x + CW} ${cy}H${cx}V${y}`,
+          }[ch[c]] || '';
+        }
+      }
+    });
+    const s = document.createElementNS(SVGNS, 'svg');
+    s.setAttribute('viewBox', '0 0 246 60');
+    s.setAttribute('aria-hidden', 'true');
+    for (const [cls, d] of [['wm-shade', shade], ['wm-ink', ink]]) {
+      const p = document.createElementNS(SVGNS, 'path');
+      p.setAttribute('class', cls);
+      p.setAttribute('d', d);
+      s.append(p);
+    }
+    return s;
+  }
+
+  function load(key, dflt) {
     try {
-      const r = await api('POST', base + encodeURIComponent(id) + '/stop', body);
-      const rem = host && S.remote.get(host);
-      const what = `${act.forget ? 'deleted' : 'archived'} ${name}`;
-      if (act.forget) {
-        saveDraft(host, id, '');
-        if (rem) rem.agents.delete(id);
-        else if (!host) S.agents.delete(id);
-      } else if (rem && r && r.agent) {
-        rem.agents.set(id, r.agent);
-      }
-      if (r && r.worktreeKept) toast(`${what}; kept ${shortPath(act.wt || (a && a.cwd)) || 'its ' + act.iso}: ${r.reason}`, 'warn');
-      else if (dropWt && act.wt) toast(`${what} and removed its ${act.iso}`);
-      else toast(what);
-      invalidate('agents');
-      return { agent: r && r.agent, forgot: act.forget };
-    } catch (e) {
-      toast(`could not ${act.label.toLowerCase()} ${name}: ${e.message}`, 'error');
-      return null;
+      const v = JSON.parse(localStorage.getItem(key));
+      return v == null ? dflt : v;
+    } catch {
+      return dflt;
     }
   }
 
-  // ------------------------------------------------------------ row swipes
-  //
-  // On a touch screen an agent row swiped to the left uncovers its end
-  // action (Archive or Delete, see endAction), done by a tap on it. One
-  // row is open at a time; a tap elsewhere or a scroll closes it. The
-  // agent lists are not re-rendered while a finger drags a row.
-
-  const SWIPE_W = 96; // px, the width of the action (w-24)
-  const swipe = {
-    open: '', // agent key of the open row
-    g: null, // the gesture: {li, key, id, x0, y0, base, x, drag}
-    tapClose: false, // the finger came down while a row was open
-    quiet: 0, // clicks are dropped until then: they end a gesture
-    stale: false, // a render was skipped during a drag
-  };
-
-  function swipeAction(host, a) {
-    const act = endAction(a);
-    const b = h('button', act.forget
-      ? 'absolute inset-y-0 left-full w-24 bg-rose-600 text-xs font-semibold text-white disabled:opacity-60'
-      : 'absolute inset-y-0 left-full w-24 bg-amber-500 text-xs font-semibold text-ink-950 disabled:opacity-60',
-    act.label);
-    b.type = 'button';
-    b.tabIndex = -1; // Archive and Delete are in the session for keyboards
-    b.dataset.swipeAction = '';
-    b.setAttribute('aria-label', `${act.label} ${a.name || a.id}`);
-    b.addEventListener('click', async () => {
-      if (act.wt && !act.forget) {
-        // Keep or remove its worktree? The session's confirmation asks.
-        closeSwipe();
-        openChat(host, a.id, a);
-        chat.confirmStop = true;
-        chat.dropWt = false;
-        renderChatStop();
-        return;
-      }
-      b.disabled = true;
-      b.textContent = act.busy;
-      await endAgent(host, a.id, a);
-      if (swipe.open === agentKey(host, a.id)) closeSwipe();
-    });
-    return b;
-  }
-
-  const swipeRow = (key) => document.querySelector(`li[data-key="${CSS.escape(key)}"]`);
-  const swipeEase = () => (matchMedia('(prefers-reduced-motion: reduce)').matches ? 'none' : 'translate 200ms ease-out');
-
-  function setSwipe(li, x, animate) {
-    li.style.transition = animate ? swipeEase() : 'none';
-    li.style.translate = x ? `${x}px 0` : '';
-  }
-
-  function closeSwipe() {
-    const li = swipe.open && swipeRow(swipe.open);
-    swipe.open = '';
-    if (li) setSwipe(li, 0, true);
-  }
-
-  function wireSwipe() {
-    // Capture: before the lists' handlers and the row's click.
-    document.addEventListener('pointerdown', (ev) => {
-      swipe.tapClose = !!swipe.open && !ev.target.closest(`li[data-key="${CSS.escape(swipe.open)}"] [data-swipe-action]`);
-    }, true);
-    document.addEventListener('click', (ev) => {
-      if (Date.now() >= swipe.quiet) return;
-      ev.preventDefault();
-      ev.stopPropagation();
-    }, true);
-
-    const down = (ev) => {
-      if (ev.pointerType !== 'touch' || !ev.isPrimary || !admin) return;
-      const li = ev.target.closest('li[data-key]');
-      if (!li || ev.target.closest('[data-swipe-action]')) return;
-      swipe.g = { li, key: li.dataset.key, id: ev.pointerId, x0: ev.clientX, y0: ev.clientY,
-        base: swipe.open === li.dataset.key ? -SWIPE_W : 0, x: 0, drag: false };
-    };
-    const move = (ev) => {
-      const g = swipe.g;
-      if (!g || ev.pointerId !== g.id) return;
-      const dx = ev.clientX - g.x0, dy = ev.clientY - g.y0;
-      if (!g.drag) {
-        if (Math.abs(dy) > 10 && Math.abs(dy) > Math.abs(dx)) return end(ev); // a scroll
-        if (Math.abs(dx) < 10) return;
-        g.drag = true;
-        g.li.setPointerCapture(g.id);
-        if (swipe.open && swipe.open !== g.key) closeSwipe();
-      }
-      // Past the action the row follows the finger at half speed.
-      let x = Math.min(0, g.base + dx);
-      if (x < -SWIPE_W) x = -SWIPE_W + (x + SWIPE_W) / 2;
-      g.x = x;
-      setSwipe(g.li, x, false);
-    };
-    const end = (ev) => {
-      const g = swipe.g;
-      if (!g || ev.pointerId !== g.id) return;
-      swipe.g = null;
-      if (g.drag) {
-        swipe.quiet = Date.now() + 250;
-        const open = ev.type === 'pointerup' && g.x < -SWIPE_W / 2;
-        swipe.open = open ? g.key : '';
-        setSwipe(g.li, open ? -SWIPE_W : 0, true);
-      } else if (swipe.tapClose) {
-        // A tap or scroll beside the open row only closes it.
-        if (ev.type === 'pointerup') swipe.quiet = Date.now() + 250;
-        closeSwipe();
-      }
-      swipe.tapClose = false;
-      if (swipe.stale) {
-        swipe.stale = false;
-        invalidate('agents');
-      }
-    };
-    for (const ul of [$('agents-live'), $('agents-history')]) {
-      ul.addEventListener('pointerdown', down);
-      ul.addEventListener('pointermove', move);
-      ul.addEventListener('pointerup', end);
-      ul.addEventListener('pointercancel', end);
-    }
-    // A tap or scroll anywhere else closes the open row too.
-    const outside = (ev) => {
-      if (swipe.g || !swipe.tapClose) return;
-      swipe.tapClose = false;
-      if (ev.type === 'pointerup') swipe.quiet = Date.now() + 250;
-      closeSwipe();
-    };
-    document.addEventListener('pointerup', outside);
-    document.addEventListener('pointercancel', outside);
-  }
-
-  // agentKey identifies an agent across machines.
-  const agentKey = (host, id) => (host ? host + '/' + id : id);
-
-  // hostChip names the machine an agent runs on.
-  function hostChip(host) {
-    const c = chip(hostName(host), host
-      ? 'inline-flex items-center rounded border border-sky-400/25 bg-sky-400/10 px-1.5 py-px font-mono text-[11px] text-sky-300'
-      : 'inline-flex items-center rounded border border-emerald-400/25 bg-emerald-400/10 px-1.5 py-px font-mono text-[11px] text-emerald-300');
-    c.title = host ? 'runs on another fleet' : 'runs on this machine';
-    return c;
-  }
-
-  // allAgents lists this daemon's agents and those of other fleets.
-  function allAgents() {
-    const out = [...S.agents.values()].map((a) => ({ a, host: '' }));
-    for (const [host, r] of S.remote) for (const a of r.agents.values()) out.push({ a, host });
-    return out;
-  }
-
-  // folderOf is the folder agent a was started in, the key of the folder filter.
-  const folderOf = (a) => a.path || a.cwd || '';
-
-  // agentFolder is the folder the agents list is narrowed to ('' = all),
-  // kept across reloads.
-  const AGENT_FOLDER = 'fleet.agentFolder';
-  let agentFolder = '';
-  try {
-    agentFolder = localStorage.getItem(AGENT_FOLDER) || '';
-  } catch {}
-
-  function setAgentFolder(f) {
-    agentFolder = f;
+  function save(key, v) {
     try {
-      if (f) localStorage.setItem(AGENT_FOLDER, f);
-      else localStorage.removeItem(AGENT_FOLDER);
-    } catch {}
-    invalidate('agents');
-  }
-
-  // renderFolderFilter fills the folder buttons under the agents heading:
-  // "All", then one per folder with live agents and their count, the
-  // busiest first. It stays hidden while they all work in the same folder.
-  function renderFolderFilter(all) {
-    const box = $('agents-folders');
-    const folders = new Map(); // folder -> live agents in it
-    for (const { a } of all) {
-      const f = folderOf(a);
-      if (f && !isFinished(a)) folders.set(f, (folders.get(f) || 0) + 1);
+      if (v == null) localStorage.removeItem(key);
+      else localStorage.setItem(key, JSON.stringify(v));
+    } catch {
+      // storage full or blocked: the choice lasts this page
     }
-    // The picked folder keeps its button while it has no agents (or those of
-    // another fleet are still loading), so the filter can always be cleared.
-    if (agentFolder && !folders.has(agentFolder)) folders.set(agentFolder, 0);
-    box.hidden = folders.size < 2 && !agentFolder;
-    if (box.hidden) return box.replaceChildren();
-
-    const tail = (f) => f.split('/').filter(Boolean).pop() || f;
-    const names = new Map(); // tail -> how many folders end in it
-    for (const f of folders.keys()) names.set(tail(f), (names.get(tail(f)) || 0) + 1);
-    const button = (f, label, live) => {
-      const on = f === agentFolder;
-      const b = h('button', on
-        ? 'touch:min-h-11 inline-flex shrink-0 items-center gap-1.5 rounded-md border border-emerald-400/40 bg-emerald-400/15 px-2 py-0.5 font-mono text-xs text-emerald-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400'
-        : 'touch:min-h-11 inline-flex shrink-0 items-center gap-1.5 rounded-md border border-ink-600 bg-ink-850 px-2 py-0.5 font-mono text-xs text-zinc-400 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400',
-      label);
-      b.type = 'button';
-      b.setAttribute('aria-pressed', String(on));
-      if (f) b.title = shortPath(f);
-      if (live) b.append(h('span', on ? 'tabular-nums text-emerald-300/70' : 'tabular-nums text-zinc-600', String(live)));
-      b.addEventListener('click', () => setAgentFolder(on ? '' : f));
-      return b;
-    };
-    const sorted = [...folders].sort(([x, nx], [y, ny]) => ny - nx || tail(x).localeCompare(tail(y)));
-    box.replaceChildren(button('', 'All', 0),
-      ...sorted.map(([f, live]) => button(f, names.get(tail(f)) > 1 ? shortPath(f) : tail(f), live)));
   }
-
-  // ------------------------------------------------------------- renderers
-
-  function renderAgents() {
-    if (swipe.g && swipe.g.drag) {
-      swipe.stale = true;
-      return;
-    }
-    const every = allAgents();
-    if (swipe.open && !every.some(({ a, host }) => agentKey(host, a.id) === swipe.open)) swipe.open = '';
-    renderFolderFilter(every);
-    const all = agentFolder ? every.filter((x) => folderOf(x.a) === agentFolder) : every;
-    const live = all.filter((x) => !isFinished(x.a)).sort(({ a: x }, { a: y }) =>
-      stateOf(x).rank - stateOf(y).rank || (y.updatedAtMs || 0) - (x.updatedAtMs || 0) || x.name.localeCompare(y.name));
-    const hist = all.filter((x) => isFinished(x.a)).sort(({ a: x }, { a: y }) => (y.updatedAtMs || 0) - (x.updatedAtMs || 0));
-
-    const ul = $('agents-live');
-    if (live.length) ul.replaceChildren(...live.map((x, i) => agentRow({ ...x, shortcut: i < 9 ? i + 1 : 0 })));
-    else if (!S.snapshotDone) ul.replaceChildren(emptyRow('loading…'));
-    else if (admin) {
-      const li = emptyRow('no live agents', 'start Claude Code or Codex on any machine of the fleet');
-      const start = h('button', 'touch:min-h-11 mt-3 inline-flex items-center gap-1 rounded-md bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-emerald-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400', '+ New session');
-      start.type = 'button';
-      start.addEventListener('click', () => openLaunch());
-      li.append(h('div', '', start));
-      ul.replaceChildren(li);
-    } else ul.replaceChildren(emptyRow('no live agents', 'start one with', 'fleet run claude code:api'));
-
-    const hl = $('agents-history');
-    const HIST_MAX = 100;
-    if (hist.length) {
-      const rows = hist.slice(0, HIST_MAX).map(agentRow);
-      if (hist.length > HIST_MAX) rows.push(h('li', 'px-4 py-2 text-center text-xs text-zinc-600', `${hist.length - HIST_MAX} older not shown`));
-      hl.replaceChildren(...rows);
-    } else {
-      hl.replaceChildren(emptyRow('no finished agents'));
-    }
-    $('history-count').textContent = String(hist.length);
-    $('agents-meta').textContent = `${live.length} live · ${all.length} ${agentFolder ? 'here' : 'total'}`;
-  }
-
-  function renderPeers() {
-    const ul = $('peers');
-    const peers = [...S.peers].sort((x, y) => (y.self ? 1 : 0) - (x.self ? 1 : 0) || x.name.localeCompare(y.name));
-    if (!peers.length) {
-      ul.replaceChildren(emptyRow('no fleets seen', 'other fleet daemons on this LAN show up here via mDNS'));
-      return;
-    }
-    ul.replaceChildren(...peers.map((p) => {
-      const key = 'peer:' + (p.id || p.name + '@' + p.host);
-      const url = !p.self && peerURL(p);
-      const li = h('li', '');
-      const row = url
-        ? h('a', 'group flex items-start gap-3 px-4 py-3 transition-colors hover:bg-ink-850 focus-visible:bg-ink-850 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400')
-        : h('div', 'flex items-start gap-3 px-4 py-3');
-      if (url) {
-        row.href = url;
-        row.rel = 'noreferrer';
-        row.title = `Open the dashboard of ${p.name || p.host} (${url})`;
-      }
-      li.append(row);
-      row.append(h('span', p.self
-        ? 'mt-1.5 size-2 shrink-0 rounded-full bg-emerald-400 ring-4 ring-emerald-400/15'
-        : 'mt-1.5 size-2 shrink-0 rounded-full bg-sky-400 ring-4 ring-sky-400/15'));
-      const body = h('div', 'min-w-0 flex-1');
-      const top = h('div', 'flex flex-wrap items-center gap-2');
-      top.append(h('span', 'truncate font-mono text-[13px] font-semibold text-zinc-100', p.name || '(unnamed)'));
-      if (p.self) top.append(chip('this daemon', 'inline-flex items-center rounded-full bg-emerald-400/10 px-2 py-px text-[11px] font-medium text-emerald-300 ring-1 ring-inset ring-emerald-400/30'));
-      body.append(top);
-      const addrs = (p.addrs || []).map((a) => hostPort(a, p.port));
-      const sub = h('div', 'mt-0.5 flex flex-wrap gap-x-3 font-mono text-xs text-zinc-500');
-      if (p.host) sub.append(h('span', 'text-zinc-400', p.host));
-      // One unbreakable span per address so IPv6 never splits mid-address.
-      if (addrs.length) addrs.forEach((a) => sub.append(h('span', 'whitespace-nowrap tabular-nums', a)));
-      else if (p.port) sub.append(h('span', 'tabular-nums', ':' + p.port));
-      body.append(sub);
-      if (p.id) {
-        const idEl = h('div', 'mt-0.5 truncate font-mono text-[11px] text-zinc-600', p.id.slice(0, 16));
-        idEl.title = p.id;
-        body.append(idEl);
-      }
-      const hs = hostNode(p.id);
-      if (hs) body.append(hs);
-      const u = usageNode(p.id);
-      if (u) body.append(u);
-      row.append(body);
-      if (url) row.append(h('span', 'mt-0.5 shrink-0 whitespace-nowrap text-xs text-zinc-500 group-hover:text-emerald-300', 'open ↗'));
-      else if (!p.self) {
-        const na = h('span', 'mt-0.5 shrink-0 text-[11px] text-zinc-600', 'no dashboard');
-        na.title = 'This fleet does not advertise a web dashboard on the LAN (older version, or web is off or loopback-only).';
-        row.append(na);
-      }
-      return flash(li, key);
-    }));
-  }
-
-  // peerURL is the dashboard of peer p, at the address that looks most
-  // reachable from here (longest shared IPv4 prefix with this page's host).
-  function peerURL(p) {
-    const addrs = p.addrs || [];
-    if (!p.webPort || !addrs.length) return '';
-    const here = location.hostname.split('.');
-    const shared = (a) => {
-      const parts = a.split('.');
-      let n = 0;
-      while (n < 4 && parts[n] === here[n]) n++;
-      return n;
-    };
-    let best = addrs[0];
-    for (const a of addrs) if (shared(a) > shared(best)) best = a;
-    return `http://${hostPort(best, p.webPort)}/`;
-  }
-
-  const PLATFORM = { macos: 'macOS', ios: 'iOS', ipados: 'iPadOS', linux: 'Linux', windows: 'Windows', android: 'Android' };
-
-  function renderDevices() {
-    const ul = $('devices');
-    const devs = [...S.devices].sort((x, y) => (y.connected ? 1 : 0) - (x.connected ? 1 : 0) || x.name.localeCompare(y.name));
-    const online = devs.filter((d) => d.connected).length;
-    $('devices-meta').textContent = devs.length ? `${online}/${devs.length} online` : '';
-    if (!devs.length) {
-      ul.replaceChildren(emptyRow('no paired devices', 'only for the fleet CLI or a native app on another machine. This page needs no pairing.', 'fleet pair'));
-      return;
-    }
-    ul.replaceChildren(...devs.map((d) => {
-      const li = h('li', 'flex items-center gap-3 px-4 py-3');
-      const dot = h('span', d.connected
-        ? 'size-2 shrink-0 rounded-full bg-emerald-400 shadow-[0_0_8px] shadow-emerald-400/60'
-        : 'size-2 shrink-0 rounded-full bg-zinc-600');
-      dot.title = d.connected ? 'connected' : 'offline';
-      const body = h('div', 'min-w-0 flex-1',
-        h('div', d.connected ? 'truncate text-[13px] font-medium text-zinc-100' : 'truncate text-[13px] font-medium text-zinc-400', d.name || d.id),
-        h('div', 'text-xs text-zinc-500', PLATFORM[d.platform] || d.platform || 'unknown'));
-      const right = d.connected
-        ? h('span', 'text-xs font-medium text-emerald-300', 'online')
-        : relTime(d.lastSeenAtMs, 'seen ', 'whitespace-nowrap font-mono text-[11px] tabular-nums text-zinc-500');
-      li.append(dot, body, right);
-      return flash(li, 'device:' + d.id);
-    }));
-  }
-
-  function renderRoots() {
-    const ul = $('roots');
-    const multi = pickerHosts().length > 1 && S.server;
-    $('roots-meta').textContent = (S.roots.length ? String(S.roots.length) : '') +
-      (multi ? `${S.roots.length ? ' · ' : ''}on ${S.server.name || S.server.hostname}` : '');
-    if (confirmRemove && !S.roots.some((r) => r.name === confirmRemove)) confirmRemove = '';
-    if (!S.roots.length) {
-      $('roots-find').hidden = true;
-      $('roots-more').hidden = true;
-      if (admin) {
-        const li = emptyRow('no roots yet', 'agents can only start inside a root folder');
-        const add = h('button', 'touch:min-h-11 mt-3 inline-flex items-center gap-1 rounded-md bg-emerald-400 px-3 py-1.5 text-xs font-semibold text-ink-950 hover:bg-emerald-300 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400', '+ Add a folder');
-        add.type = 'button';
-        add.addEventListener('click', openPicker);
-        li.append(h('div', '', add));
-        ul.replaceChildren(li);
-      } else {
-        ul.replaceChildren(emptyRow('no roots configured', 'allow agents in a folder with', 'fleet roots add ~/code'));
-      }
-      return;
-    }
-    // Many roots: a filter, and the first few until "show all".
-    const many = S.roots.length > ROOTS_FEW;
-    $('roots-find').hidden = !many;
-    const q = many ? $('roots-filter').value.trim().toLowerCase() : '';
-    const words = q.split(/\s+/).filter(Boolean);
-    const found = S.roots.filter((r) => words.every((w) => (r.name + ' ' + shortPath(r.path)).toLowerCase().includes(w)));
-    const shown = q || rootsAll || !many ? found : found.slice(0, ROOTS_FEW);
-    // Keep the one awaiting removal in view.
-    if (confirmRemove && !shown.some((r) => r.name === confirmRemove)) {
-      const r = found.find((x) => x.name === confirmRemove);
-      if (r) shown.push(r);
-    }
-    const more = $('roots-more');
-    more.hidden = !many || !!q;
-    more.textContent = rootsAll ? 'Show fewer' : `Show all ${S.roots.length} roots`;
-    more.setAttribute('aria-expanded', String(rootsAll));
-    if (!shown.length) {
-      ul.replaceChildren(emptyRow(`no root matches "${q}"`));
-      return;
-    }
-    ul.replaceChildren(...shown.map((r) => {
-      const li = h('li', 'group flex items-center gap-2 py-2 pl-4 pr-2');
-      const main = h('div', 'min-w-0 flex-1');
-      const top = h('div', 'flex min-w-0 items-center gap-2');
-      const dot = h('span', r.trust ? 'size-1.5 shrink-0 rounded-full bg-emerald-400' : 'size-1.5 shrink-0 rounded-full bg-zinc-600');
-      dot.title = r.trust ? 'trusted: agents skip the "trust this folder?" prompt' : 'untrusted';
-      dot.setAttribute('role', 'img');
-      dot.setAttribute('aria-label', r.trust ? 'trusted' : 'untrusted');
-      top.append(dot, h('span', 'min-w-0 truncate font-mono text-[13px] font-semibold text-zinc-100', r.name));
-      if (r.adapters && r.adapters.length) {
-        top.append(h('span', 'shrink-0 truncate font-mono text-[11px] text-zinc-500', r.adapters.join(' · ')));
-      }
-      const path = h('div', 'truncate pl-3.5 font-mono text-xs text-zinc-500', shortPath(r.path));
-      path.title = r.path;
-      main.append(top, path);
-      li.append(main);
-      if (admin && confirmRemove !== r.name) {
-        const go = h('button', 'touch:min-h-11 touch:min-w-11 touch:text-base shrink-0 rounded-md px-2 py-1 text-xs font-medium text-emerald-300/80 hover:bg-emerald-400/10 hover:text-emerald-200 focus-visible:outline-2 focus-visible:outline-emerald-400', '▸', h('span', 'touch:hidden', ' start'));
-        go.type = 'button';
-        go.title = `Start a session in ${r.name}`;
-        go.setAttribute('aria-label', `Start a session in ${r.name}`);
-        go.addEventListener('click', () => openLaunch({ root: r.name }));
-        li.append(go);
-        const edit = h('button', 'touch:min-h-11 shrink-0 rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', 'edit');
-        edit.type = 'button';
-        edit.setAttribute('aria-label', `Edit root ${r.name}`);
-        edit.addEventListener('click', () => openPicker({ root: r, host: '' }));
-        li.append(edit);
-      }
-      if (admin) li.append(removeControl(r));
-      return flash(li, 'root:' + r.name);
-    }));
-  }
-
-  // The remove button of a root row, or its inline confirmation.
-  function removeControl(r) {
-    if (confirmRemove === r.name) {
-      const yes = h('button', 'touch:min-h-11 rounded-md bg-rose-500/15 px-2 py-1 text-xs font-medium text-rose-200 ring-1 ring-inset ring-rose-500/40 hover:bg-rose-500/25 focus-visible:outline-2 focus-visible:outline-rose-400', 'Remove');
-      yes.type = 'button';
-      yes.dataset.focus = 'confirm-remove';
-      yes.addEventListener('click', () => removeRoot(r.name));
-      const no = h('button', 'touch:min-h-11 rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', 'Keep');
-      no.type = 'button';
-      no.addEventListener('click', () => {
-        confirmRemove = '';
-        focusAfterRender('[data-remove="' + CSS.escape(r.name) + '"]');
-        invalidate('roots');
-      });
-      return h('div', 'flex shrink-0 flex-col items-end gap-1',
-        h('span', 'text-[11px] text-zinc-500', 'running agents keep going'),
-        h('div', 'flex items-center gap-1 touch:gap-2', no, yes));
-    }
-    const b = h('button', 'touch:min-h-11 touch:min-w-11 touch:text-sm shrink-0 rounded-md px-2 py-1 text-xs text-zinc-600 hover:bg-ink-800 hover:text-rose-300 focus-visible:outline-2 focus-visible:outline-emerald-400 group-hover:text-zinc-400',
-      h('span', 'touch:hidden', 'remove'), h('span', 'hidden touch:inline', '✕'));
-    b.type = 'button';
-    b.dataset.remove = r.name;
-    b.setAttribute('aria-label', `Remove root ${r.name}`);
-    b.addEventListener('click', () => {
-      confirmRemove = r.name;
-      focusAfterRender('[data-focus="confirm-remove"]');
-      invalidate('roots');
-    });
-    return b;
-  }
-
-  function renderServer() {
-    const s = S.server;
-    if (!s) return;
-    $('srv-name').textContent = s.name || s.hostname || 'fleet';
-    $('srv-version').textContent = $('srv-version').title = s.version || 'dev';
-    $('srv-host').textContent = s.hostname || '–';
-    $('srv-platform').textContent = `${s.os || '?'}/${s.arch || '?'}`;
-    $('srv-listen').textContent = (s.listen || '–') + (s.mdns ? ' · mdns' : '');
-    $('srv-id').textContent = s.id ? 'server ' + s.id : '';
-    $('srv-id').title = s.id || '';
-    $('roots-hint-host').textContent = s.hostname || s.name || 'the server';
-    renderAccess();
-    tickUptime();
-  }
-
-  function renderCounters() {
-    let live = 0, input = 0, working = 0;
-    for (const { a } of allAgents()) {
-      if (isFinished(a)) continue;
-      live++;
-      if (a.state === 'needs_input') input++;
-      if (a.state === 'working') working++;
-    }
-    $('c-live').textContent = String(live);
-    const ci = $('c-input');
-    ci.textContent = String(input);
-    ci.className = input > 0
-      ? 'mt-0.5 font-mono text-xl font-semibold tabular-nums text-amber-300 sm:mt-1 sm:text-2xl'
-      : 'mt-0.5 font-mono text-xl font-semibold tabular-nums text-zinc-100 sm:mt-1 sm:text-2xl';
-    const cw = $('c-working');
-    cw.textContent = String(working);
-    cw.className = working > 0
-      ? 'mt-0.5 font-mono text-xl font-semibold tabular-nums text-sky-300 sm:mt-1 sm:text-2xl'
-      : 'mt-0.5 font-mono text-xl font-semibold tabular-nums text-zinc-100 sm:mt-1 sm:text-2xl';
-    $('c-peers').textContent = String(S.peers.length);
-    const online = S.devices.filter((d) => d.connected).length;
-    const cd = $('c-devices');
-    cd.replaceChildren(String(online), h('span', 'text-base font-normal text-zinc-600', ' / ' + S.devices.length));
-  }
-
-  // The title is set outside requestAnimationFrame, which browsers pause in
-  // background tabs: that is exactly when the needs-input count matters.
-  function updateTitle() {
-    let input = 0;
-    for (const { a } of allAgents()) if (a.state === 'needs_input') input++;
-    const base = S.server && S.server.name ? `fleet · ${S.server.name}` : 'fleet';
-    const t = input > 0 ? `(${input}) ${base}` : base;
-    if (document.title !== t) document.title = t;
-  }
-
-  // Batch renders per animation frame.
-  const dirty = new Set();
-  let rafPending = false;
-  const RENDER = { server: renderServer, agents: renderAgents, peers: renderPeers, devices: renderDevices, roots: renderRoots };
-  function invalidate(...parts) {
-    updateTitle();
-    for (const p of parts) dirty.add(p);
-    if (rafPending) return;
-    rafPending = true;
-    requestAnimationFrame(() => {
-      rafPending = false;
-      for (const p of dirty) RENDER[p]();
-      dirty.clear();
-      renderCounters();
-      if (pendingFocus) {
-        const el = document.querySelector(pendingFocus);
-        pendingFocus = '';
-        if (el) el.focus();
-      }
-    });
-  }
-
-  // Re-rendered lists lose focus; this restores it to selector's match.
-  let pendingFocus = '';
-  function focusAfterRender(selector) {
-    pendingFocus = selector;
-  }
-
-  // ---------------------------------------------------------------- tickers
-
-  function tickUptime() {
-    const s = S.server;
-    $('srv-uptime').textContent = s && s.startedAtMs ? dur(Date.now() - s.startedAtMs) : '–';
-  }
-
-  setInterval(() => {
-    tickUptime();
-    for (const el of document.querySelectorAll('time[data-ts]')) {
-      const ts = Number(el.dataset.ts);
-      const t = (el.dataset.prefix || '') + rel(ts);
-      if (el.textContent !== t) el.textContent = t;
-    }
-    for (const el of document.querySelectorAll('[data-since]')) {
-      const t = dur(Date.now() - Number(el.dataset.since));
-      if (el.textContent !== t) el.textContent = t;
-    }
-  }, 1000);
-
-  // ----------------------------------------------------------------- toasts
-
-  const TOAST = {
-    ok: ['pointer-events-auto flex max-w-md items-center gap-2 rounded-lg border border-emerald-400/30 bg-ink-850/95 px-3 py-2 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 motion-reduce:transition-none', 'size-1.5 shrink-0 rounded-full bg-emerald-400'],
-    warn: ['pointer-events-auto flex max-w-md items-center gap-2 rounded-lg border border-amber-400/30 bg-ink-850/95 px-3 py-2 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 motion-reduce:transition-none', 'size-1.5 shrink-0 rounded-full bg-amber-400'],
-    error: ['pointer-events-auto flex max-w-md items-center gap-2 rounded-lg border border-rose-500/40 bg-ink-850/95 px-3 py-2 text-xs text-zinc-200 shadow-lg shadow-black/40 transition-all duration-300 motion-reduce:transition-none', 'size-1.5 shrink-0 rounded-full bg-rose-500'],
-  };
-
-  function toast(text, kind) {
-    const [box, dot] = TOAST[kind] || TOAST.ok;
-    const t = h('div', box, h('span', dot), text);
-    $('toasts').append(t);
-    setTimeout(() => {
-      t.classList.add('opacity-0', 'translate-y-1');
-      setTimeout(() => t.remove(), 350);
-    }, kind === 'error' || kind === 'warn' ? 7000 : 4000);
-  }
-
-  // ---------------------------------------------------------------- messages
 
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-
-  // Mark entries of a keyed list that are new or changed vs. the previous list.
-  function diffMark(prev, next, keyFn, prefix, onNew) {
-    const old = new Map(prev.map((x) => [keyFn(x), x]));
-    for (const x of next) {
-      const k = keyFn(x);
-      const o = old.get(k);
-      if (!o) {
-        markChanged(prefix + k);
-        if (onNew) onNew(x);
-      } else if (!same(o, x)) {
-        markChanged(prefix + k);
-      }
-    }
-  }
-
-  const peerKey = (p) => p.id || p.name + '@' + p.host;
-
-  function resetState() {
-    S.server = null;
-    S.devices = [];
-    S.peers = [];
-    S.roots = [];
-    S.agents.clear();
-    S.snapshotDone = false;
-    S.peersSeen = false;
-    changedAt.clear();
-  }
-
-  function handle(msg) {
-    switch (msg.type) {
-      case 'hello':
-        resetState();
-        S.server = msg.server || null;
-        setMainDim(false);
-        invalidate('server', 'agents', 'peers', 'devices', 'roots');
-        // The daemon may have restarted, or the token been rotated.
-        checkSession(linkToken);
-        linkToken = false;
-        break;
-      case 'devices': {
-        const next = msg.devices || [];
-        if (S.snapshotDone) diffMark(S.devices, next, (d) => d.id, 'device:');
-        S.devices = next;
-        invalidate('devices');
-        break;
-      }
-      case 'peers': {
-        const next = msg.peers || [];
-        // Lists before the server's first mDNS browse (complete=false) hold
-        // only this daemon; diff only against a complete list, so fleets
-        // that were already running are not announced as new.
-        if (S.peersSeen) {
-          diffMark(S.peers, next, peerKey, 'peer:', (p) => {
-            if (!p.self) toast(`new fleet on the network: ${p.name || p.host}`);
-          });
-        }
-        if (msg.complete) S.peersSeen = true;
-        S.peers = next;
-        invalidate('peers', 'roots');
-        if (next.some((p) => p.id && !S.usage.has(p.id))) scheduleUsage(0);
-        if (picker.open) {
-          renderHosts();
-          checkHosts();
-        }
-        if (launch.open) renderLaunchHosts();
-        break;
-      }
-      case 'roots': {
-        const next = msg.roots || [];
-        if (S.snapshotDone) diffMark(S.roots, next, (r) => r.name, 'root:');
-        S.roots = next;
-        invalidate('roots');
-        if (picker.open) renderPicker();
-        if (launch.open && !launch.host) launchRootsChanged();
-        break;
-      }
-      case 'agent': {
-        const a = msg.agent;
-        if (!a || !a.id) break;
-        const prev = S.agents.get(a.id);
-        if (S.snapshotDone && (!prev || !same(prev, a))) markChanged('agent:' + a.id);
-        S.agents.set(a.id, a);
-        invalidate('agents');
-        chatAgent('', a);
-        break;
-      }
-      case 'agentRemoved':
-        S.agents.delete(msg.id);
-        changedAt.delete('agent:' + msg.id);
-        invalidate('agents');
-        break;
-      case 'snapshotDone':
-        S.snapshotDone = true;
-        invalidate('agents');
-        tryOpenPending();
-        break;
-      default:
-        // unknown message types are ignored for forward compatibility
-    }
-  }
-
-  // ------------------------------------------------------------------ admin
-  //
-  // Changing the fleet needs the admin token that `fleet web` prints as a
-  // link (http://host:7421/#token=...), or that the unlock dialog gets for
-  // the fleet key. It is kept in localStorage, which is per origin (port
-  // included, unlike cookies), and sent as a Bearer header. The fragment
-  // never reaches the server and is removed from the address bar right away.
-
-  const TOKEN_KEY = 'fleet.adminToken';
-  let memToken = ''; // fallback when storage is unavailable
-  let admin = false;
-  let linkToken = false; // a token just came from a link; the next hello checks it
-  let confirmRemove = ''; // root whose removal awaits confirmation
-  let rootsAll = false; // every root shown, not just the first few
-  const ROOTS_FEW = 6;
-
-  function getToken() {
-    try {
-      return localStorage.getItem(TOKEN_KEY) || memToken;
-    } catch (e) {
-      return memToken;
-    }
-  }
-
-  function setToken(t) {
-    memToken = t;
-    try {
-      if (t) localStorage.setItem(TOKEN_KEY, t);
-      else localStorage.removeItem(TOKEN_KEY);
-    } catch (e) {
-      // storage disabled: memToken lasts until the tab closes
-    }
-  }
-
-  // takeLinkToken stores a token from the URL fragment and strips it.
-  function takeLinkToken() {
-    const m = /(?:^#|&)token=([0-9A-Za-z]+)/.exec(location.hash);
-    if (!m) return false;
-    setToken(m[1]);
-    history.replaceState(null, '', location.pathname + location.search);
-    return true;
-  }
-
-  class APIError extends Error {
-    constructor(status, message, notJoined) {
-      super(message);
-      this.status = status;
-      this.notJoined = !!notJoined; // another machine without this fleet's key
-    }
-  }
-
-  // api calls the admin API and returns the decoded JSON reply (null for
-  // 204). Failures throw an APIError carrying the server's message.
-  async function api(method, path, body) {
-    const headers = {};
-    const token = getToken();
-    if (token) headers.Authorization = 'Bearer ' + token;
-    const init = { method, headers, cache: 'no-store', credentials: 'omit' };
-    if (body !== undefined) {
-      headers['Content-Type'] = 'application/json';
-      init.body = JSON.stringify(body);
-    }
-    let res;
-    try {
-      res = await fetch(path, init);
-    } catch (e) {
-      throw new APIError(0, 'cannot reach the daemon');
-    }
-    let data = null;
-    if (res.status !== 204) {
-      try {
-        data = await res.json();
-      } catch (e) {
-        // not JSON
-      }
-    }
-    if (res.status === 401) lostAdmin();
-    if (!res.ok) throw new APIError(res.status, (data && data.error) || `request failed (${res.status})`, data && data.notJoined);
-    return data;
-  }
-
-  function setAdmin(on) {
-    if (admin === on) return;
-    admin = on;
-    confirmRemove = '';
-    if (!on) {
-      closePicker();
-      closeLaunch();
-      closeChat();
-      S.remote.clear();
-      S.workflows.clear();
-      S.usage.clear();
-      S.host.clear();
-    } else {
-      closeUnlock();
-    }
-    renderAccess();
-    invalidate('roots', 'agents', 'peers');
-    syncPush();
-    tryOpenPending();
-    scheduleRemote(0);
-    scheduleWorkflows(0);
-    scheduleUsage(0);
-  }
-
-  // lostAdmin handles a rejected token (rotated, or from another server).
-  function lostAdmin() {
-    const had = admin;
-    setToken('');
-    setAdmin(false);
-    if (had) toast('admin access ended: unlock again with the fleet key, or run `fleet web` on the server', 'warn');
-  }
-
-  // checkSession asks whether our token is (still) valid. fromLink is set
-  // when it just came from a `fleet web` link.
-  async function checkSession(fromLink) {
-    if (!getToken()) {
-      setAdmin(false);
-      return;
-    }
-    let s;
-    try {
-      s = await api('GET', '/api/session');
-    } catch (e) {
-      return; // daemon unreachable: keep the token, the next hello retries
-    }
-    if (s && s.admin) {
-      setAdmin(true);
-      if (fromLink) toast('this browser can now manage the fleet');
-      return;
-    }
-    setToken('');
-    setAdmin(false);
-    toast(fromLink
-      ? 'this admin link is no longer valid: run `fleet web` again'
-      : 'the saved admin token is no longer valid: unlock again with the fleet key', 'warn');
-  }
-
-  function signOut() {
-    // The api call takes the token before it goes.
-    if (push.on) stopPush();
-    setToken('');
-    setAdmin(false);
-    toast('signed out: this browser is read-only again');
-  }
-
-  function renderAccess() {
-    const pill = $('access');
-    const where = (S.server && (S.server.hostname || S.server.name)) || 'the server';
-    if (admin) {
-      pill.className = 'inline-flex items-center gap-1.5 rounded-full border border-violet-400/30 bg-violet-400/10 px-2.5 py-1 text-xs font-medium text-violet-200';
-      pill.textContent = 'admin';
-      pill.title = 'This browser can add, edit and remove roots.';
-    } else {
-      pill.className = 'inline-flex items-center gap-1.5 rounded-full border border-ink-600 bg-ink-850 px-2.5 py-1 text-xs font-medium text-zinc-500';
-      pill.textContent = 'read-only';
-      pill.title = `To manage this fleet here, unlock it with the fleet key, or run "fleet web" on ${where} and open the link it prints.`;
-    }
-    $('unlock-host').textContent = where;
-    $('unlock-open').hidden = admin;
-    $('signout').hidden = !admin;
-    renderNotify();
-    $('roots-add').hidden = !admin;
-    $('agents-new').hidden = !admin;
-    $('roots-hint').hidden = admin;
-    $('footer-mode').textContent = admin ? 'admin' : 'read-only view';
-  }
-
-  // ------------------------------------------------------------------- push
-  //
-  // Notifications when an agent needs input, finishes or fails (push.go).
-  // Browsers offer push to secure contexts only, and iOS only to the web
-  // app added to the Home Screen, so the button says what is missing
-  // instead of failing. Subscribing needs the admin token; the service
-  // worker (sw.js) shows the notifications.
-
-  const PUSH_OK = window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
-  const push = { key: '', on: false, busy: false, reg: null, endpoint: '' };
-  // openPending is an agent to show once it is known: a tapped notification.
-  let openPending = '';
-
-  function pushHint() {
-    if (!window.isSecureContext) return `Notifications need HTTPS: open this dashboard over https (e.g. tailscale serve), not http://${location.host}.`;
-    if (IOS && !navigator.standalone) return 'On iPhone, add the dashboard to the Home Screen (Share › Add to Home Screen) and open it from there to get notifications.';
-    return 'This browser does not support push notifications.';
-  }
-
-  function renderNotify() {
-    const b = $('notify');
-    b.hidden = !admin;
-    b.disabled = push.busy;
-    b.setAttribute('aria-pressed', String(push.on));
-    b.setAttribute('aria-label', push.on ? 'notifications on' : 'notifications off');
-    b.querySelector('svg').setAttribute('fill', push.on ? 'currentColor' : 'none');
-    // Pill-sized like its neighbours; ::after widens the tap area on touch.
-    b.className = 'relative inline-flex items-center rounded-full border px-2 py-1 pointer-coarse:after:absolute pointer-coarse:after:-inset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 ' +
-      (push.on ? 'border-emerald-400/30 bg-emerald-400/10 text-emerald-300 hover:bg-emerald-400/20' : 'border-ink-600 bg-ink-850 text-zinc-500 hover:bg-ink-800 hover:text-zinc-200');
-    b.title = !PUSH_OK ? pushHint()
-      : push.on ? 'Notifications on: this device hears when an agent needs you, finishes or fails. Click to turn them off.'
-      : 'Notifications off: click to hear on this device when an agent needs you, finishes or fails.';
-  }
-
-  // b64url decodes base64url into bytes.
-  function b64url(str) {
-    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((str.length + 3) % 4));
-    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
-  }
-
-  // sameKey reports whether sub was made for the daemon's VAPID key.
-  function sameKey(sub, key) {
-    const k = sub.options && sub.options.applicationServerKey;
-    if (!k) return true; // not exposed: assume it is ours
-    const a = new Uint8Array(k);
-    const b = b64url(key);
-    return a.length === b.length && a.every((x, i) => x === b[i]);
-  }
-
-  // syncPush registers the service worker and checks this browser's
-  // subscription with the daemon: one the daemon lost is sent again, one
-  // made for another key is dropped.
-  async function syncPush() {
-    if (!PUSH_OK || !admin) return renderNotify();
-    try {
-      await navigator.serviceWorker.register('/sw.js');
-      push.reg = await navigator.serviceWorker.ready;
-      const sub = await push.reg.pushManager.getSubscription();
-      const r = await api('GET', '/api/push' + (sub ? '?endpoint=' + encodeURIComponent(sub.endpoint) : ''));
-      push.key = r.key;
-      push.on = false;
-      if (sub && sameKey(sub, r.key) && Notification.permission === 'granted') {
-        if (!r.subscribed) await api('POST', '/api/push/subscribe', sub.toJSON());
-        Object.assign(push, { on: true, endpoint: sub.endpoint });
-      } else if (sub) {
-        await sub.unsubscribe();
-      }
-    } catch (e) {
-      // e.g. 404: notifications are off on this daemon
-    }
-    renderNotify();
-  }
-
-  async function toggleNotify() {
-    if (!PUSH_OK) return toast(pushHint(), 'warn');
-    if (push.busy) return;
-    push.busy = true;
-    renderNotify();
-    try {
-      if (push.on) {
-        await stopPush();
-        toast('notifications off on this device');
-      } else {
-        if (!push.reg || !push.key) throw new Error('not ready yet, try again in a moment');
-        // Straight from the click: Safari asks for permission only from
-        // a user gesture.
-        const sub = await push.reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64url(push.key) });
-        await api('POST', '/api/push/subscribe', sub.toJSON());
-        Object.assign(push, { on: true, endpoint: sub.endpoint });
-        try {
-          await api('POST', '/api/push/test', { endpoint: sub.endpoint });
-        } catch (e) {
-          // The push service refused this subscription: the daemon dropped it.
-          if (e.status === 410) await stopPush();
-          throw e;
-        }
-        toast('notifications on: a test notification is on its way');
-      }
-    } catch (e) {
-      if (window.Notification && Notification.permission === 'denied') toast('notifications are blocked for this site in the browser or system settings', 'warn');
-      else toast(`notifications: ${e.message}`, 'error');
-    }
-    push.busy = false;
-    renderNotify();
-  }
-
-  // stopPush ends this browser's subscription here and at the push service.
-  async function stopPush() {
-    const endpoint = push.endpoint;
-    push.on = false;
-    push.endpoint = '';
-    if (endpoint) await api('POST', '/api/push/unsubscribe', { endpoint }).catch(() => {});
-    const sub = push.reg && (await push.reg.pushManager.getSubscription());
-    if (sub) await sub.unsubscribe();
-  }
-
-  // openFromPush shows the agent of a tapped notification once the agent
-  // list and admin rights are in.
-  function openFromPush(id) {
-    openPending = id || '';
-    tryOpenPending();
-  }
-
-  function tryOpenPending() {
-    if (!openPending || !admin || !S.snapshotDone) return;
-    const a = S.agents.get(openPending);
-    openPending = '';
-    if (a) openChat('', a.id, a);
-  }
-
-  function wirePush() {
-    $('notify').addEventListener('click', toggleNotify);
-    const id = new URLSearchParams(location.search).get('agent');
-    if (id) {
-      history.replaceState(null, '', location.pathname + location.hash);
-      openFromPush(id);
-    }
-    if (!PUSH_OK) return;
-    navigator.serviceWorker.addEventListener('message', (ev) => {
-      if (ev.data && ev.data.type === 'openAgent') openFromPush(ev.data.agent);
-    });
-  }
-
-  // ----------------------------------------------------------------- unlock
-  //
-  // Someone who knows the fleet key (or this machine's admin token) types
-  // it in instead of opening a `fleet web` link: POST /api/unlock trades
-  // either for the admin token, which is then kept like one from a link.
-
-  let unlockBusy = false;
-
-  function openUnlock() {
-    if (admin) return;
-    unlockBusy = false;
-    $('unlock-key').value = '';
-    renderUnlock('');
-    $('unlock').showModal();
-    if (!touch()) $('unlock-key').focus();
-  }
-
-  function closeUnlock() {
-    const d = $('unlock');
-    if (d.open) d.close();
-  }
-
-  function renderUnlock(error) {
-    const st = $('unlock-status');
-    st.className = error ? 'min-h-5 text-xs text-rose-300' : 'min-h-5 text-xs text-zinc-500';
-    st.textContent = error || (unlockBusy ? 'checking…' : '');
-    $('unlock-submit').disabled = unlockBusy;
-  }
-
-  // unlockKey is the key in what was typed or pasted: bare, or out of a
-  // `fleet web` link (#token=...) or join command (--join ...). Any length:
-  // an admin token set by hand may be short.
-  function unlockKey(text) {
-    const m = /(?:#token=|--join\s+)([0-9A-Za-z]+)/.exec(text);
-    return m ? m[1] : text.trim();
-  }
-
-  async function submitUnlock(ev) {
-    ev.preventDefault();
-    if (unlockBusy) return;
-    const key = unlockKey($('unlock-key').value);
-    if (!key) {
-      renderUnlock('enter the fleet key or the admin token');
-      return;
-    }
-    unlockBusy = true;
-    renderUnlock('');
-    let r;
-    try {
-      r = await api('POST', '/api/unlock', { key });
-    } catch (e) {
-      unlockBusy = false;
-      renderUnlock(e.message);
-      return;
-    }
-    unlockBusy = false;
-    if (!r || !r.token) {
-      renderUnlock('the daemon sent no token');
-      return;
-    }
-    setToken(r.token);
-    setAdmin(true);
-    toast('this browser can now manage the fleet');
-  }
-
-  function wireUnlock() {
-    const dlg = $('unlock');
-    $('unlock-open').addEventListener('click', openUnlock);
-    $('roots-unlock').addEventListener('click', openUnlock);
-    $('unlock-form').addEventListener('submit', submitUnlock);
-    $('unlock-close').addEventListener('click', closeUnlock);
-    $('unlock-cancel').addEventListener('click', closeUnlock);
-    // The field holds a secret: gone once the dialog closes.
-    dlg.addEventListener('close', () => {
-      $('unlock-key').value = '';
-    });
-    wireBackdrop(dlg, closeUnlock, () => !unlockBusy);
-  }
-
-  // ------------------------------------------------------------------- note
-  //
-  // A note left on an agent ("customer is testing, keep it open"), shown on
-  // its row and in its session. Edited in a small dialog, from the row or
-  // the session, for this machine's agents and those of other fleets.
-
-  const note = { host: '', id: '', busy: false };
-
-  function openNote(host, a) {
-    if (!admin) return;
-    Object.assign(note, { host, id: a.id, busy: false });
-    $('note-agent').textContent = a.name || a.id;
-    $('note-text').value = a.note || '';
-    $('note-clear').hidden = !a.note;
-    renderNote('');
-    $('note').showModal();
-    const ta = $('note-text');
-    if (!touch()) {
-      ta.focus();
-      ta.setSelectionRange(ta.value.length, ta.value.length);
-    }
-  }
-
-  function closeNote() {
-    const d = $('note');
-    if (d.open) d.close();
-  }
-
-  function renderNote(error) {
-    const st = $('note-status');
-    st.className = error ? 'min-h-5 min-w-0 text-rose-300' : 'min-h-5 min-w-0 text-zinc-500';
-    st.textContent = error || (note.busy ? 'saving…' : '');
-    const n = $('note-text').value.length;
-    const count = $('note-count');
-    count.textContent = n > 400 ? `${n}/500` : '';
-    $('note-save').disabled = note.busy;
-    $('note-clear').disabled = note.busy;
-  }
-
-  // saveNote sets the note (text, '' removes it) and shows the agent as
-  // the daemon returns it.
-  async function saveNote(text) {
-    if (note.busy) return;
-    const { host, id } = note;
-    const base = host ? `/api/hosts/${encodeURIComponent(host)}/agents/` : '/api/agents/';
-    note.busy = true;
-    renderNote('');
-    let r;
-    try {
-      r = await api('POST', base + encodeURIComponent(id) + '/note', { note: text.trim() });
-    } catch (e) {
-      note.busy = false;
-      renderNote(e.message);
-      return;
-    }
-    note.busy = false;
-    if (r && r.agent) {
-      const rem = host && S.remote.get(host);
-      if (rem) rem.agents.set(id, r.agent);
-      else if (!host) S.agents.set(id, r.agent);
-      invalidate('agents');
-      chatAgent(host, r.agent);
-    }
-    closeNote();
-  }
-
-  function wireNote() {
-    const dlg = $('note');
-    const ta = $('note-text');
-    $('note-form').addEventListener('submit', (ev) => {
-      ev.preventDefault();
-      saveNote(ta.value);
-    });
-    $('note-clear').addEventListener('click', () => saveNote(''));
-    $('note-close').addEventListener('click', closeNote);
-    $('note-cancel').addEventListener('click', closeNote);
-    $('chat-note-btn').addEventListener('click', () => {
-      if (chat.agent) openNote(chat.host, chat.agent);
-    });
-    ta.addEventListener('input', () => renderNote(''));
-    // Enter saves (Shift+Enter: a new line); on a touch keyboard Enter is
-    // a new line and Save saves. Ctrl/Cmd+Enter saves everywhere.
-    ta.addEventListener('keydown', (ev) => {
-      if (ev.key !== 'Enter' || ev.isComposing) return;
-      if (ev.ctrlKey || ev.metaKey || (!ev.shiftKey && !touch())) {
-        ev.preventDefault();
-        $('note-form').requestSubmit();
-      }
-    });
-    wireBackdrop(dlg, closeNote, () => !note.busy);
-  }
-
-  async function removeRoot(name) {
-    confirmRemove = '';
-    try {
-      await api('DELETE', '/api/roots/' + encodeURIComponent(name));
-      toast(`removed root ${name}`);
-    } catch (e) {
-      toast(`could not remove ${name}: ${e.message}`, 'error');
-    }
-    invalidate('roots');
-  }
-
-  // ----------------------------------------------------------------- picker
-  //
-  // A folder browser over GET /api/fs: walk a machine's folders and add
-  // the current one as a root. The machine is this daemon or another fleet
-  // on the LAN, reached through /api/hosts/<id>/ (this daemon signs the
-  // request with the fleet key; machines without it are "not joined").
-
-  const picker = {
-    open: false,
-    host: '', // server id of the machine being browsed; '' = this daemon
-    hosts: new Map(), // server id -> 'checking' | 'joined' | 'not_joined' | 'unreachable'
-    dir: null, // last listing: {path, parent, home, entries, truncated}
-    seq: 0, // request counter; stale replies are dropped
-    loading: false,
-    error: '',
-    busy: false, // a save is in flight
-    editing: null, // original root while editing; its name identifies the update
-    making: false, // a new folder is being made
-    adapters: null, // [{id, name, available}] once loaded
-    roots: null, // roots of another machine, once loaded
-    joinCmd: '', // `fleet start --join <key>`, once loaded
-  };
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many || one + 's'}`;
 
   // Phones and tablets: no keyboard to keep focus for, and focusing a text
   // field opens the on-screen keyboard.
   const touch = () => matchMedia('(pointer: coarse)').matches;
+  // The layouts: phones stack the screens, tablets have a drawer.
+  const small = () => matchMedia('(max-width: 639px)').matches;
+  const narrow = () => matchMedia('(max-width: 1023px)').matches;
+  // Keyboard hints only where there is a keyboard.
+  const keyboard = () => !touch() && !small();
+  const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  const MOD = MAC ? '⌘' : 'Ctrl';
+  const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
-  // Require both ends of the click to be outside the dialog's bounds, so
-  // selecting text or clicking empty space inside never dismisses it.
-  function wireBackdrop(dlg, close, canClose = () => true) {
-    let downOutside = false;
-    const outside = (ev) => {
-      const r = dlg.getBoundingClientRect();
-      return ev.target === dlg && (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom);
-    };
-    dlg.addEventListener('pointerdown', (ev) => {
-      downOutside = ev.button === 0 && outside(ev);
-    });
-    dlg.addEventListener('pointercancel', () => { downOutside = false; });
-    dlg.addEventListener('close', () => { downOutside = false; });
-    dlg.addEventListener('click', (ev) => {
-      const dismiss = downOutside && outside(ev);
-      downOutside = false;
-      if (dismiss && canClose()) close();
-    });
+  // rel is how long ago ms was, short: now, 4m, 3h, Tue, Oct 12.
+  function rel(ms) {
+    if (!ms) return '';
+    const s = Math.round((Date.now() - ms) / 1000);
+    if (s < 45) return 'now';
+    const m = Math.round(s / 60);
+    if (m < 60) return m + 'm';
+    const hr = Math.round(m / 60);
+    if (hr < 24) return hr + 'h';
+    const d = new Date(ms);
+    if (Date.now() - ms < 6 * DAY) return d.toLocaleDateString([], { weekday: 'short' });
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
   }
 
-  // pickerHosts: this daemon, then the fleets on the LAN with a dashboard.
-  function pickerHosts() {
-    const self = S.server || {};
-    const out = [{ id: '', name: self.name || self.hostname || 'this machine' }];
-    for (const p of S.peers) {
-      if (!p.self && p.id && p.webPort && (p.addrs || []).length) out.push({ id: p.id, name: p.name || p.host || p.id.slice(0, 8) });
+  // ago is rel in words: just now, 4 min ago, 3 h ago, Tue, Oct 12.
+  function ago(ms) {
+    const r = rel(ms);
+    if (r === 'now') return 'just now';
+    if (/^\d+m$/.test(r)) return r.slice(0, -1) + ' min ago';
+    if (/^\d+h$/.test(r)) return r.slice(0, -1) + ' h ago';
+    return r;
+  }
+
+  // relTime is an element whose text (rel or ago) the ticker keeps fresh.
+  function relTime(ms, cls, long) {
+    const el = h('time', cls || '');
+    el.dataset.ts = String(ms || 0);
+    if (long) el.dataset.long = '1';
+    if (ms) {
+      el.dateTime = new Date(ms).toISOString();
+      el.title = new Date(ms).toLocaleString();
     }
-    return out;
-  }
-
-  const hostName = (id) => (pickerHosts().find((x) => x.id === id) || { name: 'that machine' }).name;
-  const hostAPI = (path) => (picker.host ? `/api/hosts/${encodeURIComponent(picker.host)}/${path}` : '/api/' + path);
-  const hostRoots = () => (picker.host ? picker.roots || [] : S.roots);
-
-  const joinPath = (dir, name) => (dir.endsWith('/') ? dir : dir + '/') + name;
-  const baseName = (p) => p.split('/').filter(Boolean).pop() || '';
-  const rootAt = (path) => hostRoots().find((r) => r.path === path);
-
-  // rootAround is the most specific root containing path.
-  function rootAround(path) {
-    let best = null;
-    for (const r of hostRoots()) {
-      const inside = path === r.path || path.startsWith(r.path.endsWith('/') ? r.path : r.path + '/');
-      if (inside && (!best || r.path.length > best.path.length)) best = r;
-    }
-    return best;
-  }
-
-  function openPicker(opts) {
-    if (!admin || picker.busy) return;
-    const editing = (opts && opts.root) || null;
-    if (editing) resetHost(opts.host || '');
-    picker.editing = editing;
-    $('picker-h').textContent = editing ? 'Edit root folder' : 'Add a root folder';
-    $('picker-name').value = editing ? editing.name : '';
-    $('picker-trust').checked = !!editing && !!editing.trust;
-    $('picker-filter').value = '';
-    showNewFolder(false);
-    picker.error = '';
-    picker.open = true;
-    if (picker.host && !pickerHosts().some((x) => x.id === picker.host)) resetHost('');
-    if (!$('picker').open) $('picker').showModal();
-    renderHosts();
-    renderAdapters();
-    renderPicker();
-    browse(editing ? editing.path : picker.dir ? picker.dir.path : '');
-    loadAdapters();
-    loadHostRoots();
-    checkHosts();
-    if (!touch()) $('picker-filter').focus();
-  }
-
-  function closePicker() {
-    const d = $('picker');
-    if (d.open) d.close();
-  }
-
-  // browse lists path ('' = home). typed is set when path came from the
-  // path field; otherwise the field is not overwritten while being edited.
-  async function browse(path, typed) {
-    const seq = ++picker.seq;
-    picker.loading = true;
-    renderPicker();
-    const q = new URLSearchParams();
-    if (path) q.set('path', path);
-    if ($('picker-hidden').checked) q.set('hidden', '1');
-    let dir = null;
-    let err = '';
-    try {
-      dir = await api('GET', hostAPI('fs?' + q));
-    } catch (e) {
-      err = e.message;
-      if (picker.host && seq === picker.seq) {
-        if (e.notJoined) setHostState(picker.host, 'not_joined');
-        else if (e.status === 502 || e.status === 404) setHostState(picker.host, 'unreachable');
-      }
-    }
-    if (seq !== picker.seq) return;
-    if (dir && picker.host) setHostState(picker.host, 'joined');
-    picker.loading = false;
-    picker.error = err;
-    if (dir) {
-      const moved = !picker.dir || picker.dir.path !== dir.path;
-      picker.dir = dir;
-      const field = $('picker-path');
-      if (typed || document.activeElement !== field) field.value = dir.path;
-      if (moved) {
-        $('picker-filter').value = '';
-        if (!picker.editing) $('picker-name').value = '';
-        $('picker-list').scrollTop = 0;
-      }
-    }
-    renderPicker();
-  }
-
-  function goToTyped() {
-    let p = $('picker-path').value.trim();
-    if (!p) return;
-    if (p === '~' || p.startsWith('~/')) p = ((picker.dir && picker.dir.home) || '') + p.slice(1);
-    browse(p, true);
-  }
-
-  async function loadAdapters() {
-    if (picker.adapters) return;
-    const host = picker.host;
-    let list = [];
-    try {
-      const r = await api('GET', hostAPI('adapters'));
-      list = (r && r.adapters) || [];
-    } catch (e) {
-      // not joined or unreachable: the folder list says so
-    }
-    if (host !== picker.host) return;
-    picker.adapters = list;
-    renderAdapters();
-  }
-
-  // loadHostRoots fetches another machine's roots, to mark them in the list.
-  async function loadHostRoots() {
-    const host = picker.host;
-    if (!host) return;
-    try {
-      const r = await api('GET', hostAPI('roots'));
-      if (host !== picker.host) return;
-      picker.roots = (r && r.roots) || [];
-      renderPicker();
-    } catch (e) {
-      // browse reports it
-    }
-  }
-
-  // ---------------------------------------------------------- machines
-
-  function setHostState(id, state) {
-    if (!id) return;
-    const changed = picker.hosts.get(id) !== state;
-    picker.hosts.set(id, state);
-    if (changed) renderHosts();
-    if (changed && launch.open) renderLaunchHosts();
-    if (id !== picker.host) return;
-    if (changed) renderPicker();
-    if (state === 'not_joined') waitForJoin();
-  }
-
-  // checkHosts asks every other fleet whether it holds this fleet's key.
-  function checkHosts() {
-    for (const x of pickerHosts()) {
-      if (!x.id || picker.hosts.get(x.id) === 'joined') continue;
-      if (!picker.hosts.has(x.id)) picker.hosts.set(x.id, 'checking');
-      checkHost(x.id);
-    }
-    renderHosts();
-  }
-
-  async function checkHost(id) {
-    let state;
-    try {
-      const r = await api('GET', `/api/hosts/${encodeURIComponent(id)}/session`);
-      state = r && r.admin ? 'joined' : 'not_joined';
-    } catch (e) {
-      state = e.notJoined ? 'not_joined' : 'unreachable';
-    }
-    setHostState(id, state);
-    return state;
-  }
-
-  const HOST_CHIP = 'touch:min-h-11 inline-flex cursor-pointer select-none items-center gap-1.5 rounded-md border border-ink-600 bg-ink-900 px-2 py-1 font-mono text-[12px] text-zinc-300 hover:border-zinc-500 has-checked:border-emerald-400/50 has-checked:bg-emerald-400/10 has-checked:text-emerald-200 has-focus-visible:outline-2 has-focus-visible:outline-offset-2 has-focus-visible:outline-emerald-400';
-  const HOST_STATE = {
-    self: ['size-1.5 shrink-0 rounded-full bg-emerald-400', 'this machine'],
-    joined: ['size-1.5 shrink-0 rounded-full bg-sky-400', ''],
-    checking: ['size-1.5 shrink-0 rounded-full bg-zinc-500 animate-pulse motion-reduce:animate-none', ''],
-    not_joined: ['size-1.5 shrink-0 rounded-full bg-amber-400', 'not joined'],
-    unreachable: ['size-1.5 shrink-0 rounded-full bg-rose-500', 'unreachable'],
-  };
-
-  function renderHosts() {
-    const box = $('picker-hosts');
-    box.replaceChildren(...pickerHosts().map((x) => {
-      const rb = h('input', 'sr-only');
-      rb.type = 'radio';
-      rb.name = 'picker-host';
-      rb.value = x.id;
-      rb.checked = x.id === picker.host;
-      rb.disabled = picker.busy || (!!picker.editing && x.id !== picker.host);
-      const [dot, note] = HOST_STATE[x.id ? picker.hosts.get(x.id) || 'checking' : 'self'];
-      return h('label', HOST_CHIP, rb, h('span', dot), x.name,
-        note ? h('span', 'font-sans text-[11px] text-zinc-500', note) : null);
-    }));
-    $('picker-host').textContent = hostName(picker.host);
-  }
-
-  // resetHost switches the picker to machine id without loading anything.
-  function resetHost(id) {
-    picker.host = id;
-    picker.dir = null;
-    picker.roots = null;
-    picker.adapters = null;
-    picker.error = '';
-    picker.seq++;
-  }
-
-  function selectHost(id) {
-    if (picker.host === id || picker.editing || picker.busy) return;
-    resetHost(id);
-    showNewFolder(false);
-    $('picker-path').value = '';
-    $('picker-filter').value = '';
-    $('picker-name').value = '';
-    renderHosts();
-    renderAdapters();
-    browse('');
-    loadAdapters();
-    loadHostRoots();
-  }
-
-  // waitForJoin re-checks a not-joined machine every few seconds while it is
-  // picked, and loads it once `fleet start --join` ran there.
-  let joinTimer = 0;
-  function waitForJoin() {
-    clearTimeout(joinTimer);
-    if (!picker.open) return;
-    const host = picker.host;
-    joinTimer = setTimeout(async () => {
-      if (!picker.open || picker.host !== host) return;
-      // checkHost keeps waiting (setHostState) while it is not joined.
-      const state = await checkHost(host);
-      if (state === 'joined' && picker.open && picker.host === host) {
-        toast(`${hostName(host)} joined the fleet`);
-        browse('');
-        loadAdapters();
-        loadHostRoots();
-      }
-    }, 3000);
-  }
-
-  async function loadJoin() {
-    if (picker.joinCmd) return;
-    try {
-      const r = await api('GET', '/api/join');
-      picker.joinCmd = (r && r.command) || '';
-    } catch (e) {
-      return;
-    }
-    renderPickerList();
-  }
-
-  // copyText copies el's text. Plain HTTP has no Clipboard API, so this
-  // falls back to selecting the text and the old copy command.
-  async function copyText(el, btn) {
-    let ok = false;
-    try {
-      await navigator.clipboard.writeText(el.textContent);
-      ok = true;
-    } catch (e) {
-      const range = document.createRange();
-      range.selectNodeContents(el);
-      const sel = getSelection();
-      sel.removeAllRanges();
-      sel.addRange(range);
-      try {
-        ok = document.execCommand('copy');
-      } catch (e2) {
-        ok = false;
-      }
-    }
-    btn.textContent = ok ? 'Copied' : 'Selected: copy it';
-  }
-
-  // joinPanel explains how to add a machine that lacks this fleet's key.
-  function joinPanel() {
-    loadJoin();
-    const name = hostName(picker.host);
-    const cmd = h('code', 'block min-w-0 flex-1 select-all break-all rounded-md border border-ink-600 bg-ink-950 px-2.5 py-2 text-left font-mono text-[12px] leading-relaxed text-zinc-200', picker.joinCmd || 'loading…');
-    const copy = h('button', 'touch:min-h-11 shrink-0 self-start rounded-md border border-ink-600 bg-ink-850 px-2.5 py-1.5 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400', 'Copy');
-    copy.type = 'button';
-    copy.disabled = !picker.joinCmd;
-    copy.addEventListener('click', () => copyText(cmd, copy));
-    return h('li', 'px-2 py-6',
-      h('div', 'text-center font-mono text-xs text-zinc-600', `// ${name} is not in this fleet yet`),
-      h('p', 'mt-3 text-xs text-zinc-400', 'Run this on ', h('span', 'font-mono text-zinc-200', name), ' once (it starts fleet there if needed):'),
-      h('div', 'mt-2 flex items-start gap-2', cmd, copy),
-      h('p', 'mt-2 text-[11px] leading-relaxed text-zinc-600', 'This picker notices by itself. Machines with the same key manage each other from their dashboards, so share it like a password.'));
-  }
-
-  function renderAdapters() {
-    const box = $('picker-adapters');
-    if (!picker.adapters) {
-      box.replaceChildren(h('span', 'text-xs text-zinc-600', 'loading…'));
-      return;
-    }
-    if (!picker.adapters.length && !(picker.editing && picker.editing.adapters && picker.editing.adapters.length)) {
-      box.replaceChildren(h('span', 'text-xs text-zinc-600', 'all adapters'));
-      return;
-    }
-    const adapters = [...picker.adapters];
-    // Keep stored restrictions selectable even if an adapter disappeared.
-    for (const id of (picker.editing && picker.editing.adapters) || []) {
-      if (!adapters.some((a) => a.id === id)) adapters.push({ id, name: id, available: false });
-    }
-    box.replaceChildren(...adapters.map((a) => {
-      const cb = h('input', 'accent-emerald-400');
-      cb.type = 'checkbox';
-      cb.value = a.id;
-      cb.checked = !!picker.editing && (picker.editing.adapters || []).includes(a.id);
-      const label = h('label', 'touch:min-h-11 inline-flex cursor-pointer select-none items-center gap-1.5 rounded-md border border-ink-600 bg-ink-900 px-2 py-1 font-mono text-[12px] text-zinc-300 hover:border-zinc-500 has-checked:border-emerald-400/50 has-checked:bg-emerald-400/10 has-checked:text-emerald-200', cb, a.id);
-      label.title = a.available ? a.name : `${a.name}: not installed on this machine`;
-      if (!a.available) label.append(h('span', 'text-zinc-600', 'n/a'));
-      return label;
-    }));
-  }
-
-  function renderPicker() {
-    if (!picker.open) return;
-    const dir = picker.dir;
-    renderCrumbs(dir ? dir.path : '');
-    renderPickerList();
-    const existing = dir && rootAt(dir.path);
-    const conflict = existing && (!picker.editing || existing.name !== picker.editing.name);
-    const st = $('picker-status');
-    const notJoined = picker.host && picker.hosts.get(picker.host) === 'not_joined';
-    if (notJoined) {
-      st.className = 'min-h-5 text-xs text-amber-200/90';
-      st.textContent = `${hostName(picker.host)} does not have this fleet's key yet.`;
-    } else if (picker.error) {
-      st.className = 'min-h-5 text-xs text-rose-300';
-      st.replaceChildren(h('span', '', picker.error, dir ? h('span', 'text-zinc-500', ` · still in ${dir.path}`) : null));
-    } else if (!dir) {
-      st.className = 'min-h-5 text-xs text-zinc-500';
-      st.textContent = 'loading…';
-    } else if (conflict) {
-      st.className = 'min-h-5 text-xs text-amber-200/90';
-      st.textContent = `This folder is already the root "${existing.name}".`;
-      if (!picker.editing) {
-        const edit = h('button', 'touch:min-h-11 ml-2 rounded px-1.5 py-0.5 font-medium text-emerald-300 hover:bg-ink-800 hover:text-emerald-200 focus-visible:outline-2 focus-visible:outline-emerald-400', 'Edit root');
-        edit.type = 'button';
-        edit.addEventListener('click', () => openPicker({ root: existing, host: picker.host }));
-        st.append(edit);
-      }
-    } else {
-      const around = rootAround(dir.path);
-      st.className = 'min-h-5 min-w-0 break-all text-xs text-zinc-500';
-      st.replaceChildren(h('span', '', picker.editing ? 'saves ' : 'adds ', h('span', 'font-mono text-zinc-100', dir.path),
-        around && around !== existing ? ` · inside root "${around.name}", where agents can already start` : null));
-    }
-    $('picker-name').placeholder = picker.editing ? picker.editing.name : dir ? baseName(dir.path) || 'root' : '';
-    const add = $('picker-add');
-    add.disabled = !dir || picker.loading || picker.busy || !!conflict || notJoined;
-    add.textContent = picker.editing ? (picker.busy ? 'Saving…' : 'Save changes') : (picker.busy ? 'Adding…' : 'Add as root');
-    $('picker-list').classList.toggle('opacity-50', picker.loading);
-  }
-
-  function renderCrumbs(path) {
-    const nav = $('picker-crumbs');
-    if (!path) {
-      nav.replaceChildren();
-      return;
-    }
-    const crumb = (label, target, current) => {
-      if (current) {
-        const el = h('span', 'rounded px-1 py-0.5 font-semibold text-zinc-100', label);
-        el.setAttribute('aria-current', 'location');
-        return el;
-      }
-      const b = h('button', 'touch:min-h-11 touch:min-w-11 rounded px-1 py-0.5 text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', label);
-      b.type = 'button';
-      b.addEventListener('click', () => browse(target));
-      return b;
-    };
-    const parts = path.split('/').filter(Boolean);
-    const items = [crumb('/', '/', !parts.length)];
-    let acc = '';
-    parts.forEach((p, i) => {
-      acc += '/' + p;
-      if (i > 0) items.push(h('span', 'text-zinc-700', '/'));
-      items.push(crumb(p, acc, i === parts.length - 1));
-    });
-    nav.replaceChildren(...items);
-  }
-
-  const pickerNote = (text) => h('li', 'px-2 py-8 text-center font-mono text-xs text-zinc-600', '// ' + text);
-
-  function renderPickerList() {
-    const ul = $('picker-list');
-    const dir = picker.dir;
-    if (picker.host && picker.hosts.get(picker.host) === 'not_joined') {
-      ul.replaceChildren(joinPanel());
-      return;
-    }
-    if (!dir) {
-      if (picker.loading || !picker.host || !picker.error) {
-        ul.replaceChildren(pickerNote(picker.loading ? 'loading…' : 'nothing to show'));
-        return;
-      }
-      const retry = h('button', 'touch:min-h-11 mt-3 rounded-md border border-ink-600 bg-ink-850 px-2.5 py-1 font-sans text-xs text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', 'Try again');
-      retry.type = 'button';
-      retry.addEventListener('click', () => {
-        browse('');
-        loadAdapters();
-        loadHostRoots();
-      });
-      const li = pickerNote(picker.error);
-      li.append(h('div', '', retry));
-      ul.replaceChildren(li);
-      return;
-    }
-    const f = $('picker-filter').value.trim().toLowerCase();
-    const shown = f ? dir.entries.filter((e) => e.name.toLowerCase().includes(f)) : dir.entries;
-    const items = [];
-    if (dir.parent && !f) items.push(folderItem(dir.parent, null));
-    for (const e of shown) items.push(folderItem(joinPath(dir.path, e.name), e));
-    if (!shown.length) items.push(pickerNote(f ? `no folder matches "${f}"` : 'no subfolders here'));
-    if (dir.truncated) items.push(pickerNote(`only the first ${dir.entries.length} folders are listed: filter or type a path`));
-    ul.replaceChildren(...items);
-  }
-
-  // folderItem is a row that opens path; e is null for the parent folder.
-  function folderItem(path, e) {
-    const b = h('button', 'touch:min-h-11 group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left font-mono text-[13px] text-zinc-300 hover:bg-ink-800 hover:text-zinc-50 focus-visible:bg-ink-800 focus-visible:text-zinc-50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-emerald-400/60');
-    b.type = 'button';
-    if (!e) {
-      b.append(h('span', 'text-zinc-500', '../'), h('span', 'font-sans text-xs text-zinc-600', 'parent folder'));
-    } else {
-      b.append(h('span', 'min-w-0 truncate', e.name, h('span', 'text-zinc-600', '/')));
-      if (e.git) b.append(chip('git', 'inline-flex shrink-0 items-center rounded border border-violet-400/25 bg-violet-400/10 px-1.5 py-px font-mono text-[10px] text-violet-300'));
-      const r = rootAt(path);
-      if (r) b.append(chip('root: ' + r.name, 'inline-flex shrink-0 items-center rounded-full bg-emerald-400/10 px-2 py-px font-sans text-[10px] font-medium text-emerald-300 ring-1 ring-inset ring-emerald-400/30'));
-    }
-    b.append(h('span', 'ml-auto shrink-0 pl-2 text-zinc-700 group-hover:text-zinc-400 group-focus-visible:text-zinc-400', '→'));
-    b.addEventListener('click', () => {
-      browse(path);
-      if (!touch()) $('picker-filter').focus();
-    });
-    return h('li', '', b);
-  }
-
-  // New folder: made in the folder shown, which then shows it, ready to be
-  // added. A folder of one's own is trusted unless unticked.
-
-  function showNewFolder(open) {
-    $('picker-new-row').hidden = !open;
-    $('picker-new').setAttribute('aria-expanded', String(open));
-    $('picker-new-name').value = '';
-    renderNewPickerFolder();
-    if (open) $('picker-new-name').focus();
-  }
-
-  function renderNewPickerFolder() {
-    const name = $('picker-new-name').value.trim();
-    $('picker-new-create').disabled = picker.making || !picker.dir || !name || name.startsWith('/');
-    $('picker-new-create').textContent = picker.making ? 'Creating…' : 'Create';
-  }
-
-  async function makePickerFolder() {
-    const name = $('picker-new-name').value.trim();
-    const dir = picker.dir;
-    if (picker.making || !dir || !name || name.startsWith('/')) return;
-    const host = picker.host;
-    picker.making = true;
-    renderNewPickerFolder();
-    try {
-      const made = await api('POST', hostAPI('fs'), { path: joinPath(dir.path, name) });
-      if (host === picker.host && picker.open) {
-        showNewFolder(false);
-        $('picker-trust').checked = true;
-        browse(made.path);
-      }
-    } catch (e) {
-      if (host === picker.host) {
-        picker.error = e.status === 405 ? `${hostName(host)} runs an older fleet: update it to make folders from here` : e.message;
-        renderPicker();
-      }
-    }
-    picker.making = false;
-    renderNewPickerFolder();
-  }
-
-  async function saveRoot(ev) {
-    ev.preventDefault();
-    const dir = picker.dir;
-    const editing = picker.editing;
-    const existing = dir && rootAt(dir.path);
-    if (!dir || picker.loading || picker.busy || (existing && (!editing || existing.name !== editing.name))) return;
-    const name = $('picker-name').value.trim();
-    if (/[/\\]/.test(name)) {
-      picker.error = 'a root name cannot contain / or \\';
-      renderPicker();
-      return;
-    }
-    const adapters = [...$('picker-adapters').querySelectorAll('input:checked')].map((i) => i.value);
-    const host = picker.host;
-    picker.busy = true;
-    picker.error = '';
-    renderPicker();
-    try {
-      const r = await api(editing ? 'PUT' : 'POST', hostAPI('roots' + (editing ? '/' + encodeURIComponent(editing.name) : '')), { path: dir.path, name, adapters, trust: $('picker-trust').checked });
-      const action = editing ? 'updated' : 'added';
-      if (host) {
-        toast(`${action} root ${r.root.name} on ${hostName(host)} → ${shortPath(r.root.path)}`);
-      } else {
-        markChanged('root:' + r.root.name);
-        toast(`${action} root ${r.root.name} → ${shortPath(r.root.path)}`);
-      }
-      closePicker();
-    } catch (e) {
-      picker.error = e.message;
-    }
-    picker.busy = false;
-    renderPicker();
-  }
-
-  function wirePicker() {
-    const dlg = $('picker');
-    const filter = $('picker-filter');
-    const list = $('picker-list');
-    $('roots-add').addEventListener('click', openPicker);
-    $('signout').addEventListener('click', signOut);
-    $('picker-form').addEventListener('submit', saveRoot);
-    $('picker-close').addEventListener('click', closePicker);
-    $('picker-cancel').addEventListener('click', closePicker);
-    $('picker-home').addEventListener('click', () => browse(''));
-    $('picker-new').addEventListener('click', () => showNewFolder($('picker-new-row').hidden));
-    $('picker-new-cancel').addEventListener('click', () => {
-      showNewFolder(false);
-      $('picker-new').focus();
-    });
-    $('picker-new-create').addEventListener('click', makePickerFolder);
-    $('picker-new-name').addEventListener('input', renderNewPickerFolder);
-    $('picker-new-name').addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') {
-        ev.preventDefault(); // makes the folder, never adds the root
-        makePickerFolder();
-      } else if (ev.key === 'Escape') {
-        ev.preventDefault();
-        showNewFolder(false);
-        $('picker-new').focus();
-      }
-    });
-    $('picker-go').addEventListener('click', goToTyped);
-    $('picker-hidden').addEventListener('change', () => browse(picker.dir ? picker.dir.path : ''));
-    $('picker-hosts').addEventListener('change', (ev) => {
-      if (ev.target.name === 'picker-host') selectHost(ev.target.value);
-    });
-    $('picker-path').addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') {
-        ev.preventDefault();
-        goToTyped();
-      }
-    });
-    filter.addEventListener('input', renderPickerList);
-    filter.addEventListener('keydown', (ev) => {
-      const first = list.querySelector('button');
-      if (ev.key === 'ArrowDown' && first) {
-        ev.preventDefault();
-        first.focus();
-      } else if (ev.key === 'Enter') {
-        ev.preventDefault(); // never add by accident; with a filter, open the first match
-        if (filter.value.trim() && first) first.click();
-      } else if (ev.key === 'Backspace' && !filter.value && picker.dir && picker.dir.parent) {
-        ev.preventDefault();
-        browse(picker.dir.parent);
-      } else if (ev.key === 'Escape' && filter.value) {
-        ev.preventDefault(); // clear the filter instead of closing the dialog
-        filter.value = '';
-        renderPickerList();
-      }
-    });
-    list.addEventListener('keydown', (ev) => {
-      const buttons = [...list.querySelectorAll('button')];
-      const i = buttons.indexOf(document.activeElement);
-      if (ev.key === 'ArrowDown') {
-        ev.preventDefault();
-        if (i + 1 < buttons.length) buttons[i + 1].focus();
-      } else if (ev.key === 'ArrowUp') {
-        ev.preventDefault();
-        if (i > 0) buttons[i - 1].focus();
-        else filter.focus();
-      } else if (ev.key === 'Backspace' && picker.dir && picker.dir.parent) {
-        ev.preventDefault();
-        browse(picker.dir.parent);
-        filter.focus();
-      }
-    });
-    dlg.addEventListener('close', () => {
-      picker.open = false;
-      picker.seq++; // drop replies still in flight
-      picker.loading = false;
-      clearTimeout(joinTimer);
-    });
-    wireBackdrop(dlg, closePicker, () => !picker.busy);
-  }
-
-  // ----------------------------------------------------------- other fleets
-  //
-  // With the admin token, the agents of every other fleet that holds this
-  // fleet's key are listed too, polled through /api/hosts/<id>/agents while
-  // the page is visible. Fleets without the key are asked again now and then.
-
-  const REMOTE_POLL_MS = 4000;
-  const REMOTE_RETRY_ROUNDS = 5; // not joined or unreachable: ask every 5th round
-  const REMOTE_MAX_FAILS = 3; // rounds a failing fleet keeps its agents listed
-  let remoteTimer = 0;
-  let remoteBusy = false;
-  let remoteRound = 0;
-
-  function scheduleRemote(delay) {
-    clearTimeout(remoteTimer);
-    if (admin) remoteTimer = setTimeout(pollRemote, delay);
-  }
-
-  async function pollRemote() {
-    if (!admin || remoteBusy) return;
-    if (document.hidden) {
-      scheduleRemote(REMOTE_POLL_MS);
-      return;
-    }
-    remoteBusy = true;
-    const round = remoteRound++;
-    const hosts = pickerHosts().filter((x) => x.id);
-    let changed = false;
-    for (const id of [...S.remote.keys()]) {
-      if (!hosts.some((x) => x.id === id)) changed = S.remote.delete(id) || changed;
-    }
-    await Promise.all(hosts.map(async ({ id }) => {
-      const st = picker.hosts.get(id);
-      if ((st === 'not_joined' || st === 'unreachable') && round % REMOTE_RETRY_ROUNDS) return;
-      try {
-        const r = await api('GET', `/api/hosts/${encodeURIComponent(id)}/agents`);
-        setHostState(id, 'joined');
-        changed = applyRemote(id, (r && r.agents) || []) || changed;
-      } catch (e) {
-        if (e.notJoined) setHostState(id, 'not_joined');
-        else if (e.status === 502 || e.status === 404) setHostState(id, 'unreachable');
-        const r = S.remote.get(id);
-        if (r && ++r.fails >= REMOTE_MAX_FAILS) changed = S.remote.delete(id) || changed;
-      }
-    }));
-    remoteBusy = false;
-    if (changed) invalidate('agents');
-    scheduleRemote(REMOTE_POLL_MS);
-  }
-
-  // applyRemote stores the agent list of fleet host and reports whether it
-  // changed.
-  function applyRemote(host, list) {
-    const prev = S.remote.get(host);
-    const next = new Map(list.map((a) => [a.id, a]));
-    S.remote.set(host, { agents: next, fails: 0 });
-    let changed = !prev || prev.agents.size !== next.size;
-    for (const a of next.values()) {
-      const old = prev && prev.agents.get(a.id);
-      if (!old || !same(old, a)) {
-        if (prev) markChanged('agent:' + agentKey(host, a.id));
-        changed = true;
-        chatAgent(host, a);
-      }
-    }
-    return changed;
-  }
-
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) scheduleRemote(0);
-  });
-
-  // ------------------------------------------------------------------ usage
-  //
-  // Each fleet's machine (what it is, its load, memory and disks; see
-  // hostNode), its agent CLIs, installed or not, and how much of their
-  // account's plan limits (5h session, week, ...) is used, shown under the
-  // fleet in "Fleet on the network". Asked once a minute while the page is
-  // visible; the daemons cache the providers' answers for minutes and keep
-  // showing the last one while a provider refuses to tell.
-
-  const USAGE_POLL_MS = 60000;
-  // Usage older than this is marked with when it was told.
-  const USAGE_STALE_MS = 10 * 60000;
-  let usageTimer = 0;
-  let usageBusy = false;
-  let usageAt = 0;
-
-  function scheduleUsage(delay) {
-    clearTimeout(usageTimer);
-    if (admin) usageTimer = setTimeout(pollUsage, delay);
-  }
-
-  async function pollUsage() {
-    if (!admin || usageBusy || document.hidden) return;
-    usageBusy = true;
-    usageAt = Date.now();
-    const self = S.server && S.server.id;
-    const ids = S.peers.filter((p) => p.id).map((p) => p.id);
-    for (const m of [S.usage, S.host]) for (const id of [...m.keys()]) if (!ids.includes(id)) m.delete(id);
-    await Promise.all(ids.map((id) => {
-      const base = id === self ? '/api/' : `/api/hosts/${encodeURIComponent(id)}/`;
-      // Not joined: nothing to show. Unreachable: keep the last answer.
-      return Promise.all([
-        api('GET', base + 'usage').then((r) => S.usage.set(id, (r && r.agents) || []), (e) => {
-          if (e.notJoined || !S.usage.has(id)) S.usage.set(id, null);
-        }),
-        // A fleet older than host stats has no such route.
-        api('GET', base + 'host').then((r) => S.host.set(id, (r && r.host) || null), (e) => {
-          if (e.notJoined || e.status === 404 || !S.host.has(id)) S.host.set(id, null);
-        }),
-      ]);
-    }));
-    usageBusy = false;
-    invalidate('peers');
-    scheduleUsage(USAGE_POLL_MS);
-  }
-
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && Date.now() - usageAt >= USAGE_POLL_MS) scheduleUsage(0);
-  });
-
-  function usageNode(id) {
-    const list = admin && id && S.usage.get(id);
-    if (!list || !list.length) return null;
-    return h('div', 'mt-2 flex flex-col gap-1.5', ...list.map(agentUsageRow));
-  }
-
-  function agentUsageRow(a) {
-    const name = h('span', 'inline-flex w-16 shrink-0 items-center gap-1.5 font-mono ' + (a.available ? 'text-zinc-200' : 'text-zinc-600'),
-      h('span', 'size-1.5 shrink-0 rounded-full ' + (a.available ? 'bg-emerald-400' : 'bg-zinc-600')), a.id);
-    name.title = a.available ? `${a.name} ${a.version || ''}`.trim() : `${a.name}: ${a.reason || 'not installed'}`;
-    // Meters wrap under each other, not under the name.
-    const meters = h('div', 'flex min-w-0 flex-1 flex-wrap items-start gap-x-3 gap-y-1');
-    if (!a.available) meters.append(h('span', 'text-zinc-600', 'not installed'));
-    else {
-      for (const l of a.limits) meters.append(limitMeter(l));
-      if (a.plan) meters.append(h('span', 'font-mono text-[11px] text-zinc-500', a.plan));
-      if (a.error && !a.limits.length) {
-        const e = h('span', 'min-w-0 truncate text-zinc-500', 'usage unknown');
-        e.title = a.error;
-        meters.append(e);
-      } else if (a.asOfMs && Date.now() - a.asOfMs >= USAGE_STALE_MS) {
-        // The daemon shows the last usage it was told until it gets a newer one.
-        const e = h('span', 'whitespace-nowrap text-[11px] text-zinc-600', 'as of ' + limitClock(a.asOfMs));
-        e.title = a.error ? `Could not renew: ${a.error}` : new Date(a.asOfMs).toLocaleString();
-        meters.append(e);
-      }
-    }
-    return h('div', 'flex items-start gap-3 text-xs leading-4', name, meters);
-  }
-
-  // limitMeter is one usage window: label, a bar, percent used, and the
-  // reset time below it. The tooltip includes the full local date and time.
-  function limitMeter(l) {
-    const pct = Math.max(0, Math.min(100, l.percent));
-    const tone = pct >= 90 ? 'bg-rose-400' : pct >= 70 ? 'bg-amber-400' : 'bg-emerald-400';
-    const fill = h('span', 'absolute inset-y-0 left-0 rounded-full ' + tone);
-    fill.style.width = pct + '%';
-    const meter = h('span', 'inline-flex items-center gap-1.5',
-      h('span', 'text-zinc-500', l.label),
-      h('span', 'relative h-1.5 w-10 overflow-hidden rounded-full bg-ink-700', fill),
-      h('span', 'font-mono tabular-nums ' + (pct >= 90 ? 'text-rose-300' : 'text-zinc-300'), Math.round(pct) + '%'));
-    const el = h('span', 'inline-flex flex-col gap-0.5 whitespace-nowrap', meter);
-    if (l.resetsAtMs) {
-      const reset = h('time', 'text-[11px] tabular-nums text-zinc-500', 'resets ' + limitClock(l.resetsAtMs));
-      reset.dateTime = new Date(l.resetsAtMs).toISOString();
-      el.append(reset);
-    }
-    el.title = `${l.label}: ${Math.round(pct)}% used` +
-      (l.resetsAtMs ? `, resets in ${dur(l.resetsAtMs - Date.now()).replace(/ \d+s$/, '')} (${new Date(l.resetsAtMs).toLocaleString()})` : '');
+    el.textContent = long ? ago(ms) : rel(ms);
     return el;
   }
 
-  // hostNode shows how a fleet's machine is doing: a line of what it is,
-  // then its load, memory, swap and disks as meters. The dot before them
-  // turns amber, then red, as the fullest of them runs full.
-  function hostNode(id) {
-    const s = admin && id && S.host.get(id);
-    if (!s) return null;
-    const share = (part, whole) => (whole > 0 ? (100 * part) / whole : 0);
-    const meters = [];
-    const busy = share(s.load[0], s.cpus);
-    meters.push(hostMeter('load', busy, s.load[0].toFixed(2), 100, 150,
-      `load ${s.load.map((l) => l.toFixed(2)).join(' · ')} over 1, 5 and 15 minutes, on ${s.cpus} CPUs (${Math.round(busy)}% busy)`));
-    if (s.memoryTotal) {
-      const used = s.memoryTotal - s.memoryAvailable;
-      const p = share(used, s.memoryTotal);
-      meters.push(hostMeter('mem', p, Math.round(p) + '%', 80, 90,
-        `memory: ${fmtIEC(used)} used of ${fmtIEC(s.memoryTotal)}, ${fmtIEC(s.memoryAvailable)} available`));
-    }
-    if (s.swapTotal) {
-      const p = share(s.swapUsed, s.swapTotal);
-      meters.push(hostMeter('swap', p, Math.round(p) + '%', 80, 90, `swap: ${fmtIEC(s.swapUsed)} used of ${fmtIEC(s.swapTotal)}`));
-    }
-    for (const d of s.disks || []) {
-      // As df counts it: of what users may fill.
-      const p = share(d.used, d.used + d.available);
-      meters.push(hostMeter('disk ' + (d.mount === '/' ? '/' : baseName(d.mount)), p, Math.round(p) + '%', 80, 90,
-        `disk ${d.mount}: ${fmtIEC(d.used)} used of ${fmtIEC(d.total)}, ${fmtIEC(d.available)} free`));
-    }
-    const level = Math.max(...meters.map((m) => m.level));
-    const state = ['fine', 'getting full or busy', 'full or overloaded'][level];
-    const name = h('span', 'inline-flex w-16 shrink-0 items-center gap-1.5 font-mono text-zinc-200',
-      h('span', 'size-1.5 shrink-0 rounded-full ' + ['bg-emerald-400', 'bg-amber-400', 'bg-rose-400'][level]), 'host',
-      h('span', 'sr-only', ': ' + state));
-    name.title = `${s.hostname || 'the machine'}: ${state}`;
-    const what = [s.osName, shortCPU(s.cpuModel), s.cpus ? `${s.cpus} CPUs` : '', s.memoryTotal ? fmtIEC(s.memoryTotal) : '',
-      s.bootedAtMs ? 'up ' + upFor(Date.now() - s.bootedAtMs) : ''].filter(Boolean);
-    if (s.readAtMs && Date.now() - s.readAtMs >= USAGE_STALE_MS) what.push('as of ' + limitClock(s.readAtMs));
-    // One unbreakable span per item, like the addresses above.
-    const specs = h('div', 'flex flex-wrap gap-x-3 font-mono text-[11px] text-zinc-500', ...what.map((t) => h('span', 'whitespace-nowrap', t)));
-    specs.title = [s.hostname, s.osName, s.kernel && 'kernel ' + s.kernel, s.cpuModel, s.bootedAtMs && 'booted ' + new Date(s.bootedAtMs).toLocaleString()]
-      .filter(Boolean).join('\n');
-    return h('div', 'mt-2 flex flex-col gap-1.5', specs,
-      h('div', 'flex items-start gap-3 text-xs leading-4', name,
-        h('div', 'flex min-w-0 flex-1 flex-wrap items-start gap-x-3 gap-y-1', ...meters.map((m) => m.el))));
+  // dur is a duration: 42s, 3m 12s, 2h 5m.
+  function dur(ms) {
+    let s = Math.max(0, Math.floor(ms / 1000));
+    const d = Math.floor(s / 86400);
+    s -= d * 86400;
+    const hr = Math.floor(s / 3600);
+    s -= hr * 3600;
+    const m = Math.floor(s / 60);
+    s -= m * 60;
+    if (d) return `${d}d ${hr}h`;
+    if (hr) return `${hr}h ${m}m`;
+    if (m) return `${m}m ${s}s`;
+    return `${s}s`;
   }
 
-  // hostMeter is a reading as a bar: amber from warn percent, red from
-  // full. It returns the element and its level (0 fine, 1 amber, 2 red).
-  function hostMeter(label, pct, text, warn, full, title) {
-    const level = pct >= full ? 2 : pct >= warn ? 1 : 0;
-    const fill = h('span', 'absolute inset-y-0 left-0 rounded-full ' + ['bg-emerald-400', 'bg-amber-400', 'bg-rose-400'][level]);
-    fill.style.width = Math.max(0, Math.min(100, pct)) + '%';
-    const el = h('span', 'inline-flex items-center gap-1.5 whitespace-nowrap',
-      h('span', 'max-w-32 truncate text-zinc-500', label),
-      h('span', 'relative h-1.5 w-10 overflow-hidden rounded-full bg-ink-700', fill),
-      h('span', 'font-mono tabular-nums ' + (level === 2 ? 'text-rose-300' : 'text-zinc-300'), text));
-    el.title = title;
-    return { el, level };
+  // elapsed shows how long from start to end; without end it keeps
+  // counting (the ticker updates [data-since]).
+  function elapsed(start, end, cls) {
+    const el = h('span', cls || '', start ? dur((end || Date.now()) - start) : '–');
+    if (start && !end) el.dataset.since = String(start);
+    return el;
   }
 
-  // shortCPU drops trademarks, "CPU", core counts and the clock from a
-  // CPU's name: "Intel(R) Core(TM) i7-7700K CPU @ 4.20GHz" is "Intel Core
-  // i7-7700K".
-  const shortCPU = (m) => (m || '').replace(/\((?:R|TM|C)\)/gi, '').replace(/@.*$/, '')
-    .replace(/\b(?:CPU|Processor|\d+-Core)\b/gi, '').replace(/\s+/g, ' ').trim();
+  // clock is ms as a time of day, with the weekday when it is not today.
+  function clock(ms) {
+    const d = new Date(ms);
+    const t = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return d.toDateString() === new Date().toDateString() ? t : d.toLocaleDateString([], { weekday: 'short' }) + ' ' + t;
+  }
 
   // upFor is a long time, roughly: 17d, 5h, 12m.
   function upFor(ms) {
@@ -2569,1144 +266,1646 @@
     return i ? `${n.toFixed(n < 10 ? 1 : 0)} ${units[i]}` : `${n} B`;
   }
 
-  // --------------------------------------------------------------- launcher
-  //
-  // Start a session: a folder on a machine, the agent CLI with its model
-  // and effort, and a prompt, with images. One line of pickers, then the
-  // prompt; checkout, sandbox, name and branch are folded under Options.
-  // Other machines are reached through /api/hosts/.
-  //
-  // A folder starts in the most specific root around it, however it was
-  // found (a recent session, a root, inside another root), so it always
-  // gets the same agents and trust.
+  const fmtSize = (n) => (n < 1024 ? `${n} B`
+    : n < 1 << 20 ? `${(n / 1024).toFixed(n < 10 << 10 ? 1 : 0)} KB`
+      : `${(n / (1 << 20)).toFixed(n < 10 << 20 ? 1 : 0)} MB`);
+  const fmtBytes = (n) => (n < 1024 ? `${n} bytes` : `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`);
 
-  const launch = {
-    open: false,
-    host: '', // server id; '' = this daemon
-    adapters: null, // [{id, name, available, images, models, efforts}] of the machine
-    roots: null, // roots of another machine (this one's are S.roots)
-    path: '', // chosen folder, absolute; '' = none yet
-    want: null, // {root, sub} asked for before the machine's roots are known
-    home: '', // the machine's home folder, as its listings say
-    folders: false, // the folder picker is open
-    look: '', // folder the picker looks into; '' = recent folders and roots
-    dirs: new Map(), // path -> {path, entries, truncated, error}, entries null while listed
-    adapter: '',
-    adapterRoot: '', // host/root whose provider was restored during this opening
-    gen: 0, // bumped for another machine or on close: stale replies are dropped
-    busy: false, // a start is in flight
-    making: false, // a new folder is being made
-    error: '',
-    hostSig: '', // what the machine picker shows
-    listSig: '', // what the folder list shows (see renderLaunchList)
-    listView: '', // and which list: a new one scrolls back to the top
-    listShown: false, // the chosen folder was scrolled into view in it
-    modelSig: '', // what the model pickers show (see renderLaunchModel)
-    then: '', // what to show once started, if a shortcut says so
-    images: [], // {data, url, name} to send with the prompt (see readImages)
-    videos: [], // uploaded to the machine for the prompt (see addVideos)
-    seq: 0, // bumped on each opening: images read for an earlier one are dropped
+  // fmtTokens shortens a token count: 812, 9.4k, 748k, 1.2M.
+  function fmtTokens(n) {
+    n = n || 0;
+    if (n < 1000) return String(n);
+    if (n < 1e6) return (n / 1000).toFixed(n < 1e4 ? 1 : 0) + 'k';
+    return (n / 1e6).toFixed(1) + 'M';
+  }
+
+  function shortPath(p) {
+    if (!p) return '';
+    return p.replace(/^\/(home|Users)\/[^/]+/, '~');
+  }
+
+  const joinPath = (dir, name) => (dir.endsWith('/') ? dir : dir + '/') + name;
+  const baseName = (p) => p.split('/').filter(Boolean).pop() || '';
+
+  function hostPort(addr, port) {
+    const a = addr.includes(':') ? `[${addr}]` : addr;
+    return port ? `${a}:${port}` : a;
+  }
+
+  // ---------------------------------------------------------- agent states
+
+  const STATES = {
+    needs_input: { label: 'Needs input', rank: 0 },
+    working: { label: 'Working', rank: 1 },
+    running: { label: 'Running', rank: 2 },
+    starting: { label: 'Starting', rank: 2 },
+    idle: { label: 'Idle', rank: 3 },
+    unspecified: { label: 'Unknown', rank: 4 },
+    failed: { label: 'Failed', rank: 9 },
+    exited: { label: 'Ended', rank: 9 },
+  };
+  const isFinished = (a) => a.state === 'exited' || a.state === 'failed';
+  // stateKey is a's state for its badge and pill, a usage limit counting
+  // as one.
+  const stateKey = (a) => (a.usageLimit && !isFinished(a) ? 'limit' : STATES[a.state] ? a.state : 'unspecified');
+  const KEY_LABEL = { ...Object.fromEntries(Object.entries(STATES).map(([k, v]) => [k, v.label])), limit: 'Usage limit' };
+
+  // label is what a session is called: the conversation's title, else the
+  // agent's name.
+  const label = (a) => a.title || a.name || a.id;
+
+  // agentKey identifies an agent across machines.
+  const agentKey = (host, id) => (host ? host + '/' + id : id);
+  const splitKey = (key) => {
+    const i = key.lastIndexOf('/');
+    return i < 0 ? { host: '', id: key } : { host: key.slice(0, i), id: key.slice(i + 1) };
   };
 
-  const launchAPI = (path) => (launch.host ? `/api/hosts/${encodeURIComponent(launch.host)}/${path}` : '/api/' + path);
-  const launchRoots = () => (launch.host ? launch.roots || [] : S.roots);
-  const inRoot = (r, sub) => (sub ? joinPath(r.path, sub) : r.path);
-  const within = (path, dir) => path === dir || path.startsWith(joinPath(dir, ''));
-  const parentOf = (p) => (p.lastIndexOf('/') > 0 ? p.slice(0, p.lastIndexOf('/')) : p.length > 1 ? '/' : '');
-
-  // placeOf is where a session in path starts: {root, sub} of the most
-  // specific root around it, or null outside every root.
-  function placeOf(path) {
-    let best = null;
-    for (const r of launchRoots()) {
-      if (path && within(path, r.path) && (!best || r.path.length > best.path.length)) best = r;
-    }
-    return best && { root: best, sub: path === best.path ? '' : path.slice(joinPath(best.path, '').length) };
+  // allAgents lists this daemon's agents and those of other fleets.
+  function allAgents() {
+    const out = [...S.agents.values()].map((a) => ({ a, host: '' }));
+    for (const [host, r] of S.remote) for (const a of r.agents.values()) out.push({ a, host });
+    return out;
   }
 
-  const launchPlace = () => placeOf(launch.path);
-  const launchRoot = () => (launchPlace() || {}).root;
+  const agentsOf = (host) => (host ? (S.remote.get(host) || { agents: new Map() }).agents : S.agents);
+  const findAgent = (host, id) => agentsOf(host).get(id) || null;
 
-  // tilde writes path from the machine's home as ~, for a path typed on.
-  const tilde = (p) => (launch.home && within(p, launch.home) ? '~' + p.slice(launch.home.replace(/\/$/, '').length) : p);
-
-  // openLaunch opens the dialog; opts.root (with opts.host, opts.sub)
-  // chooses the folder to start in.
-  function openLaunch(opts) {
-    if (!admin) return;
-    launch.open = true;
-    launch.error = '';
-    launch.busy = false;
-    if (opts && opts.root) {
-      launch.host = opts.host || '';
-      launch.want = { root: opts.root, sub: opts.sub || '' };
-      launch.path = '';
-    }
-    if (launch.host && !pickerHosts().some((x) => x.id === launch.host)) launch.host = '';
-    launch.seq++;
-    launch.images = [];
-    launch.videos = dropVideos(launch.videos);
-    renderLaunchThumbs();
-    $('launch-prompt').value = '';
-    $('launch-search').value = '';
-    // Key hints only where there are keys.
-    $('launch-prompt').placeholder = touch() ? 'What should the agent do?' : `What should the agent do? · ${MOD}+Enter starts`;
-    $('launch-search').placeholder = touch() ? 'Search folders' : 'Search folders · ↓ to move · → to look inside';
-    $('launch-name').value = '';
-    $('launch-branch').value = '';
-    $('launch-more').open = false;
-    renderLaunchOptions();
-    renderLaunchMore();
-    showFolders(false);
-    $('launch').showModal();
-    $('launch-body').scrollTop = 0;
-    fitHeight($('launch-prompt'));
-    renderLaunchHosts();
-    checkHosts();
-    loadLaunchHost();
-    if (!touch()) $('launch-prompt').focus();
+  // putAgent stores an agent the API returned, here or on another fleet.
+  function putAgent(host, a) {
+    if (!a || !a.id) return;
+    if (host) {
+      const rem = S.remote.get(host) || { agents: new Map(), fails: 0 };
+      rem.agents.set(a.id, a);
+      S.remote.set(host, rem);
+    } else S.agents.set(a.id, a);
+    invalidate('agents');
+    chatAgent(host, a);
   }
 
-  // Checkout, sandbox and what to show once started: click chips, kept
-  // for the next session. [value, label, title, as Options sums it up]
-  const LAUNCH_OPTS = 'fleet.launch.options';
-  const LAUNCH_CHOICES = {
-    iso: [['', 'Auto', 'an own worktree in git repos, else the folder itself'], ['worktree', 'Own worktree', 'a git worktree on a branch of its own', 'own worktree'], ['pinned', 'The folder itself', 'works in the folder, next to you and other agents', 'in the folder itself']],
-    sandbox: [['', 'Server default', "the server's [sandbox] setting"], ['docker', 'Docker', 'in a Docker container', 'in Docker'], ['none', 'None', 'right on the server', 'no sandbox']],
-    then: [['chat', 'Show chat', 'open the conversation'], ['screen', 'Show screen', 'open the conversation with the terminal screen', 'then the screen'], ['stay', 'Stay here', 'keep this dialog closed and the list in view', 'then stay here']],
-  };
-  const MAC = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
-  const MOD = MAC ? '⌘' : 'Ctrl';
+  // limitNext says what happens next to an agent a usage limit l stopped.
+  function limitNext(l) {
+    if (l.detail) return l.detail;
+    if (l.resumeAtMs) return 'resumes ' + clock(l.resumeAtMs);
+    if (l.resetsAtMs) return 'resets ' + clock(l.resetsAtMs) + ', auto-resume off';
+    return 'auto-resume off';
+  }
 
-  const checkedValue = (id) => ($(id).querySelector('input:checked') || { value: '' }).value;
+  // Pull requests agents created (Agent.pullRequests).
+  const prOpen = (p) => p.state !== 'merged' && p.state !== 'closed';
 
-  function launchOpts() {
+  // prStatus is a pull request's state in a word, and its chip's class.
+  function prStatus(p) {
+    if (p.state === 'merged') return ['merged', 'merged'];
+    if (p.state === 'closed') return ['closed', 'bad'];
+    if (p.state !== 'open') return [p.detail ? 'PR' : 'checking', ''];
+    if (p.draft) return ['draft', ''];
+    if (p.mergeState === 'dirty') return ['conflicts', 'bad'];
+    if (p.checks === 'failing') return ['checks fail', 'bad'];
+    if (p.checks === 'pending') return ['checks running', 'warn'];
+    if (p.mergeState === 'blocked') return ['blocked', 'warn'];
+    if (p.mergeState === 'behind') return ['behind', 'warn'];
+    return ['ready', 'ok'];
+  }
+
+  function prTitle(p) {
+    const parts = [`${p.repo}#${p.number}`];
+    if (p.title) parts.push(p.title);
+    if (p.headBranch) parts.push(`${p.headBranch} → ${p.baseBranch}`);
+    if (p.changedFiles || p.additions || p.deletions) parts.push(`+${p.additions} −${p.deletions} · ${plural(p.changedFiles, 'file')}`);
+    if (p.checks && p.checks !== 'unspecified') parts.push('checks ' + p.checks);
+    if (p.reviewDecision) parts.push(p.reviewDecision.replace('_', ' '));
+    if (p.detail) parts.push(p.detail);
+    return parts.join('\n');
+  }
+
+  function prChip(p) {
+    const [word, cls] = prStatus(p);
+    return h('span', { class: 'chip ' + cls, title: prTitle(p) }, icon(p.state === 'merged' ? 'merge' : 'pr'), `#${p.number} ${word}`);
+  }
+
+  // gitUnpushed counts the commits the remote lacks: ahead of the upstream,
+  // or of the base for a branch never pushed.
+  const gitUnpushed = (g) => (g.upstream ? g.ahead : g.baseAhead);
+
+  function gitTitle(g) {
+    const parts = [(g.branch || 'detached HEAD') + (g.upstream ? ' → ' + g.upstream : ' (not pushed)')];
+    if (g.upstream && (g.ahead || g.behind)) parts.push(`${g.ahead} to push, ${g.behind} to pull`);
+    if (g.base && (g.baseAhead || g.baseBehind)) parts.push(`${g.base}: ${g.baseAhead} ahead, ${g.baseBehind} behind`);
+    if (g.changed) parts.push(`${g.changed} uncommitted`);
+    if (g.operation) parts.push(g.operation + ' in progress');
+    if (g.detail) parts.push(g.detail);
+    return parts.join('\n');
+  }
+
+  // -------------------------------------------------------------- unread
+  //
+  // A session whose turn ended while it was not shown here is unread until
+  // it is opened. The page keeps the update time it last showed of each
+  // session (fleet.seen); sessions it never met count as seen, unless they
+  // started after the page loaded.
+
+  const LOADED = Date.now();
+  let seen = load('fleet.seen', null);
+  let seenTimer = 0;
+
+  function saveSeen() {
+    clearTimeout(seenTimer);
+    seenTimer = setTimeout(() => save('fleet.seen', seen), 500);
+  }
+
+  function markSeen(host, a) {
+    if (!seen || !a) return;
+    const k = agentKey(host, a.id);
+    if (seen[k] !== a.updatedAtMs) {
+      seen[k] = a.updatedAtMs || Date.now();
+      saveSeen();
+    }
+  }
+
+  // meet records the agents the page has not met yet, and drops the ones
+  // gone (keeping the latest 500).
+  function meet() {
+    const all = allAgents();
+    if (!seen) seen = {};
+    const known = new Set();
+    for (const { a, host } of all) {
+      const k = agentKey(host, a.id);
+      known.add(k);
+      if (!(k in seen)) seen[k] = (a.createdAtMs || 0) > LOADED - 5000 ? a.createdAtMs : a.updatedAtMs || 0;
+    }
+    const keys = Object.keys(seen);
+    if (keys.length > 500) for (const k of keys) if (!known.has(k)) delete seen[k];
+    saveSeen();
+  }
+
+  function isUnread(host, a) {
+    if (!seen || isFinished(a) || a.state !== 'idle') return false;
+    const k = agentKey(host, a.id);
+    if (U.view === 'chat' && U.key === k) return false;
+    const s = seen[k];
+    return s !== undefined && (a.updatedAtMs || 0) > s + 1500;
+  }
+
+  // ---------------------------------------------------------------- theme
+
+  const THEME_COLORS = { light: '#f4f6f5', dark: '#111213' };
+  const theme = () => document.documentElement.dataset.theme || 'system';
+
+  function setTheme(t) {
+    document.documentElement.dataset.theme = t;
     try {
-      return JSON.parse(localStorage.getItem(LAUNCH_OPTS)) || {};
-    } catch {
-      return {};
+      localStorage.setItem('fleet.theme', t);
+    } catch {}
+    document.querySelectorAll('meta[name="theme-color"]').forEach((m, i) => {
+      m.content = t === 'system' ? (i === 0 ? THEME_COLORS.light : THEME_COLORS.dark) : THEME_COLORS[t];
+    });
+  }
+
+  function themeSeg() {
+    const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Theme' });
+    const opts = [['system', 'System', 'monitor'], ['light', 'Light', 'sun'], ['dark', 'Dark', 'moon']];
+    for (const [v, text, ic] of opts) {
+      seg.append(h('button', {
+        type: 'button', 'aria-pressed': String(theme() === v),
+        onclick: () => {
+          setTheme(v);
+          seg.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String(opts[i][0] === v)));
+        },
+      }, icon(ic), text));
     }
+    return seg;
   }
 
-  function renderLaunchOptions() {
-    const saved = launchOpts();
-    for (const [key, choices] of Object.entries(LAUNCH_CHOICES)) {
-      const pick = choices.some(([v]) => v === saved[key]) ? saved[key] : choices[0][0];
-      refill($('launch-' + key), ...choices.map(([v, label, title]) => radioChip('launch-' + key, v, label, v === pick, title)));
+  // --------------------------------------------------------------- routes
+  //
+  // The address names the view: #/ (phones: the session list; desktops: a
+  // new session), #/new, #/devices and #/s/<agent key>. A `fleet web`
+  // link's #token=... is taken before (takeLinkToken).
+
+  function parseRoute() {
+    const m = /^#\/(s|new|devices)(?:\/(.+))?$/.exec(location.hash);
+    if (!m) return { view: 'home', key: '' };
+    if (m[1] === 's') {
+      let key = '';
+      try {
+        key = decodeURIComponent(m[2] || '');
+      } catch {}
+      return key ? { view: 'chat', key } : { view: 'home', key: '' };
     }
+    return { view: m[1], key: '' };
   }
 
-  function saveLaunchOptions() {
-    const o = {};
-    for (const key of Object.keys(LAUNCH_CHOICES)) o[key] = checkedValue('launch-' + key);
-    try {
-      localStorage.setItem(LAUNCH_OPTS, JSON.stringify(o));
-    } catch {
-      // private mode: kept until the dialog opens again
+  function go(hash) {
+    if (location.hash === hash) route();
+    else location.hash = hash;
+  }
+
+  const chatHash = (host, id) => '#/s/' + encodeURIComponent(agentKey(host, id));
+
+  function route() {
+    const r = parseRoute();
+    const changed = r.view !== U.view || r.key !== U.key;
+    const wasChat = U.view === 'chat';
+    U.view = r.view;
+    U.key = r.key;
+    if (changed) {
+      closeMenu(false);
+      U.drawer = false;
+      if (wasChat && r.view !== 'chat') leaveChat();
     }
-    renderLaunchMore();
+    $('app').dataset.screen = U.view === 'home' ? 'list' : 'main';
+    applyShell();
+    renderSideList();
+    renderSideFoot();
+    renderMain();
+    updateTitle();
+    if (changed && U.view !== 'home' && small()) $('main').focus({ preventScroll: true });
   }
 
-  // renderLaunchMore sums up the options while they are folded: what is
-  // not the default, so a remembered Docker or worktree stays in sight.
-  function renderLaunchMore() {
-    const set = [];
-    for (const [key, choices] of Object.entries(LAUNCH_CHOICES)) {
-      const c = choices.find(([v]) => v === checkedValue('launch-' + key));
-      if (c && c[3]) set.push(c[3]);
+  // The title counts the sessions that wait for an answer. It is set
+  // outside requestAnimationFrame, which browsers pause in background tabs:
+  // exactly when the count matters.
+  function updateTitle() {
+    let n = 0;
+    for (const { a } of allAgents()) if (a.state === 'needs_input') n++;
+    const base = S.server && S.server.name ? `fleet · ${S.server.name}` : 'fleet';
+    const t = n ? `(${n}) ${base}` : base;
+    if (document.title !== t) document.title = t;
+  }
+
+  function renderMain() {
+    const main = $('main');
+    if (U.view === 'chat') {
+      if (!admin) return lockedView(main);
+      const { host, id } = splitKey(U.key);
+      return showChat(host, id);
     }
-    const name = $('launch-name').value.trim();
-    const branch = $('launch-branch').value.trim();
-    if (name) set.push('name ' + name);
-    if (branch) set.push('branch ' + branch);
-    const note = $('launch-more-note');
-    note.textContent = '· ' + (set.length ? set.join(' · ') : 'checkout, sandbox, name, branch');
-    note.className = 'min-w-0 truncate font-normal ' + (set.length ? 'text-zinc-300' : 'text-zinc-600');
+    if (U.view === 'devices') return renderDevices();
+    // Phones: the list is the screen; whatever main showed slides away.
+    if (U.view === 'home' && small()) return;
+    if (!admin) return lockedView(main);
+    renderNew();
   }
 
-  function closeLaunch() {
-    const d = $('launch');
-    if (d.open) d.close();
+  // applyShell sets the sidebar's state: hidden (desktops) or a drawer
+  // (tablets).
+  function applyShell() {
+    const app = $('app');
+    app.classList.toggle('side-off', U.sideOff && !narrow());
+    app.classList.toggle('drawer', U.drawer && narrow() && !small());
+    app.classList.toggle('offline', !S.online);
+    $('side-scrim').hidden = !(U.drawer && narrow() && !small());
   }
 
-  // loadLaunchHost loads the adapters and roots of the chosen machine.
-  async function loadLaunchHost() {
-    const host = launch.host;
-    const gen = ++launch.gen;
-    launch.adapters = null;
-    launch.adapterRoot = '';
-    launch.roots = null;
-    launch.home = '';
-    launch.dirs = new Map();
-    launch.look = '';
-    launch.error = '';
-    renderLaunch();
-    let err = '';
-    const fail = (e) => {
-      err = err || e.message;
-      if (host && e.notJoined) setHostState(host, 'not_joined');
-      return null;
-    };
-    const [ads, roots] = await Promise.all([
-      api('GET', launchAPI('adapters')).then((r) => (r && r.adapters) || []).catch(fail),
-      host ? api('GET', launchAPI('roots')).then((r) => (r && r.roots) || []).catch(fail) : null,
-    ]);
-    if (gen !== launch.gen) return;
-    if (host && ads) setHostState(host, 'joined');
-    launch.adapters = ads || [];
-    launch.roots = roots;
-    launch.error = err;
-    launchRootsChanged();
-    // Nothing to start in yet: the folder is the first thing to choose.
-    if (!launch.path && !err && !launch.folders) toggleFolders(true);
+  function toggleSide(open) {
+    if (narrow()) U.drawer = open;
+    else U.sideOff = !open;
+    applyShell();
+    // The views put a button to bring it back in their bars.
+    if (U.view === 'chat') renderChatHead();
+    else if (U.view !== 'home' || !small()) renderMain();
+    if (open && narrow()) setTimeout(() => $('side-q')?.focus(), 60);
   }
 
-  // launchRootsChanged lists new roots for the search, and chooses the
-  // last folder a session started in if the chosen one is outside them.
-  function launchRootsChanged() {
-    if (launch.want && (!launch.host || launch.roots)) {
-      const r = launchRoots().find((x) => x.name === launch.want.root);
-      if (r) launch.path = inRoot(r, launch.want.sub);
-      launch.want = null;
-    }
-    if (!launch.want && !launchPlace()) launch.path = launchRecent(1)[0] || '';
-    if (launch.look && !placeOf(launch.look)) launch.look = '';
-    for (const r of launchRoots()) listDir(r.path);
-    renderLaunch();
+  // leadBtn brings the sessions back: a back button on phones, the drawer
+  // on tablets, the hidden sidebar on desktops; null when it shows.
+  function leadBtn() {
+    if (small()) return iconBtn('chevron-left', 'Back to the sessions', () => go('#/'), { cls: 'back-btn' });
+    if (narrow()) return iconBtn('panel-left', 'Show the sessions', () => toggleSide(true));
+    if (U.sideOff) return iconBtn('panel-left', 'Show the sessions', () => toggleSide(true));
+    return null;
   }
 
-  // listDir lists the subfolders of a folder into launch.dirs, once per
-  // opening of the dialog: the search looks through every listing.
-  async function listDir(path) {
-    if (!path || launch.dirs.has(path)) return;
-    const gen = launch.gen;
-    const d = { path, entries: null, truncated: false, error: '' };
-    launch.dirs.set(path, d);
-    try {
-      const dir = await api('GET', launchAPI('fs?' + new URLSearchParams({ path })));
-      d.entries = dir.entries || [];
-      d.truncated = !!dir.truncated;
-      if (dir.home && gen === launch.gen) launch.home = dir.home;
-    } catch (e) {
-      d.entries = [];
-      d.error = e.message;
-    }
-    if (gen === launch.gen) renderLaunch();
+  function lockedView(main) {
+    const lead = leadBtn();
+    const where = (S.server && (S.server.hostname || S.server.name)) || 'the server';
+    fill(main, h('div', 'view',
+      lead ? h('div', 'topbar', lead, h('h1', null, 'fleet')) : null,
+      h('div', 'no-chat',
+        h('span', 'big-ic', icon('lock', 'i-lg')),
+        h('h2', null, 'This browser can only look'),
+        h('p', null, 'Unlock it with the fleet key to open chats, answer agents and start sessions, or open the link ', h('code', 'mono', 'fleet web'), ` prints on ${where}.`),
+        h('button', { type: 'button', class: 'btn primary', onclick: openUnlock }, icon('key'), 'Unlock'))));
   }
 
-  // launchRecent is the folders sessions started in on the chosen machine,
-  // newest first. It keeps its last 200 sessions, so every browser and
-  // phone sees the same ones. The list shows five, the search finds all.
-  const LAUNCH_RECENT = 5;
+  // ------------------------------------------------------------- machines
+  //
+  // The fleet's machines: this daemon, then the others on the network.
+  // Those with a dashboard are reached through /api/hosts/<id>/, signed
+  // with the fleet key; a machine without it is "not joined".
 
-  function launchRecent(max) {
-    const agents = launch.host ? (S.remote.get(launch.host) || { agents: new Map() }).agents : S.agents;
-    const out = [];
-    for (const a of [...agents.values()].sort((x, y) => y.createdAtMs - x.createdAtMs)) {
-      if (a.isolation === 'clone' || !a.path || out.includes(a.path) || !placeOf(a.path)) continue; // a clone runs outside the root
-      out.push(a.path);
-      if (out.length === max) break;
+  const hostStates = new Map(); // server id -> 'checking' | 'joined' | 'not_joined' | 'unreachable'
+  const hostState = (id) => (id ? hostStates.get(id) || 'checking' : 'self');
+  const hostUp = (st) => st === 'self' || st === 'joined';
+
+  // pickerHosts: this daemon, then the fleets on the network with a dashboard.
+  function pickerHosts() {
+    const self = S.server || {};
+    const out = [{ id: '', name: self.name || self.hostname || 'this machine' }];
+    for (const p of S.peers) {
+      if (!p.self && p.id && p.webPort && (p.addrs || []).length) out.push({ id: p.id, name: p.name || p.host || p.id.slice(0, 8) });
     }
     return out;
   }
 
-  function selectLaunchHost(id) {
-    if (launch.host === id) return;
-    if (launch.videos.length) {
-      toast('the videos went to the other machine: attach them again', 'warn');
-      launch.videos = dropVideos(launch.videos);
-      renderLaunchThumbs();
+  const hostName = (id) => (pickerHosts().find((x) => x.id === id) || { name: 'that machine' }).name;
+
+  // machines lists every machine with its state: self, joined,
+  // not_joined, unreachable, checking, or nodash (seen, but without a
+  // dashboard to manage it through).
+  function machines() {
+    const out = [];
+    for (const p of [...S.peers].sort((x, y) => (y.self ? 1 : 0) - (x.self ? 1 : 0) || (x.name || '').localeCompare(y.name || ''))) {
+      const reach = p.id && p.webPort && (p.addrs || []).length;
+      out.push({ id: p.self ? '' : p.id || '', peer: p, name: p.name || p.host || (p.id || '').slice(0, 8), state: p.self ? 'self' : reach ? hostState(p.id) : 'nodash' });
     }
-    launch.host = id;
-    launch.path = '';
-    launch.want = null;
-    $('launch-search').value = '';
-    closeNewFolder();
-    renderLaunchHosts();
-    loadLaunchHost();
+    if (!out.some((m) => m.state === 'self')) {
+      const s = S.server || {};
+      out.unshift({ id: '', peer: null, name: s.name || s.hostname || 'this machine', state: 'self' });
+    }
+    return out;
   }
 
-  // renderLaunchHosts names the machine, or offers the fleet's machines
-  // when there are more.
-  function renderLaunchHosts() {
-    const hosts = pickerHosts();
-    const many = hosts.length > 1 || !!launch.host;
-    const stateOf = (id) => HOST_STATE[id ? picker.hosts.get(id) || 'checking' : 'self'];
-    $('launch-host').hidden = many;
-    $('launch-host').textContent = hostName(launch.host);
-    $('launch-hosts-wrap').hidden = !many;
-    if (!many) return;
-    $('launch-host-dot').className = stateOf(launch.host)[0];
-    const items = hosts.map((x) => [x.id, x.name + (x.id && stateOf(x.id)[1] ? ` · ${stateOf(x.id)[1]}` : '')]);
-    const sig = JSON.stringify([items, launch.host]);
-    if (sig === launch.hostSig) return;
-    launch.hostSig = sig;
-    fillSelect($('launch-hosts'), items, launch.host);
+  const MACHINE_STATE = {
+    self: ['dot', 'online, this machine'],
+    joined: ['dot', 'online'],
+    checking: ['dot off', 'checking…'],
+    not_joined: ['dot warn', 'not in this fleet yet'],
+    unreachable: ['dot bad', 'unreachable'],
+    nodash: ['dot off', 'on the network, without a dashboard'],
+  };
+
+  function setHostState(id, state) {
+    if (!id) return;
+    const changed = hostStates.get(id) !== state;
+    hostStates.set(id, state);
+    if (!changed) return;
+    renderSideFoot();
+    if (U.view === 'devices') renderDevices();
+    if (U.view === 'new' || U.view === 'home') renderLaunch();
   }
 
-  // refill replaces the chips of a radio group, and keeps the focus on
-  // the checked one if it was in the group (arrow keys move through it).
-  function refill(box, ...chips) {
-    const had = box.contains(document.activeElement);
-    box.replaceChildren(...chips);
-    const checked = had && box.querySelector('input:checked');
-    if (checked) checked.focus();
+  // checkHosts asks every other fleet whether it holds this fleet's key.
+  function checkHosts() {
+    for (const x of pickerHosts()) {
+      if (!x.id || hostStates.get(x.id) === 'joined') continue;
+      if (!hostStates.has(x.id)) hostStates.set(x.id, 'checking');
+      checkHost(x.id);
+    }
   }
 
-  function radioChip(name, value, label, checked, title) {
-    const rb = h('input', 'sr-only');
-    rb.type = 'radio';
-    rb.name = name;
-    rb.value = value;
-    rb.checked = checked;
-    const chipEl = h('label', HOST_CHIP, rb, label);
-    if (title) chipEl.title = title;
-    return chipEl;
-  }
-
-  // fillSelect replaces the options of a select: [value, label, disabled].
-  function fillSelect(sel, items, value) {
-    sel.replaceChildren(...items.map(([v, label, disabled]) => {
-      const o = h('option', '', label);
-      o.value = v;
-      o.disabled = !!disabled;
-      return o;
-    }));
-    sel.value = value;
-  }
-
-  // Model and effort picks, per agent CLI, kept for the next session.
-  const LAUNCH_PICKS = 'fleet.launch.models';
-
-  function launchPicks() {
+  async function checkHost(id) {
+    let state;
     try {
-      return JSON.parse(localStorage.getItem(LAUNCH_PICKS)) || {};
-    } catch {
-      return {};
+      const r = await api('GET', `/api/hosts/${encodeURIComponent(id)}/session`);
+      state = r && r.admin ? 'joined' : 'not_joined';
+    } catch (e) {
+      state = e.notJoined ? 'not_joined' : 'unreachable';
     }
+    setHostState(id, state);
+    return state;
   }
 
-  // launchPick returns the model and effort chosen for the chosen agent
-  // CLI, as far as it still offers them: {ad, model, effort, efforts}.
-  function launchPick() {
-    const ad = (launch.adapters || []).find((a) => a.id === launch.adapter);
-    // Daemons older than model choices send none.
-    if (!ad || (!(ad.models || []).length && !(ad.efforts || []).length)) return null;
-    const pick = launchPicks()[ad.id] || {};
-    const model = (ad.models || []).find((m) => m.id === pick.model);
-    const efforts = model ? (ad.efforts || []).filter((e) => model.efforts.includes(e.id)) : ad.efforts || [];
-    const effort = efforts.find((e) => e.id === pick.effort);
-    return { ad, model, effort, efforts };
+  // peerURL is the dashboard of peer p, at the address that looks most
+  // reachable from here (longest shared IPv4 prefix with this page's host).
+  function peerURL(p) {
+    const addrs = p.addrs || [];
+    if (!p.webPort || !addrs.length) return '';
+    const here = location.hostname.split('.');
+    const shared = (a) => {
+      const parts = a.split('.');
+      let n = 0;
+      while (n < 4 && parts[n] === here[n]) n++;
+      return n;
+    };
+    let best = addrs[0];
+    for (const a of addrs) if (shared(a) > shared(best)) best = a;
+    return `http://${hostPort(best, p.webPort)}/`;
   }
 
-  // renderLaunchModel offers the chosen agent's models, and the efforts of
-  // the chosen model. "default" leaves either to the CLI's own settings.
-  function renderLaunchModel() {
-    const p = launchPick();
-    $('launch-model-wrap').hidden = !p || !(p.ad.models || []).length;
-    $('launch-effort-wrap').hidden = !p || !p.efforts.length;
-    if (!p) return;
-    // Rebuilt only when they change: the dialog renders again as folders
-    // are listed, and would close an open select.
-    const sig = JSON.stringify([p.ad.id, p.ad.models, p.ad.efforts, p.model && p.model.id, p.effort && p.effort.id]);
-    if (sig === launch.modelSig) return;
-    launch.modelSig = sig;
-    fillSelect($('launch-model'), [['', 'default'], ...(p.ad.models || []).map((m) => [m.id, m.label])], p.model ? p.model.id : '');
-    fillSelect($('launch-effort'), [['', 'default'], ...p.efforts.map((e) => [e.id, e.label])], p.effort ? p.effort.id : '');
-    const dflt = "the CLI's own setting";
-    $('launch-model').title = p.model ? '' : dflt;
-    $('launch-effort').title = p.effort ? '' : dflt;
+  // -------------------------------------------------------------- sidebar
+
+  let sideBuilt = false;
+
+  function buildSide() {
+    if (sideBuilt) return;
+    sideBuilt = true;
+    $('side').append(sideHead(), sideTools(),
+      h('div', { class: 'side-scroll', id: 'side-list' }),
+      h('div', { class: 'side-foot not-phone', id: 'side-foot' }),
+      newBar());
   }
 
-  function saveLaunchPick() {
-    const picks = launchPicks();
-    picks[launch.adapter] = { model: $('launch-model').value, effort: $('launch-effort').value };
-    try {
-      localStorage.setItem(LAUNCH_PICKS, JSON.stringify(picks));
-    } catch {
-      // private mode: the pick lasts until the dialog renders again
-    }
-    renderLaunch();
+  function sideHead() {
+    return h('div', 'side-head',
+      h('a', { class: 'brand', href: '#/', 'aria-label': 'fleet, home' }, wordmark()),
+      h('span', 'spacer'),
+      h('span', { class: 'on-phone', id: 'side-dots' }),
+      iconBtn('settings', 'Settings', openSettings, { cls: 'on-phone' }),
+      iconBtn('panel-left', 'Hide the sessions', () => toggleSide(false), { cls: 'not-phone' }));
   }
 
-  // launchImages reports whether the chosen agent CLI takes images with
-  // its first prompt (daemons older than that say nothing).
-  function launchImages() {
-    const ad = (launch.adapters || []).find((a) => a.id === launch.adapter);
-    return !!(ad && ad.images);
-  }
-
-  // launchImagesProblem says why the images or videos cannot go with the
-  // session.
-  function launchImagesProblem() {
-    const vp = videosProblem(launch.videos);
-    if (vp) return vp;
-    if (!launch.images.length) return '';
-    if (!launchImages()) return `${launch.adapter || 'this agent'} takes no images at start: remove them, or choose another agent.`;
-    if (!$('launch-prompt').value.trim() && !launch.videos.length) return 'Images go with a prompt: write one.';
-    return '';
-  }
-
-  // addLaunchFiles adds the images and videos among files to the prompt.
-  async function addLaunchFiles(files) {
-    if (!launch.open || launch.busy) return;
-    const seq = launch.seq;
-    const alive = () => launch.open && seq === launch.seq;
-    addVideos(files, launch.videos, launchAPI('uploads'), () => {
-      if (!alive()) return;
-      renderLaunchThumbs();
-      renderLaunch();
+  function sideTools() {
+    const q = h('input', {
+      id: 'side-q', type: 'search', placeholder: 'Search sessions', 'aria-label': 'Search sessions', autocomplete: 'off', spellcheck: 'false',
+      oninput: (ev) => {
+        U.q = ev.target.value;
+        renderSideList();
+      },
+      onkeydown: (ev) => {
+        if (ev.key === 'Escape' && U.q) {
+          ev.stopPropagation();
+          ev.target.value = '';
+          U.q = '';
+          renderSideList();
+        }
+      },
     });
-    if (![...files].some(isImage)) return;
-    if (!launchImages()) {
-      toast(`${launch.adapter || 'this agent'} takes no images at start`, 'warn');
+    return h('div', 'side-tools',
+      h('a', { id: 'new-btn', class: 'new-btn not-phone', href: '#/new', title: 'Start a session (N)' }, icon('plus'), 'New session', h('kbd', null, 'N')),
+      h('div', 'search', icon('search', 'i-sm'), q,
+        h('kbd', { class: 'not-phone', 'aria-hidden': 'true' }, '/'),
+        h('button', { type: 'button', class: 'icon-btn', 'aria-label': 'Group sessions', title: 'Group sessions', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => groupMenu(ev.currentTarget) }, icon('sliders', 'i-sm'))));
+  }
+
+  function groupMenu(anchor) {
+    openMenu(anchor, (el, close) => {
+      el.append(h('div', 'menu-l', 'Group sessions by'));
+      for (const [v, text, ic] of [['folder', 'Folder', 'folder'], ['status', 'Status', 'alert'], ['machine', 'Machine', 'server'], ['none', 'Nothing, newest first', 'clock']]) {
+        el.append(mi({ icon: ic, label: text, checked: U.groupBy === v, onSelect: () => {
+          U.groupBy = v;
+          save('fleet.groupBy', v);
+          close();
+          renderSideList();
+        } }));
+      }
+    }, { label: 'Group sessions' });
+  }
+
+  function newBar() {
+    return h('div', 'newbar on-phone',
+      h('button', { type: 'button', onclick: () => go('#/new') }, icon('plus'), 'New session', h('span', { class: 'send', 'aria-hidden': 'true' }, icon('arrow-up'))));
+  }
+
+  const folderOf = (a) => a.path || a.cwd || '';
+
+  function matches({ a, host }, words) {
+    if (!words.length) return true;
+    const hay = [a.title, a.name, a.id, folderOf(a), a.root, a.note, a.branch, a.adapter, host ? hostName(host) : ''].join(' ').toLowerCase();
+    return words.every((w) => hay.includes(w));
+  }
+
+  // groupsOf puts the sessions into the sidebar's groups, the groups and
+  // their sessions the most recent first (by status: in the order below).
+  function groupsOf(list) {
+    const recent = (x, y) => (y.a.updatedAtMs || 0) - (x.a.updatedAtMs || 0);
+    if (U.groupBy === 'none') return [{ key: 'all', label: 'Recent', items: list.sort(recent) }];
+    const map = new Map();
+    const put = (key, text, x, extra) => {
+      if (!map.has(key)) map.set(key, { key, label: text, items: [], ...extra });
+      map.get(key).items.push(x);
+    };
+    for (const x of list) {
+      if (U.groupBy === 'status') {
+        const k = stateKey(x.a);
+        const g = k === 'needs_input' ? ['1', 'Needs input'] : k === 'working' || k === 'starting' ? ['2', 'Working'] : k === 'limit' ? ['3', 'Usage limit'] : ['4', 'Ready'];
+        put('st:' + g[0], g[1], x);
+      } else if (U.groupBy === 'machine') {
+        put('m:' + x.host, x.host ? hostName(x.host) : (S.server && S.server.name) || 'this machine', x, { machine: x.host });
+      } else {
+        const f = folderOf(x.a);
+        put('f:' + x.host + ':' + f, baseName(f) || f || 'no folder', x, { folder: f, host: x.host });
+      }
+    }
+    const groups = [...map.values()];
+    for (const g of groups) g.items.sort(recent);
+    if (U.groupBy === 'status') groups.sort((x, y) => x.key.localeCompare(y.key));
+    else groups.sort((x, y) => (y.items[0].a.updatedAtMs || 0) - (x.items[0].a.updatedAtMs || 0));
+    return groups;
+  }
+
+  const HISTORY_MAX = 100;
+
+  function renderSideList() {
+    const box = $('side-list');
+    if (!box) return;
+    if (swipe.drag) {
+      swipe.stale = true;
       return;
     }
-    if (await readImages(files, launch.images, alive)) {
-      renderLaunchThumbs();
-      renderLaunch();
+    const top = box.scrollTop;
+    const words = U.q.toLowerCase().split(/\s+/).filter(Boolean);
+    const every = allAgents().filter((x) => matches(x, words));
+    const live = every.filter((x) => !isFinished(x.a));
+    const done = every.filter((x) => isFinished(x.a)).sort((x, y) => (y.a.updatedAtMs || 0) - (x.a.updatedAtMs || 0));
+    const kids = [];
+
+    const waiting = live.filter((x) => x.a.state === 'needs_input');
+    if (waiting.length && !words.length) {
+      kids.push(h('section', { class: 'attn', 'aria-label': 'Sessions that need you' },
+        h('div', 'attn-h', icon('alert'), waiting.length === 1 ? 'Needs you' : `${waiting.length} sessions need you`),
+        waiting.map(({ a, host }) => h('a', { class: 'attn-item', href: chatHash(host, a.id) },
+          avatar(a),
+          h('div', 'row-main', h('div', 'row-name', label(a)), h('div', 'attn-q', a.stateDetail || 'Waiting for you in its terminal')),
+          h('span', 'attn-go', 'Answer')))));
+    }
+
+    if (!S.snapshotDone) kids.push(h('p', 'side-empty', 'Loading…'));
+    else if (!live.length && !done.length) {
+      kids.push(h('p', 'side-empty', words.length ? `No session matches “${U.q}”.` : admin ? 'No sessions yet. Start one with New session.' : 'No sessions yet.'));
+    }
+
+    for (const g of groupsOf(live)) {
+      const open = !U.collapsed.has(g.key) || !!words.length;
+      const toggle = h('button', { type: 'button', class: 'grp-toggle', 'aria-expanded': String(open), onclick: () => {
+        if (open) U.collapsed.add(g.key);
+        else U.collapsed.delete(g.key);
+        save('fleet.collapsed', [...U.collapsed]);
+        renderSideList();
+      } }, icon('chevron-down'), h('span', 'trunc', g.label), g.items.length > 1 ? h('span', 'grp-count', String(g.items.length)) : null);
+      toggle.title = g.folder ? shortPath(g.folder) : '';
+      const where = g.host && U.groupBy === 'folder' ? h('span', 'grp-where', hostName(g.host)) : null;
+      const addBtn = admin && g.folder ? h('button', { type: 'button', class: 'icon-btn grp-add', 'aria-label': `New session in ${g.label}`, title: `New session in ${shortPath(g.folder)}`, onclick: () => newIn(g.host, g.folder) }, icon('plus')) : null;
+      kids.push(h('section', { class: 'grp', 'aria-label': g.label },
+        h('div', 'grp-h', toggle, where, addBtn),
+        open ? h('ul', 'rows', g.items.map(sessionRow)) : null));
+    }
+
+    if (done.length) {
+      const open = U.archivedOpen || !!words.length;
+      const toggle = h('button', { type: 'button', class: 'grp-toggle', 'aria-expanded': String(open), onclick: () => {
+        U.archivedOpen = !U.archivedOpen;
+        renderSideList();
+      } }, icon('chevron-down'), 'Archived', h('span', 'grp-count', String(done.length)));
+      kids.push(h('section', { class: 'grp archived', 'aria-label': 'Archived' }, h('div', 'grp-h', toggle),
+        open ? [h('ul', 'rows', done.slice(0, HISTORY_MAX).map(sessionRow)),
+          done.length > HISTORY_MAX ? h('p', 'more-row', `${done.length - HISTORY_MAX} older ones: search finds them`) : null] : null));
+    }
+
+    fill(box, kids);
+    box.scrollTop = top;
+    $('new-btn')?.setAttribute('aria-current', U.view === 'new' || (U.view === 'home' && !small()) ? 'page' : 'false');
+  }
+
+  function avatar(a) {
+    const k = stateKey(a);
+    const badge = ['working', 'starting', 'needs_input', 'failed', 'limit'].includes(k) ? h('span', 'badge ' + k) : null;
+    return h('span', { class: 'av', 'aria-hidden': 'true' }, logo(a.adapter), badge);
+  }
+
+  // subLine says in a few words what is going on in session a of host.
+  function subLine(a, host) {
+    const k = stateKey(a);
+    const out = [];
+    if (host && U.groupBy !== 'machine') out.push(h('span', 'host', hostName(host) + ' ·'));
+    const runs = (admin && S.workflows.get(agentKey(host, a.id))) || [];
+    const run = runs[runs.length - 1];
+    if (k === 'needs_input') out.push(h('span', 't-needs_input', 'Needs input'), a.stateDetail ? h('span', null, '· ' + a.stateDetail) : null);
+    else if (k === 'working') out.push(h('span', 't-working', a.stateDetail || 'Working'));
+    else if (k === 'starting') out.push(h('span', 't-starting', 'Starting…'));
+    else if (k === 'limit') out.push(h('span', 't-limit', 'Usage limit'), h('span', null, '· ' + limitNext(a.usageLimit)));
+    else if (k === 'failed') out.push(h('span', 't-failed', 'Failed'), h('span', null, a.exitCode != null ? `· exit ${a.exitCode}` : a.stateDetail ? '· ' + a.stateDetail : ''));
+    else if (run) {
+      const n = run.bars.length;
+      const fin = run.counts.done + run.counts.failed + run.counts.stopped;
+      out.push(h('span', 't-wf', run.name), h('span', null, `· ${run.phase ? run.phase + ' ' : ''}${fin}/${n}`), miniBar(run.bars));
+    } else {
+      const bits = [a.title ? a.name : '', a.branch ? '⎇ ' + a.branch : '', U.groupBy !== 'folder' ? baseName(folderOf(a)) : ''].filter(Boolean);
+      if (k === 'exited') bits.unshift(a.exitCode ? `Ended · exit ${a.exitCode}` : 'Ended');
+      out.push(h('span', null, bits.join(' · ') || shortPath(folderOf(a))));
+    }
+    return out;
+  }
+
+  function miniBar(bars) {
+    return h('span', { class: 'mini-bar', 'aria-hidden': 'true' }, bars.slice(0, 12).map((s) => h('span', s === 'running' ? 'run' : 'done')));
+  }
+
+  function rowChips(a) {
+    const prs = a.pullRequests || [];
+    const open = prs.filter(prOpen);
+    const shown = (open.length ? open : prs.slice(-1)).slice(-2);
+    return shown.length ? h('div', 'row-chips', shown.map(prChip)) : null;
+  }
+
+  function sessionRow({ a, host }) {
+    const key = agentKey(host, a.id);
+    const cur = U.view === 'chat' && U.key === key;
+    const done = isFinished(a);
+    const unread = isUnread(host, a);
+    const k = stateKey(a);
+    const row = h('a', {
+      class: 'row' + (unread ? ' unread' : '') + (done ? ' done' : ''),
+      href: chatHash(host, a.id),
+      'aria-current': cur ? 'page' : null,
+      'data-key': key,
+      title: a.title ? a.name : null,
+    },
+    avatar(a),
+    h('div', 'row-main',
+      h('div', 'row-top', h('span', 'row-name', label(a)), relTime(a.updatedAtMs, 'row-time')),
+      h('div', 'row-sub', subLine(a, host), unread ? h('span', 'unread-dot') : null),
+      a.note ? h('div', 'row-note', icon('note'), h('span', null, a.note)) : null,
+      rowChips(a),
+      h('span', 'sr-only', [k === 'working' ? 'working' : '', unread ? 'new reply' : ''].filter(Boolean).join(', '))));
+    const li = h('li', 'row-wrap', row);
+    if (admin) {
+      const act = endAction(a);
+      li.prepend(h('button', { type: 'button', class: 'swipe-act ' + (done ? 'delete' : 'archive'), tabindex: '-1', 'aria-hidden': 'true', onclick: () => endSwiped(host, a) },
+        h('span', 'swipe-in', icon(done ? 'trash' : 'archive'), act.label)));
+      li._end = () => endSwiped(host, a);
+      li.append(h('div', 'row-acts',
+        iconBtn('note', a.note ? 'Edit the note' : 'Add a note', (ev) => noteEditor(ev.currentTarget, host, a)),
+        iconBtn(done ? 'trash' : 'archive', `${act.label} ${label(a)}`, () => confirmEnd(host, a))));
+    }
+    return li;
+  }
+
+  function renderSideFoot() {
+    const ms = machines();
+    const up = ms.filter((m) => hostUp(m.state)).length;
+    const text = `Devices: ${up} of ${ms.length} machine${ms.length === 1 ? '' : 's'} online`;
+    const foot = $('side-foot');
+    if (foot) {
+      fill(foot,
+        h('a', { class: 'devstrip', href: '#/devices', 'aria-current': U.view === 'devices' ? 'page' : null, 'aria-label': text, title: 'Devices' },
+          ms.map((m) => h('span', { class: 'dev' + (hostUp(m.state) ? '' : ' off'), title: `${m.name}: ${MACHINE_STATE[m.state][1]}` }, h('span', MACHINE_STATE[m.state][0]), m.name))),
+        iconBtn('settings', 'Settings', openSettings));
+    }
+    const dots = $('side-dots');
+    if (dots) {
+      fill(dots, h('a', { class: 'devdots', href: '#/devices', 'aria-label': text },
+        ms.slice(0, 5).map((m) => h('span', MACHINE_STATE[m.state][0])), h('span', 'n', `${up}/${ms.length}`)));
     }
   }
 
-  function renderLaunchThumbs() {
-    renderThumbs($('launch-images'), launch.images, launch.videos);
+  // newIn starts a new session in folder of machine host.
+  function newIn(host, folder) {
+    launchFor(host, folder);
+    go('#/new');
   }
 
-  // Last successfully used provider, per machine and root folder. Session
-  // history supplies it on other browsers; local storage survives pruning.
-  const LAUNCH_PROVIDERS = 'fleet.launch.providers';
-  let launchProviders = {};
-  try {
-    const saved = JSON.parse(localStorage.getItem(LAUNCH_PROVIDERS));
-    if (saved && typeof saved === 'object' && !Array.isArray(saved)) launchProviders = saved;
-  } catch {
-    // Storage can be disabled; keep the choices for this page instead.
+  // ------------------------------------------------------------ row swipes
+  //
+  // On phones a session row swiped to the left uncovers its end action
+  // (Archive, or Delete for a finished one), done by a tap. Swiped on past
+  // FULL of its width, letting go asks right away. A quick flick opens or
+  // closes it whatever the distance. One row is open at a time; a tap
+  // elsewhere or a scroll closes it. The list is not rendered again while a
+  // finger drags a row.
+
+  const SWIPE_W = 84;
+  const FULL = 0.55;
+  const swipe = { open: null, drag: false, stale: false };
+
+  // setSwipe moves row to dx (<= 0), its action label along with it.
+  function setSwipe(row, dx, full) {
+    row.style.translate = dx ? dx + 'px 0' : '';
+    const wrap = row.parentElement;
+    wrap?.style.setProperty('--reveal', Math.max(0, -dx) + 'px');
+    wrap?.querySelector('.swipe-act')?.classList.toggle('full', !!full);
   }
 
-  const providerRootKey = (host, root) => JSON.stringify([host || (S.server && S.server.id) || '', root.path]);
-
-  function lastRootProvider(host, root) {
-    const saved = launchProviders[providerRootKey(host, root)];
-    const agents = host ? (S.remote.get(host) || { agents: new Map() }).agents : S.agents;
-    let latest = saved && typeof saved.adapter === 'string'
-      ? { adapter: saved.adapter, usedAtMs: Number(saved.usedAtMs) || 0 } : null;
-    for (const a of agents.values()) {
-      if (a.root !== root.name || !a.adapter) continue;
-      if (!latest || a.createdAtMs > latest.usedAtMs) latest = { adapter: a.adapter, usedAtMs: a.createdAtMs || 0 };
-    }
-    return latest ? latest.adapter : '';
+  function closeSwipe(row) {
+    if (!row) return;
+    setSwipe(row, 0);
+    setTimeout(() => {
+      if (!row.style.translate) row.parentElement?.classList.remove('swiping');
+    }, 340);
   }
 
-  function rememberRootProvider(host, root, adapter) {
-    launchProviders[providerRootKey(host, root)] = { adapter, usedAtMs: Date.now() };
-    try {
-      localStorage.setItem(LAUNCH_PROVIDERS, JSON.stringify(launchProviders));
-    } catch {
-      // The in-memory choice still lasts for this page.
-    }
+  // endSwiped closes the open row and asks to end session a of host.
+  function endSwiped(host, a) {
+    if (swipe.open) closeSwipe(swipe.open);
+    swipe.open = null;
+    confirmEnd(host, a);
   }
 
-  // Restore when the root changes, then preserve explicit choices while
-  // async folder listings render. Unavailable/disallowed providers fall
-  // back to Claude Code, Codex or the first installed CLI.
-  function pickAdapter(list) {
-    if (!launch.adapters) return;
-    const root = launchRoot();
-    const key = root ? providerRootKey(launch.host, root) : '';
-    if (key !== launch.adapterRoot) {
-      launch.adapterRoot = key;
-      launch.adapter = root ? lastRootProvider(launch.host, root) : '';
-    }
-    const ok = (id) => list.some((a) => a.id === id && a.available);
-    if (ok(launch.adapter)) return;
-    launch.adapter = ['claude', 'codex'].find(ok) || (list.find((a) => a.available) || {}).id || '';
-  }
-
-  function renderLaunch() {
-    if (!launch.open) return;
-    const root = launchRoot();
-    const notJoined = launch.host && picker.hosts.get(launch.host) === 'not_joined';
-
-    // agents: those the root allows
-    const sel = $('launch-adapters');
-    const allowed = (launch.adapters || []).filter((a) => !root || !root.adapters.length || root.adapters.includes(a.id));
-    pickAdapter(allowed);
-    const items = !launch.adapters ? [['', 'loading…']]
-      : !allowed.length ? [['', launch.adapters.length ? 'no agent CLI allowed here' : 'no agent CLI']]
-      : allowed.map((a) => [a.id, (a.name || a.id) + (a.available ? '' : ' · not installed'), !a.available]);
-    const sig = JSON.stringify([items, launch.adapter]);
-    if (sel.dataset.sig !== sig) {
-      sel.dataset.sig = sig;
-      fillSelect(sel, items, launch.adapter);
-      sel.disabled = !launch.adapter;
-      const logo = providerLogo(launch.adapter);
-      if (logo) logo.className = 'size-4 shrink-0 object-contain';
-      $('launch-adapter-logo').replaceChildren(...(logo ? [logo] : []));
-    }
-
-    renderLaunchModel();
-    renderLaunchFolder(root);
-    renderLaunchCrumbs();
-    renderLaunchList(notJoined);
-    renderNewFolder();
-
-    $('launch-attach').disabled = launch.busy;
-    $('launch-attach').title = launchImages() || !launch.adapter
-      ? 'Attach images or videos to the prompt (or paste / drop them)'
-      : `Attach videos to the prompt (${launch.adapter} takes no images at start)`;
-    const problem = launchImagesProblem();
-
-    // The footer only speaks up when something is in the way; otherwise
-    // it lists the keys.
-    const st = $('launch-status');
-    const say = (cls, text) => {
-      st.className = 'min-h-5 min-w-0 basis-full break-words text-xs sm:basis-0 sm:flex-1 ' + cls;
-      st.textContent = text;
-      st.hidden = !text && touch(); // phones: no empty line above the buttons
+  function wireSwipe() {
+    const box = $('side-list');
+    let g = null; // {row, x0, y0, base, dx, on, w, full, t, v}
+    box.addEventListener('touchstart', (ev) => {
+      g = null;
+      const row = ev.target.closest('.row');
+      if (!admin || !small() || !row || ev.touches.length !== 1) return;
+      if (swipe.open && swipe.open !== row) {
+        closeSwipe(swipe.open);
+        swipe.open = null;
+      }
+      const t = ev.touches[0];
+      g = { row, x0: t.clientX, y0: t.clientY, base: swipe.open === row ? -SWIPE_W : 0, dx: 0, on: false, w: row.offsetWidth, full: false, t: ev.timeStamp, v: 0 };
+    }, { passive: true });
+    box.addEventListener('touchmove', (ev) => {
+      if (!g) return;
+      const t = ev.touches[0];
+      const mx = t.clientX - g.x0;
+      const my = t.clientY - g.y0;
+      if (!g.on) {
+        if (Math.abs(my) > 10 && Math.abs(my) > Math.abs(mx)) return (g = null);
+        if (Math.abs(mx) < 10) return;
+        g.on = true;
+        swipe.drag = true;
+        g.row.parentElement.classList.add('swiping');
+        g.row.style.transition = 'none';
+        g.x0 = t.clientX - (mx > 0 ? 10 : -10); // no jump by the slop
+      }
+      let dx = g.base + t.clientX - g.x0;
+      // To the right of closed it gives a little, then stops.
+      if (dx > 0) dx = Math.min(dx * 0.25, 16);
+      dx = Math.max(dx, -g.w);
+      const dt = ev.timeStamp - g.t;
+      if (dt > 0) g.v = 0.6 * g.v + 0.4 * ((dx - g.dx) / dt);
+      g.t = ev.timeStamp;
+      g.dx = dx;
+      const full = -dx > g.w * FULL;
+      if (full !== g.full && navigator.vibrate) navigator.vibrate(8);
+      g.full = full;
+      setSwipe(g.row, dx, full);
+    }, { passive: true });
+    const end = () => {
+      const s = g;
+      g = null;
+      if (!s || !s.on) return;
+      swipe.drag = false;
+      s.row.style.transition = '';
+      // A click follows the touch: it must not open the session.
+      s.row.dataset.swiped = String(Date.now());
+      let open = false;
+      if (s.full) {
+        swipe.open = s.row;
+        s.row.parentElement._end();
+      } else {
+        const flick = Math.abs(s.v) > 0.45;
+        open = flick ? s.v < 0 : s.dx < -SWIPE_W / 2;
+        if (open) setSwipe(s.row, -SWIPE_W);
+        else closeSwipe(s.row);
+        swipe.open = open ? s.row : null;
+      }
+      // Changes that came in meanwhile, once the row is back.
+      if (swipe.stale && !open) {
+        swipe.stale = false;
+        setTimeout(() => swipe.drag || swipe.open ? (swipe.stale = true) : renderSideList(), 340);
+      }
     };
-    if (notJoined) say('text-amber-200/90', `${hostName(launch.host)} does not have this fleet's key: run \`fleet start --join <key>\` there (see Add folder).`);
-    else if (launch.error) say('text-rose-300', launch.error);
-    else if (problem) say('text-amber-200/90', problem);
-    else if (launch.adapters && !launchRoots().length) say('text-zinc-500', `No root folders on ${hostName(launch.host)} yet: make one with New folder.`);
-    else if (touch()) say('', '');
-    else {
-      say('text-zinc-600', '');
-      const key = (k, what) => h('span', 'whitespace-nowrap', h('kbd', 'rounded border border-ink-600 bg-ink-850 px-1 font-mono text-[10px] text-zinc-400', k), ' ' + what);
-      st.replaceChildren(h('span', 'flex flex-wrap gap-x-3 gap-y-1', key(MOD + '+Enter', 'start'), key(MOD + '+Shift+Enter', 'start, show screen'),
-        key(MOD + '+K', 'folder'), key((MAC ? '⌥' : 'Alt+') + '1–9', 'agent')));
-    }
-    const start = $('launch-start');
-    start.disabled = !root || !launch.adapter || launch.busy || notJoined || !!problem;
-    start.textContent = launch.busy ? 'Starting…' : 'Start';
-  }
-
-  // renderLaunchFolder shows the chosen folder on its picker button.
-  function renderLaunchFolder(root) {
-    const name = $('launch-folder');
-    name.textContent = launch.path ? shortPath(launch.path) : !launch.adapters ? 'loading…' : 'choose a folder';
-    name.className = 'min-w-0 truncate font-mono text-[12.5px] ' + (launch.path ? 'text-zinc-100' : 'text-zinc-500');
-    $('launch-folder-git').hidden = !launch.path || !folderRow(launch.path).git;
-    $('launch-folder-btn').title = root ? `${launch.path} · root ${root.name}` : 'Choose the folder to start in';
-  }
-
-  // The folder picker: recent folders and roots, the search results, or
-  // the subfolders of one folder. A click on a row chooses it, › looks
-  // inside; New folder makes one, as a root.
-
-  function showFolders(open) {
-    launch.folders = open;
-    $('launch-folders').hidden = !open;
-    $('launch-folder-btn').setAttribute('aria-expanded', String(open));
-    launch.listSig = ''; // listed again once shown, scrolled to the chosen folder
-    launch.listShown = false;
-    if (!open) {
-      launch.look = '';
-      $('launch-search').value = '';
-      closeNewFolder();
-    }
-  }
-
-  function toggleFolders(open) {
-    showFolders(open);
-    renderLaunch();
-    if (open && !touch()) $('launch-search').focus();
-  }
-
-  function chooseFolder(path) {
-    launch.path = path;
-    showFolders(false);
-    renderLaunch();
-    if (!touch()) $('launch-prompt').focus();
-  }
-
-  // lookInto shows the subfolders of path; '' goes back to recent folders
-  // and roots.
-  function lookInto(path) {
-    launch.look = path;
-    $('launch-search').value = '';
-    if (path) listDir(path);
-    renderLaunch();
-    if (!touch()) $('launch-search').focus();
-  }
-
-  function lookUp() {
-    const up = launch.look && parentOf(launch.look);
-    if (launch.look) lookInto(up && placeOf(up) ? up : '');
-  }
-
-  // folderRow describes the row of path: its name (a root's own name, or
-  // the folder's), where it is, and whether it is a git repo (if not
-  // given, as its parent's listing says).
-  function folderRow(path, git) {
-    const root = launchRoots().find((r) => r.path === path);
-    const name = root ? root.name : baseName(path) || '/';
-    if (git == null) {
-      const d = launch.dirs.get(parentOf(path));
-      git = d && d.entries && (d.entries.find((e) => e.name === baseName(path)) || {}).git;
-    }
-    return { path, name, git: !!git, where: shortPath(path) };
-  }
-
-  const LAUNCH_FOUND_MAX = 50;
-
-  // launchRows is what the folder list shows, as plain data (compared
-  // before the list is rebuilt).
-  function launchRows(notJoined) {
-    const note = (text) => ({ note: text });
-    if (notJoined) return [note('not in this fleet yet')];
-    if (!launch.adapters) return [note('loading…')];
-    const roots = launchRoots();
-    if (!roots.length) return [note('no roots on this machine: make a new folder below')];
-    const q = $('launch-search').value.trim().toLowerCase();
-    if (q) return searchRows(q);
-
-    const l = launch.look;
-    if (l) {
-      const d = launch.dirs.get(l);
-      const rows = [{ ...folderRow(l), where: 'this folder', here: true }];
-      if (!d || !d.entries) rows.push(note('loading…'));
-      else if (d.error) rows.push(note(d.error));
-      else {
-        for (const e of d.entries) rows.push({ ...folderRow(joinPath(l, e.name), e.git), where: '' });
-        if (!d.entries.length) rows.push(note('no subfolders'));
-        if (d.truncated) rows.push(note(`only the first ${d.entries.length} folders are listed: search to find others`));
-      }
-      return rows;
-    }
-
-    // A folder is listed once: recent, else as a root.
-    const recent = launchRecent(LAUNCH_RECENT);
-    const rows = [];
-    if (recent.length) rows.push({ head: 'Recent' }, ...recent.map((p) => folderRow(p)));
-    const others = roots.filter((r) => !recent.includes(r.path)).map((r) => folderRow(r.path));
-    others.sort((a, b) => a.name.localeCompare(b.name));
-    if (others.length) rows.push({ head: recent.length ? 'Other roots' : 'Roots' }, ...others);
-    return rows;
-  }
-
-  // searchRows finds folders whose name or path has every word of q:
-  // folders of past sessions, roots, the folders in them and in every
-  // folder looked into. A name that is nowhere can be made.
-  function searchRows(q) {
-    const words = q.split(/\s+/);
-    const last = words[words.length - 1];
-    const found = new Map();
-    const add = (path, git, rank) => {
-      if (found.has(path) || !placeOf(path)) return;
-      const row = folderRow(path, git);
-      const name = row.name.toLowerCase();
-      if (!words.every((w) => (name + ' ' + row.where.toLowerCase()).includes(w))) return;
-      const score = name === last ? 0 : name.startsWith(last) ? 1 : name.includes(last) ? 2 : 3;
-      found.set(path, { row, score, rank, depth: path.split('/').length });
-    };
-    const recent = launchRecent();
-    recent.forEach((p, i) => add(p, null, i));
-    for (const r of launchRoots()) add(r.path, null, recent.length);
-    let listing = false;
-    for (const d of launch.dirs.values()) {
-      if (!d.entries) listing = true;
-      else for (const e of d.entries) add(joinPath(d.path, e.name), e.git, recent.length);
-    }
-    const hits = [...found.values()].sort((a, b) => a.score - b.score || a.rank - b.rank || a.depth - b.depth ||
-      a.row.name.localeCompare(b.row.name));
-    const rows = hits.slice(0, LAUNCH_FOUND_MAX).map((x) => x.row);
-    if (hits.length > LAUNCH_FOUND_MAX) rows.push({ note: `${hits.length - LAUNCH_FOUND_MAX} more: type more to narrow them down` });
-    if (listing) rows.push({ note: 'still listing folders…' });
-    else if (!hits.length) rows.push({ note: `no folder matches "${q}": look inside one (›) to search its folders too` });
-    const typed = $('launch-search').value.trim();
-    if (words.length === 1 && !hits.some((x) => x.score === 0)) {
-      rows.push({ make: /^[~/]/.test(typed) ? typed : joinPath('~', typed) });
-    }
-    return rows;
-  }
-
-  const LAUNCH_ROW = 'touch:min-h-11 flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1 text-left font-mono text-[12.5px] text-zinc-300 hover:bg-ink-800 hover:text-zinc-50 focus-visible:bg-ink-800 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-emerald-400/60 aria-pressed:bg-emerald-400/10 aria-pressed:text-emerald-100 aria-pressed:hover:bg-emerald-400/15';
-  const LAUNCH_MAKE = 'touch:min-h-11 flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-1 text-left font-mono text-[12.5px] text-emerald-300 hover:bg-ink-800 focus-visible:bg-ink-800 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-emerald-400/60';
-  const LAUNCH_LOOK = 'touch:min-h-11 touch:min-w-11 shrink-0 rounded px-2.5 font-mono text-sm text-zinc-600 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-emerald-400/60';
-  const GIT_CHIP = 'inline-flex shrink-0 items-center rounded border border-violet-400/25 bg-violet-400/10 px-1.5 py-px font-mono text-[10px] text-violet-300';
-
-  function renderLaunchList(notJoined) {
-    if (!launch.folders) return;
-    const ul = $('launch-list');
-    const rows = launchRows(notJoined);
-    const view = JSON.stringify([launch.host, $('launch-search').value.trim(), launch.look]);
-    const sig = JSON.stringify([view, rows, launch.path]);
-    if (sig === launch.listSig) return;
-    const sameView = view === launch.listView;
-    launch.listSig = sig;
-    launch.listView = view;
-    const focused = ul.contains(document.activeElement) ? document.activeElement.dataset.key : '';
-    ul.replaceChildren(...rows.map((row) => {
-      if (row.head) return h('li', 'px-2 pb-1 pt-2.5 text-[10px] font-medium uppercase tracking-wider text-zinc-600 first:pt-1', row.head);
-      if (row.note) return h('li', 'px-2 py-4 text-center font-mono text-xs text-zinc-600', '// ' + row.note);
-      if (row.make) {
-        const b = h('button', LAUNCH_MAKE, h('span', 'w-3 shrink-0 text-center text-emerald-400', '+'),
-          h('span', 'min-w-0 truncate', 'New folder ', h('span', 'text-zinc-100', row.make)),
-          h('span', 'ml-auto shrink-0 pl-2 font-sans text-[11px] text-zinc-500', 'becomes a root'));
-        b.type = 'button';
-        b.dataset.key = 'make:' + row.make;
-        b.addEventListener('click', () => openNewFolder(row.make));
-        return h('li', 'flex', b);
-      }
-      const chosen = row.path === launch.path;
-      const b = h('button', LAUNCH_ROW,
-        h('span', 'w-3 shrink-0 text-emerald-400', chosen ? '✓' : ''),
-        h('span', 'min-w-0 max-w-[70%] shrink-0 truncate', row.name, row.here ? '' : h('span', 'text-zinc-600', '/')),
-        row.git ? chip('git', GIT_CHIP) : null,
-        h('span', 'ml-auto min-w-0 truncate pl-2 font-sans text-[11px] text-zinc-500', row.where));
-      b.type = 'button';
-      b.dataset.key = row.path;
-      b.setAttribute('aria-pressed', String(chosen));
-      b.title = shortPath(row.path);
-      b.addEventListener('click', () => chooseFolder(row.path));
-      if (row.here) return h('li', 'flex', b);
-      const look = h('button', LAUNCH_LOOK, '›');
-      look.type = 'button';
-      look.tabIndex = -1; // → does it from the keyboard
-      look.setAttribute('aria-label', `Look inside ${row.name}`);
-      look.title = 'look inside';
-      look.addEventListener('click', () => lookInto(row.path));
-      return h('li', 'flex items-stretch gap-0.5', b, look);
-    }));
-    ul.classList.toggle('opacity-60', rows.length === 1 && rows[0].note === 'loading…');
-    // A new list starts at the top; recent folders and roots at the chosen
-    // folder once it is in them.
-    if (!sameView) {
-      ul.scrollTop = 0;
-      launch.listShown = false;
-    }
-    const c = !launch.listShown && !launch.look && !$('launch-search').value.trim() && ul.querySelector('button[aria-pressed="true"]');
-    if (c) {
-      launch.listShown = true;
-      ul.scrollTop = c.getBoundingClientRect().top - ul.getBoundingClientRect().top - ul.clientHeight / 3;
-    }
-    if (focused) {
-      const again = [...ul.querySelectorAll('button[data-key]')].find((b) => b.dataset.key === focused);
-      if (again) again.focus();
-      else if (!touch()) $('launch-search').focus();
-    }
-  }
-
-  // renderLaunchCrumbs shows the folder looked into, from the outermost
-  // root around it.
-  function renderLaunchCrumbs() {
-    const nav = $('launch-crumbs');
-    const l = launch.look;
-    nav.hidden = !l || !!$('launch-search').value.trim();
-    if (nav.hidden) return nav.replaceChildren();
-    const up = h('button', 'touch:min-h-11 touch:min-w-11 shrink-0 rounded px-2 py-0.5 text-sm text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', '‹');
-    up.type = 'button';
-    const top = !placeOf(parentOf(l));
-    up.setAttribute('aria-label', top ? 'Back to recent folders and roots' : 'Parent folder');
-    up.title = top ? 'recent folders and roots' : 'parent folder';
-    up.addEventListener('click', lookUp);
-    const chain = [];
-    for (let p = l; p && placeOf(p); p = parentOf(p)) {
-      chain.unshift(p);
-      if (p === '/') break;
-    }
-    const items = [up];
-    chain.forEach((p, i) => {
-      if (i > 0) items.push(h('span', 'shrink-0 text-zinc-700', '/'));
-      const label = i ? baseName(p) : shortPath(p);
-      if (p === l) {
-        const el = h('span', 'min-w-0 truncate rounded px-1 py-0.5 font-semibold text-zinc-100', label);
-        el.setAttribute('aria-current', 'location');
-        items.push(el);
-        return;
-      }
-      const b = h('button', 'touch:min-h-11 shrink-0 rounded px-1 py-0.5 text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', label);
-      b.type = 'button';
-      b.addEventListener('click', () => lookInto(p));
-      items.push(b);
-    });
-    nav.replaceChildren(...items);
-  }
-
-  // New folder: made on the machine and added as a root (an own root, so
-  // its agents and trust are its own), then chosen.
-
-  function openNewFolder(path) {
-    $('launch-new-open').hidden = true;
-    $('launch-new').hidden = false;
-    const f = $('launch-new-path');
-    f.value = path || joinPath(launch.look ? tilde(launch.look) : '~', '');
-    $('launch-new-trust').checked = true;
-    newFolderSays('');
-    renderNewFolder();
-    f.focus();
-    f.setSelectionRange(f.value.length, f.value.length);
-  }
-
-  function closeNewFolder() {
-    $('launch-new-open').hidden = false;
-    $('launch-new').hidden = true;
-  }
-
-  function newFolderSays(text, cls) {
-    const st = $('launch-new-status');
-    st.className = 'min-h-4 break-words text-xs ' + (cls || 'text-zinc-500');
-    st.textContent = text || `Made on ${hostName(launch.host)}, added as a root, and chosen to start in.`;
-  }
-
-  function renderNewFolder() {
-    const path = $('launch-new-path').value.trim();
-    $('launch-new-create').disabled = launch.making || !path || /^~?\/*$/.test(path);
-    $('launch-new-create').textContent = launch.making ? 'Creating…' : 'Create';
-    $('launch-new-path').disabled = launch.making;
-  }
-
-  async function createFolder() {
-    const path = $('launch-new-path').value.trim();
-    if (launch.making || !path || /^~?\/*$/.test(path)) return;
-    const host = launch.host;
-    const gen = launch.gen;
-    const older = (e) => (e.status === 405 ? `${hostName(host)} runs an older fleet: update it to make folders from here.` : e.message);
-    launch.making = true;
-    newFolderSays('creating…');
-    renderNewFolder();
-    let made = null;
-    let root = null;
-    try {
-      made = await api('POST', launchAPI('fs'), { path });
-      root = (await api('POST', launchAPI('roots'), { path: made.path, adapters: [], trust: $('launch-new-trust').checked })).root;
-    } catch (e) {
-      if (gen === launch.gen) newFolderSays(made ? `Made ${shortPath(made.path)}, but could not add it as a root: ${e.message}` : older(e), 'text-rose-300');
-    }
-    launch.making = false;
-    if (gen !== launch.gen) return;
-    if (!root) return renderNewFolder();
-    // Known before the roots are sent again.
-    const roots = host ? launch.roots : S.roots;
-    if (roots && !roots.some((r) => r.name === root.name)) {
-      roots.push(root);
-      if (!host) invalidate('roots');
-    }
-    const parent = parentOf(root.path);
-    if (launch.dirs.has(parent)) {
-      launch.dirs.delete(parent);
-      listDir(parent);
-    }
-    listDir(root.path);
-    if (!host) markChanged('root:' + root.name);
-    toast(`made ${shortPath(root.path)}${host ? ' on ' + hostName(host) : ''}, a new root`);
-    chooseFolder(root.path);
-  }
-
-  async function startSession(ev) {
-    ev.preventDefault();
-    const place = launchPlace();
-    if (!place || !launch.adapter || launch.busy || launchImagesProblem()) return;
-    const host = launch.host;
-    const adapter = launch.adapter;
-    const then = launch.then || checkedValue('launch-then') || 'chat';
-    launch.then = '';
-    launch.busy = true;
-    launch.error = '';
-    renderLaunch();
-    const pick = launchPick();
-    try {
-      const r = await api('POST', launchAPI('agents'), {
-        model: (pick && pick.model && pick.model.id) || '',
-        effort: (pick && pick.effort && pick.effort.id) || '',
-        adapter,
-        root: place.root.name,
-        path: place.sub,
-        prompt: withVideos($('launch-prompt').value, launch.videos),
-        name: $('launch-name').value.trim(),
-        branch: $('launch-branch').value.trim(),
-        isolation: checkedValue('launch-iso'),
-        sandbox: checkedValue('launch-sandbox'),
-        images: launch.images.map((im) => im.data),
-      });
-      rememberRootProvider(host, place.root, adapter);
-      launch.busy = false;
-      closeLaunch();
-      toast(`started ${r.agent.name}${host ? ' on ' + hostName(host) : ''}`);
-      if (host) {
-        const rem = S.remote.get(host) || { agents: new Map(), fails: 0 };
-        rem.agents.set(r.agent.id, r.agent);
-        S.remote.set(host, rem);
-        invalidate('agents');
-      }
-      if (then !== 'stay') openChat(host, r.agent.id, r.agent, { screen: then === 'screen' });
-      return;
-    } catch (e) {
-      launch.error = e.message;
-    }
-    launch.busy = false;
-    renderLaunch();
-  }
-
-  function wireLaunch() {
-    const dlg = $('launch');
-    const search = $('launch-search');
-    const list = $('launch-list');
-    const prompt = $('launch-prompt');
-    const newPath = $('launch-new-path');
-    $('agents-new').addEventListener('click', () => openLaunch());
-    $('launch-form').addEventListener('submit', startSession);
-    $('launch-close').addEventListener('click', closeLaunch);
-    $('launch-cancel').addEventListener('click', closeLaunch);
-    $('launch-hosts').addEventListener('change', (ev) => selectLaunchHost(ev.target.value));
-    $('launch-adapters').addEventListener('change', (ev) => {
-      launch.adapter = ev.target.value;
-      renderLaunch();
-    });
-    $('launch-model').addEventListener('change', saveLaunchPick);
-    $('launch-effort').addEventListener('change', saveLaunchPick);
-    for (const key of Object.keys(LAUNCH_CHOICES)) $('launch-' + key).addEventListener('change', saveLaunchOptions);
-    $('launch-name').addEventListener('input', renderLaunchMore);
-    $('launch-branch').addEventListener('input', renderLaunchMore);
-    $('launch-folder-btn').addEventListener('click', () => toggleFolders(!launch.folders));
-    $('launch-new-open').addEventListener('click', () => openNewFolder());
-    $('launch-new-cancel').addEventListener('click', () => {
-      closeNewFolder();
-      $('launch-new-open').focus();
-    });
-    $('launch-new-create').addEventListener('click', createFolder);
-    newPath.addEventListener('input', renderNewFolder);
-    newPath.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter' && !ev.ctrlKey && !ev.metaKey) {
-        ev.preventDefault(); // makes the folder, never starts the session
-        createFolder();
-      } else if (ev.key === 'Escape') {
+    box.addEventListener('touchend', end);
+    box.addEventListener('touchcancel', end);
+    box.addEventListener('click', (ev) => {
+      const row = ev.target.closest('.row');
+      if (!row) return;
+      if (Date.now() - Number(row.dataset.swiped || 0) < 400 || swipe.open === row) {
         ev.preventDefault();
-        closeNewFolder();
-        $('launch-new-open').focus();
-      }
-    });
-    search.addEventListener('input', renderLaunch);
-    search.addEventListener('keydown', (ev) => {
-      const first = list.querySelector('button[data-key]');
-      if (ev.key === 'ArrowDown' && first) {
-        ev.preventDefault();
-        first.focus();
-      } else if (ev.key === 'Enter') {
-        ev.preventDefault(); // never start by accident; with a search, choose the first match
-        if (search.value.trim() && first) first.click();
-      } else if (ev.key === 'Backspace' && !search.value && launch.look) {
-        ev.preventDefault();
-        lookUp();
-      } else if (ev.key === 'Escape') {
-        ev.preventDefault(); // clears the search, then closes the picker, not the dialog
-        if (search.value) {
-          search.value = '';
-          renderLaunch();
-        } else {
-          toggleFolders(false);
-          $('launch-folder-btn').focus();
+        if (swipe.open === row && Date.now() - Number(row.dataset.swiped || 0) >= 400) {
+          closeSwipe(row);
+          swipe.open = null;
         }
       }
     });
-    list.addEventListener('keydown', (ev) => {
-      const rows = [...list.querySelectorAll('button[data-key]')];
-      const i = rows.indexOf(document.activeElement);
-      if (i < 0) return;
-      if (ev.key === 'ArrowDown') {
-        ev.preventDefault();
-        if (i + 1 < rows.length) rows[i + 1].focus();
-      } else if (ev.key === 'ArrowUp') {
-        ev.preventDefault();
-        (i > 0 ? rows[i - 1] : search).focus();
-      } else if (ev.key === 'ArrowRight') {
-        const look = rows[i].nextElementSibling;
-        if (!look) return;
-        ev.preventDefault();
-        look.click();
-      } else if ((ev.key === 'ArrowLeft' || ev.key === 'Backspace') && launch.look) {
-        ev.preventDefault();
-        lookUp();
-      } else if (ev.key === 'Escape') {
-        ev.preventDefault();
-        toggleFolders(false);
-        $('launch-folder-btn').focus();
+    box.addEventListener('scroll', () => {
+      if (swipe.open && !swipe.drag) {
+        closeSwipe(swipe.open);
+        swipe.open = null;
       }
-    });
-    // The prompt grows as it is typed into; keep its end in view.
-    prompt.addEventListener('input', () => {
-      fitHeight(prompt);
-      if (launch.images.length) renderLaunch(); // images need a prompt
-      const body = $('launch-body');
-      const below = prompt.getBoundingClientRect().bottom + 12 - body.getBoundingClientRect().bottom;
-      if (below > 0) body.scrollTop += below;
-    });
-    // Anywhere in the dialog: Ctrl/Cmd+Enter starts the session, with
-    // Shift it shows the screen too; Ctrl/Cmd+K opens the folders;
-    // Alt+1–9 chooses the agent CLI.
-    dlg.addEventListener('keydown', (ev) => {
-      if (ev.isComposing) return;
-      if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
+    }, { passive: true });
+  }
+
+  // ------------------------------------------------------- menus, sheets
+  //
+  // One menu at a time, placed by its anchor on desktops and a bottom sheet
+  // on phones. Arrow keys move through its items, Esc closes it and puts
+  // the focus back. Opened with the keyboard, the first item takes the
+  // focus; opened with a pointer, the menu holds it until the arrows move.
+
+  let MENU = null; // {el, anchor, scrim, repaint}
+  let lastPointer = 0;
+
+  function openMenu(anchor, build, o = {}) {
+    if (MENU && MENU.anchor === anchor) {
+      closeMenu();
+      return;
+    }
+    closeMenu(false);
+    const el = h('div', { class: 'menu' + (o.wide ? ' wide' : ''), role: o.role || 'menu', 'aria-label': o.label || null, tabindex: '-1' });
+    const close = (restore = true) => closeMenu(restore);
+    MENU = { el, anchor, scrim: null, repaint: null, o };
+    build(el, close, MENU);
+    const layer = $('layer');
+    if (small()) {
+      MENU.scrim = h('div', { class: 'scrim', onclick: () => close() });
+      layer.append(MENU.scrim);
+    }
+    layer.append(el);
+    anchor.setAttribute('aria-expanded', 'true');
+    if (!small()) placeMenu();
+    const byPointer = Date.now() - lastPointer < 600;
+    const first = o.focus ? el.querySelector(o.focus)
+      : byPointer ? null : el.querySelector('.mi:not([aria-disabled="true"])') || el.querySelector('input, textarea');
+    (first || el).focus({ preventScroll: true });
+  }
+
+  // placeMenu puts the menu under its anchor, or over it when there is
+  // more room above, inside the window.
+  function placeMenu() {
+    if (!MENU || small()) return;
+    const { el, anchor, o } = MENU;
+    const r = anchor.getBoundingClientRect();
+    const m = el.getBoundingClientRect();
+    let left = o.alignRight ? r.right - m.width : r.left;
+    left = Math.max(8, Math.min(left, innerWidth - m.width - 8));
+    const below = innerHeight - r.bottom;
+    let top = below >= m.height + 12 || below >= r.top ? r.bottom + 6 : r.top - m.height - 6;
+    top = Math.max(8, Math.min(top, innerHeight - m.height - 8));
+    el.style.left = left + 'px';
+    el.style.top = top + 'px';
+  }
+
+  function closeMenu(restore = true) {
+    if (!MENU) return;
+    const { el, anchor, scrim } = MENU;
+    MENU = null;
+    el.remove();
+    if (scrim) scrim.remove();
+    anchor.setAttribute('aria-expanded', 'false');
+    if (restore && anchor.isConnected) anchor.focus({ preventScroll: true });
+  }
+
+  function wireMenus() {
+    document.addEventListener('pointerdown', (ev) => {
+      lastPointer = Date.now();
+      if (MENU && !MENU.el.contains(ev.target) && !MENU.anchor.contains(ev.target) && ev.target !== MENU.scrim) closeMenu(false);
+    }, true);
+    document.addEventListener('keydown', (ev) => {
+      if (!MENU) return;
+      if (ev.key === 'Escape') {
         ev.preventDefault();
-        launch.then = ev.shiftKey ? 'screen' : '';
-        $('launch-form').requestSubmit();
-      } else if (ev.code === 'KeyK' && (ev.ctrlKey || ev.metaKey) && !ev.altKey && !ev.shiftKey) {
-        ev.preventDefault();
-        if (!launch.folders) toggleFolders(true);
-        else if (!touch()) search.focus();
-      } else if (ev.altKey && !ev.ctrlKey && !ev.metaKey && /^Digit[1-9]$/.test(ev.code)) {
-        const opt = [...$('launch-adapters').options].filter((o) => o.value && !o.disabled)[Number(ev.code.slice(5)) - 1];
-        if (!opt) return;
-        ev.preventDefault();
-        launch.adapter = opt.value;
-        renderLaunch();
+        ev.stopPropagation();
+        closeMenu();
+        return;
       }
-    });
-    prompt.addEventListener('paste', (ev) => {
-      const files = mediaFiles(ev.clipboardData);
-      if (!files.length) return;
+      if (ev.key === 'Tab' && MENU.el.getAttribute('role') === 'menu') {
+        closeMenu(false);
+        return;
+      }
+      if (ev.key !== 'ArrowDown' && ev.key !== 'ArrowUp') return;
+      if (ev.target.matches('textarea')) return;
+      const items = [...MENU.el.querySelectorAll('.mi:not([aria-disabled="true"])')];
+      if (!items.length) return;
       ev.preventDefault();
-      addLaunchFiles(files);
+      const i = items.indexOf(document.activeElement);
+      (ev.key === 'ArrowDown' ? items[(i + 1) % items.length] : items[(i - 1 + items.length) % items.length]).focus();
+    }, true);
+    addEventListener('resize', () => {
+      if (MENU && !small()) placeMenu();
     });
-    $('launch-attach').addEventListener('click', () => $('launch-file').click());
-    $('launch-file').addEventListener('change', (ev) => {
-      addLaunchFiles(ev.target.files);
-      ev.target.value = '';
+  }
+
+  // mi is a menu item: o.icon, o.logo or o.custom first, o.label with
+  // o.sub under it, o.right or o.kbd at the end; o.checked makes it one of
+  // a choice.
+  function mi(o) {
+    const radio = o.checked !== undefined;
+    const b = h('button', {
+      type: 'button', class: 'mi' + (o.danger ? ' danger' : '') + (o.cls ? ' ' + o.cls : ''),
+      role: radio ? 'menuitemradio' : 'menuitem', 'aria-checked': radio ? String(!!o.checked) : null,
+      'aria-disabled': o.disabled ? 'true' : null, title: o.title || null,
+    },
+    o.icon ? icon(o.icon) : o.logo ? logo(o.logo) : o.custom || null,
+    h('span', 'grow', h('span', null, o.label), o.sub ? h('span', 'sub', o.sub) : null),
+    o.right ? h('span', 'right', o.right) : null,
+    o.kbd ? h('kbd', null, o.kbd) : null,
+    o.checked ? icon('check', 'check') : null);
+    b.addEventListener('click', () => {
+      if (!o.disabled) o.onSelect?.();
     });
-    $('launch-images').addEventListener('click', (ev) => {
-      const b = ev.target.closest('button[data-image], button[data-video]');
-      if (!b || launch.busy) return;
-      if (b.dataset.video) dropVideos(launch.videos.splice(Number(b.dataset.video), 1));
-      else launch.images.splice(Number(b.dataset.image), 1);
-      renderLaunchThumbs();
-      renderLaunch();
-      if (!touch()) prompt.focus();
+    return b;
+  }
+
+  // ---------------------------------------------------------------- dialogs
+
+  // Require both ends of the click to be outside the dialog's box, so
+  // selecting text or clicking empty space inside never dismisses it.
+  function wireBackdrop(dlg, close, canClose = () => true) {
+    let downOutside = false;
+    const outside = (ev) => {
+      const r = dlg.getBoundingClientRect();
+      return ev.target === dlg && (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom);
+    };
+    dlg.addEventListener('pointerdown', (ev) => {
+      downOutside = ev.button === 0 && outside(ev);
     });
-    // A file dropped anywhere on the dialog must not open in the tab.
-    dlg.addEventListener('dragover', (ev) => {
-      if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files')) ev.preventDefault();
-    });
-    dlg.addEventListener('drop', (ev) => {
-      if (!ev.dataTransfer || !ev.dataTransfer.files.length) return;
-      ev.preventDefault();
-      addLaunchFiles(ev.dataTransfer.files);
+    dlg.addEventListener('pointercancel', () => {
+      downOutside = false;
     });
     dlg.addEventListener('close', () => {
-      launch.open = false;
-      launch.images = [];
-      launch.videos = dropVideos(launch.videos);
-      launch.gen++;
-      launch.listSig = '';
-      launch.listView = '';
-      launch.hostSig = '';
-      launch.modelSig = '';
+      downOutside = false;
     });
-    wireBackdrop(dlg, closeLaunch, () => !launch.busy && !launch.making);
+    dlg.addEventListener('click', (ev) => {
+      const dismiss = downOutside && outside(ev);
+      downOutside = false;
+      if (dismiss && canClose()) close();
+    });
+  }
+
+  const dlgState = { onClose: null, canClose: () => true, back: null, id: '' };
+
+  // openDialog shows the one dialog: a title, a line under it, a body and
+  // the buttons at its foot. o.id names it (for repaints), o.focus is the
+  // element to focus, o.canClose may keep it open (a request in flight).
+  function openDialog(o) {
+    const dlg = $('dlg');
+    if (dlg.open) dlg.close();
+    dlg.className = 'dlg' + (o.wide ? ' wide' : '');
+    fill(dlg,
+      h('div', 'dlg-h', h('div', 'grow', h('h2', { id: 'dlg-h' }, o.title), o.sub ? h('p', 'dlg-sub', o.sub) : null),
+        iconBtn('x', 'Close', () => closeDialog())),
+      o.body ? h('div', 'dlg-b', o.body) : null,
+      o.foot ? h('div', 'dlg-f', o.foot) : null);
+    Object.assign(dlgState, { onClose: o.onClose || null, canClose: o.canClose || (() => true), back: document.activeElement, id: o.id || '' });
+    dlg.setAttribute('tabindex', '-1');
+    dlg.showModal();
+    if (o.focus) o.focus.focus();
+    else if (Date.now() - lastPointer < 600 || touch()) dlg.focus();
+  }
+
+  function closeDialog() {
+    const dlg = $('dlg');
+    if (dlg.open && dlgState.canClose()) dlg.close();
+  }
+
+  function wireDialog() {
+    const dlg = $('dlg');
+    dlg.addEventListener('cancel', (ev) => {
+      if (!dlgState.canClose()) ev.preventDefault();
+    });
+    dlg.addEventListener('close', () => {
+      const { onClose, back } = dlgState;
+      Object.assign(dlgState, { onClose: null, canClose: () => true, back: null, id: '' });
+      if (onClose) onClose();
+      if (back && back.isConnected) back.focus({ preventScroll: true });
+    });
+    wireBackdrop(dlg, closeDialog, () => dlgState.canClose());
+  }
+
+  const dialogShows = (id) => $('dlg').open && dlgState.id === id;
+
+  // ----------------------------------------------------------------- toasts
+
+  function toast(text, kind) {
+    const t = h('div', 'toast' + (kind && kind !== 'ok' ? ' ' + kind : ''), text);
+    const box = $('toasts');
+    box.append(t);
+    while (box.children.length > 3) box.firstChild.remove();
+    setTimeout(() => t.remove(), kind === 'error' || kind === 'warn' ? 7000 : 4000);
+  }
+
+  // copyText copies text. Plain HTTP has no Clipboard API: then a hidden
+  // text box and the old copy command (inside an open dialog, which makes
+  // the rest of the page inert).
+  async function copyText(text, btn) {
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch {
+      const ta = h('textarea', { class: 'sr-only', readonly: true });
+      ta.value = text;
+      (document.querySelector('dialog[open]') || document.body).append(ta);
+      ta.select();
+      try {
+        ok = document.execCommand('copy');
+      } catch {
+        ok = false;
+      }
+      ta.remove();
+      if (btn) btn.focus();
+    }
+    if (btn && btn.classList.contains('btn')) {
+      const was = btn.textContent;
+      btn.textContent = ok ? 'Copied' : 'Copy failed';
+      setTimeout(() => {
+        btn.textContent = was;
+      }, 1500);
+    } else toast(ok ? 'Copied' : 'Could not copy: select the text and copy it', ok ? 'ok' : 'warn');
+  }
+
+  // --------------------------------------------------------------- settings
+
+  function openSettings() {
+    openDialog({ id: 'settings', title: 'Settings', sub: 'Kept in this browser.', body: settingsBody() });
+  }
+
+  function repaintSettings() {
+    if (!dialogShows('settings')) return;
+    const b = $('dlg').querySelector('.dlg-b');
+    if (b) fill(b, settingsBody());
+  }
+
+  function settingsBody() {
+    const s = S.server || {};
+    const notify = h('input', {
+      type: 'checkbox', class: 'switch', checked: push.on, disabled: !PUSH_OK || !admin || push.busy,
+      'aria-label': 'Push notifications', onchange: () => toggleNotify(),
+    });
+    const shortcuts = [
+      ['New session', ['N']], ['Search sessions', ['/']], ['Open the 1st–9th live session', ['Ctrl', '1–9']],
+      ['Folder, in a new session', [MOD, 'K']], ['Start the session', [MOD, '↵']], ['Start it and show its terminal', [MOD, '⇧', '↵']],
+      ['Interrupt the agent', ['Ctrl', 'C']], ['Archive the open session', [MAC ? '⌥' : 'Alt', 'A']], ['Close a menu or panel, go back', ['Esc']],
+    ];
+    const where = s.hostname || s.name || 'the server';
+    return [
+      h('section', 'set-sec', h('h3', null, 'Appearance'),
+        h('div', 'set-row', h('div', 'grow', h('div', null, 'Theme'), h('div', 'sub', 'System follows your device’s light or dark mode.')), themeSeg())),
+      h('section', 'set-sec', h('h3', null, 'Notifications'),
+        h('label', 'set-row', h('div', 'grow', h('div', null, 'Push notifications on this device'),
+          h('div', 'sub', !PUSH_OK ? pushHint() : !admin ? 'Unlock this browser first.' : 'When an agent needs you, finishes its work, hits a usage limit or opens a pull request.')), notify),
+        push.on ? h('div', null, h('button', { type: 'button', class: 'btn sm', onclick: testPush }, icon('bell'), 'Send a test')) : null),
+      h('section', 'set-sec', h('h3', null, 'Access'),
+        admin
+          ? h('div', 'set-row', h('div', 'grow', h('div', null, 'This browser can manage the fleet'),
+            h('div', 'sub', 'It starts, answers and ends sessions on every machine that shares the fleet key.')),
+          h('button', { type: 'button', class: 'btn sm', onclick: () => { closeDialog(); signOut(); } }, icon('logout'), 'Sign out'))
+          : h('div', 'set-row', h('div', 'grow', h('div', null, 'This browser can only look'),
+            h('div', 'sub', ['Unlock it with the fleet key, or open the link ', h('code', 'mono', 'fleet web'), ` prints on ${where}.`])),
+          h('button', { type: 'button', class: 'btn sm primary', onclick: openUnlock }, icon('key'), 'Unlock'))),
+      keyboard() ? h('section', 'set-sec', h('h3', null, 'Keyboard'),
+        h('dl', 'shortcuts', shortcuts.map(([what, keys]) => [h('dt', null, what), h('dd', null, keys.map((k) => h('kbd', null, k)))]))) : null,
+      h('section', 'set-sec', h('h3', null, 'About'),
+        h('dl', 'about',
+          h('dt', null, 'Version'), h('dd', null, 'fleet ' + (s.version || 'dev')),
+          h('dt', null, 'Machine'), h('dd', null, [s.name, s.hostname && s.hostname !== s.name ? s.hostname : '', `${s.os || '?'}/${s.arch || '?'}`].filter(Boolean).join(' · ')),
+          h('dt', null, 'Listening'), h('dd', null, (s.listen || '–') + (s.mdns ? ' · mDNS' : '')),
+          h('dt', null, 'Up'), h('dd', null, s.startedAtMs ? elapsed(s.startedAtMs) : '–'),
+          s.id ? [h('dt', null, 'Server'), h('dd', null, s.id)] : null)),
+    ];
+  }
+
+  // ----------------------------------------------------------------- unlock
+  //
+  // Someone who knows the fleet key (or this machine's admin token) types
+  // it in instead of opening a `fleet web` link: POST /api/unlock trades
+  // either for the admin token, which is then kept like one from a link.
+
+  function openUnlock() {
+    if (admin) return;
+    let busy = false;
+    const key = h('input', { class: 'input mono', type: 'password', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', placeholder: 'the key, or a pasted link or join command', 'aria-label': 'Fleet key or admin token' });
+    const status = h('p', { class: 'dlg-status', role: 'status', 'aria-live': 'polite' });
+    const btn = h('button', { type: 'submit', class: 'btn primary' }, 'Unlock');
+    const say = (text, err) => {
+      status.className = 'dlg-status' + (err ? ' err' : '');
+      status.textContent = text;
+    };
+    const submit = async (ev) => {
+      ev.preventDefault();
+      if (busy) return;
+      const k = unlockKey(key.value);
+      if (!k) return say('Enter the fleet key or the admin token.', true);
+      busy = true;
+      btn.disabled = true;
+      say('Checking…');
+      let r;
+      try {
+        r = await api('POST', '/api/unlock', { key: k });
+      } catch (e) {
+        busy = false;
+        btn.disabled = false;
+        return say(e.message, true);
+      }
+      busy = false;
+      if (!r || !r.token) {
+        btn.disabled = false;
+        return say('The daemon sent no token.', true);
+      }
+      setToken(r.token);
+      closeDialog();
+      setAdmin(true);
+      toast('This browser can now manage the fleet');
+    };
+    const where = (S.server && (S.server.hostname || S.server.name)) || 'the server';
+    const form = h('form', { novalidate: true, onsubmit: submit }, h('label', 'field', h('span', 'field-l', 'Key'), key), status);
+    openDialog({
+      id: 'unlock',
+      title: 'Unlock this browser',
+      sub: `With the fleet key, or the admin token of ${where}: fleet web prints both. The browser keeps admin rights until you sign out.`,
+      body: form,
+      foot: [h('button', { type: 'button', class: 'btn', onclick: closeDialog }, 'Cancel'), h('button', { type: 'button', class: 'btn primary', onclick: (ev) => submit(ev) }, 'Unlock')],
+      focus: touch() ? null : key,
+      canClose: () => !busy,
+      onClose: () => {
+        key.value = ''; // a secret: gone once the dialog closes
+      },
+    });
+  }
+
+  // unlockKey is the key in what was typed or pasted: bare, or out of a
+  // `fleet web` link (#token=...) or join command (--join ...).
+  function unlockKey(text) {
+    const m = /(?:#token=|--join\s+)([0-9A-Za-z]+)/.exec(text);
+    return m ? m[1] : text.trim();
+  }
+
+  // --------------------------------------------------------- end a session
+
+  // endAction is what ending agent a does: a live session is archived
+  // (killed, kept under Archived with its chat and files), a finished one
+  // deleted (forgotten). Either can remove the worktree or clone the daemon
+  // made for it (wt names it), unless it holds work that would be lost; a
+  // worktree's branch stays. Deleting removes it by default, archiving
+  // keeps it.
+  function endAction(a) {
+    const iso = a.isolation === 'clone' ? 'clone' : 'worktree';
+    const wt = a.worktree || '';
+    return isFinished(a)
+      ? { label: 'Delete', busy: 'Deleting…', forget: true, wt, iso, dropWt: true, note: 'It leaves Archived, with its chat.' }
+      : { label: 'Archive', busy: 'Archiving…', forget: false, wt, iso, dropWt: false, note: 'The agent is ended and the session moves to Archived. Its chat stays readable.' };
+  }
+
+  // endAgent archives or deletes agent id of host (see endAction),
+  // removing its worktree or clone if dropWt. It reports whether it worked.
+  async function endAgent(host, id, a, dropWt) {
+    const act = endAction(a || {});
+    if (dropWt === undefined) dropWt = act.dropWt;
+    const name = label(a || { id });
+    const base = host ? `/api/hosts/${encodeURIComponent(host)}/agents/` : '/api/agents/';
+    const body = {};
+    if (act.forget) body.forget = true;
+    if (dropWt) body.removeWorktree = true;
+    try {
+      const r = await api('POST', base + encodeURIComponent(id) + '/stop', body);
+      const what = `${act.forget ? 'Deleted' : 'Archived'} ${name}`;
+      if (act.forget) {
+        saveDraft(host, id, '');
+        agentsOf(host).delete(id);
+      } else if (host && r && r.agent) {
+        putAgent(host, r.agent);
+      }
+      if (r && r.worktreeKept) toast(`${what}; kept ${shortPath(act.wt || (a && a.cwd)) || 'its ' + act.iso}: ${r.reason}`, 'warn');
+      else if (dropWt && act.wt) toast(`${what} and removed its ${act.iso}`);
+      else toast(what);
+      invalidate('agents');
+      return true;
+    } catch (e) {
+      toast(`Could not ${act.label.toLowerCase()} ${name}: ${e.message}`, 'error');
+      return false;
+    }
+  }
+
+  // confirmEnd asks before archiving or deleting session a of host.
+  function confirmEnd(host, a) {
+    if (!admin || !a) return;
+    const act = endAction(a);
+    let busy = false;
+    const cb = act.wt ? h('input', { type: 'checkbox', checked: act.dropWt }) : null;
+    const yes = h('button', { type: 'button', class: 'btn danger', onclick: async () => {
+      if (busy) return;
+      busy = true;
+      yes.disabled = true;
+      yes.textContent = act.busy;
+      const ok = await endAgent(host, a.id, a, cb ? cb.checked : undefined);
+      busy = false;
+      closeDialog();
+      if (ok && U.view === 'chat' && U.key === agentKey(host, a.id)) go(small() ? '#/' : '#/new');
+    } }, act.label);
+    openDialog({
+      id: 'end',
+      title: `${act.label} “${label(a)}”?`,
+      sub: act.note,
+      body: cb ? h('label', 'check-row', cb, h('span', null, h('strong', null, `Also delete its ${act.iso} `), h('span', 'mono', shortPath(act.wt)),
+        act.iso === 'worktree' && a.branch ? ` (branch ${a.branch} stays)` : '', '. Kept anyway if it holds unsaved work.')) : null,
+      foot: [h('button', { type: 'button', class: 'btn', onclick: closeDialog }, 'Keep'), yes],
+      focus: yes,
+      canClose: () => !busy,
+    });
+  }
+
+  // ------------------------------------------------------------------- note
+  //
+  // A note left on a session ("customer is testing, keep it open"), shown
+  // on its row and pinned in its chat, for everyone with this dashboard.
+
+  function noteEditor(anchor, host, a) {
+    if (!admin) return;
+    openMenu(anchor, (el, close) => {
+      let busy = false;
+      const ta = h('textarea', { class: 'input', rows: 3, maxlength: 500, placeholder: 'e.g. customer is testing the preview, keep it open', 'aria-label': 'Note' });
+      ta.value = a.note || '';
+      const count = h('span', 'muted num');
+      const status = h('span', { class: 'muted', role: 'status' });
+      const paint = () => {
+        count.textContent = ta.value.length > 400 ? `${ta.value.length}/500` : '';
+      };
+      const saveIt = async (text) => {
+        if (busy) return;
+        busy = true;
+        status.textContent = 'Saving…';
+        const base = host ? `/api/hosts/${encodeURIComponent(host)}/agents/` : '/api/agents/';
+        try {
+          const r = await api('POST', base + encodeURIComponent(a.id) + '/note', { note: text.trim() });
+          if (r && r.agent) putAgent(host, r.agent);
+          close();
+        } catch (e) {
+          busy = false;
+          status.textContent = e.message;
+        }
+      };
+      ta.addEventListener('input', paint);
+      // Enter saves (Shift+Enter: a new line); on a touch keyboard Enter
+      // is a new line and Save saves. Ctrl/Cmd+Enter saves everywhere.
+      ta.addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Enter' || ev.isComposing) return;
+        if (ev.ctrlKey || ev.metaKey || (!ev.shiftKey && !touch())) {
+          ev.preventDefault();
+          saveIt(ta.value);
+        }
+      });
+      el.append(h('div', 'pop-pad',
+        h('div', null, h('div', 'pop-title', `Note on “${label(a)}”`), h('p', 'field-hint', 'Shown on its row and in its chat, to everyone with this dashboard.')),
+        ta,
+        h('div', 'pop-row', status, count, h('span', 'grow'),
+          a.note ? h('button', { type: 'button', class: 'btn ghost sm', onclick: () => saveIt('') }, 'Remove') : null,
+          h('button', { type: 'button', class: 'btn sm', onclick: () => close() }, 'Cancel'),
+          h('button', { type: 'button', class: 'btn primary sm', onclick: () => saveIt(ta.value) }, 'Save'))));
+      paint();
+      setTimeout(() => ta.setSelectionRange(ta.value.length, ta.value.length));
+    }, { label: 'Note', role: 'dialog', wide: true, focus: touch() ? null : 'textarea', alignRight: true });
+  }
+
+  // ------------------------------------------------------ git, pull requests
+  //
+  // The open session's checkout and pull requests, in a popover from the
+  // branch in its header: fetch, pull (fast-forward, rebase or merge,
+  // remembered) and push; a branch that diverged from its upstream is a
+  // force push, and merging a pull request, which a first click arms and a
+  // second within ARM_MS runs.
+
+  const ARM_MS = 5000;
+  const PULL_MODE = 'fleet.pullMode';
+  const PULL_MODES = [['ff_only', 'Fast-forward'], ['rebase', 'Rebase'], ['merge', 'Merge']];
+  const pullMode = () => {
+    const m = load(PULL_MODE, 'ff_only');
+    return PULL_MODES.some(([v]) => v === m) ? m : 'ff_only';
+  };
+
+  function gitPop(anchor) {
+    openMenu(anchor, (el, close, menu) => {
+      menu.repaint = () => fill(el, gitBody());
+      menu.repaint();
+    }, { label: 'Git and pull requests', role: 'dialog', wide: true, focus: '.btn:not(:disabled)' });
+  }
+
+  function repaintGit() {
+    if (MENU && MENU.repaint && MENU.o.label === 'Git and pull requests') MENU.repaint();
+  }
+
+  function gitBody() {
+    const a = chat.agent || {};
+    const g = a.git;
+    const ui = chat.gitUI;
+    const out = [];
+    if (g) {
+      const shortRef = (ref) => (g.remote && ref.startsWith(g.remote + '/') ? ref.slice(g.remote.length + 1) : ref);
+      const busy = !!ui.busy;
+      const btn = (text, ic, title, disabled, onclick, cls = '') => h('button', { type: 'button', class: 'btn sm ' + cls, title, disabled: busy || disabled, onclick }, icon(ic), text);
+      const noRemote = !g.remote;
+      const working = a.state === 'working';
+      const why = working ? 'Waits until the agent is idle: a pull changes its files'
+        : !g.branch ? 'Check out a branch to pull into' : g.operation ? `A ${g.operation} is in progress` : '';
+      const from = g.upstream || g.base;
+      const behind = g.upstream ? g.behind : g.baseBehind;
+      const up = gitUnpushed(g);
+      const force = !!(g.upstream && g.ahead && g.behind);
+      const armed = force && ui.armed && Date.now() - ui.armed < ARM_MS;
+      const pushWhy = noRemote ? 'The repository has no remote' : !g.branch ? 'Check out a branch to push'
+        : g.upstream && !g.ahead ? `${g.upstream} has every commit` : '';
+      const mode = h('select', { class: 'select', 'aria-label': 'Pull mode', disabled: busy, onchange: (ev) => save(PULL_MODE, ev.target.value) },
+        PULL_MODES.map(([v, text]) => h('option', { value: v, selected: v === pullMode() }, text)));
+      const facts = [];
+      if (g.base && (g.baseAhead || g.baseBehind)) facts.push(h('span', 'mono', `${g.base} `, g.baseAhead ? h('span', 'add', '↑' + g.baseAhead + ' ') : '', g.baseBehind ? h('span', 'del', '↓' + g.baseBehind) : ''));
+      if (g.changed) facts.push(h('span', 'chip warn', `${g.changed} uncommitted`));
+      if (g.conflicts) facts.push(h('span', 'chip bad', `${g.conflicts} conflicted`));
+      if (g.operation) facts.push(h('span', 'chip bad', g.operation + ' in progress'));
+      out.push(
+        h('div', 'git-line', icon('branch'), h('span', 'mono trunc', g.branch || 'detached HEAD'),
+          g.upstream ? h('span', 'muted mono trunc', '→ ' + g.upstream) : g.branch ? h('span', 'chip', 'not pushed') : null,
+          g.upstream && g.ahead ? h('span', 'add mono', '↑' + g.ahead) : null, g.upstream && g.behind ? h('span', 'del mono', '↓' + g.behind) : null),
+        facts.length ? h('div', 'git-facts', facts) : null,
+        g.head ? h('div', 'git-commit', h('span', 'mono', g.head), ' ', g.headSubject || '', g.headTimeMs ? [' · ', relTime(g.headTimeMs, '', true)] : null,
+          g.fetchedAtMs ? [' · fetched ', relTime(g.fetchedAtMs, '', true)] : null) : null,
+        g.detail ? h('div', 'git-note err', g.detail) : null,
+        h('div', 'pop-acts',
+          btn(ui.busy === 'fetch' ? 'Fetching…' : 'Fetch', 'refresh', noRemote ? 'The repository has no remote' : `git fetch ${g.remote}`, noRemote, () => runGit('fetch')),
+          from ? [mode, btn(ui.busy === 'pull' ? 'Pulling…' : 'Pull' + (g.upstream ? '' : ' ' + shortRef(g.base)) + (behind ? ' ↓' + behind : ''), 'arrow-down',
+            why || `Fetch, then bring ${from} into ${g.branch}`, !!why, () => runGit('pull', { mode: mode.value }))] : null,
+          g.upstream && g.base && g.baseBehind ? btn(ui.busy === 'base' ? 'Pulling…' : `Pull ${shortRef(g.base)} ↓${g.baseBehind}`, 'arrow-down',
+            why || `Fetch, then bring ${g.base} into ${g.branch}`, !!why, () => runGit('pull', { mode: mode.value, fromBase: true }, 'base')) : null,
+          btn(ui.busy === 'push' ? 'Pushing…' : force ? (armed ? 'Confirm force push' : `Force push ↑${g.ahead}`) : 'Push' + (up ? ' ↑' + up : ''), 'arrow-up',
+            pushWhy || (force ? `${g.upstream} has ${plural(g.behind, 'commit')} ${g.branch} lacks: overwrite them (--force-with-lease)` : `Push ${g.branch} to ${g.remote}` + (g.upstream ? '' : ' and track it')),
+            !!pushWhy, () => {
+              if (force && !(chat.gitUI.armed && Date.now() - chat.gitUI.armed < ARM_MS)) {
+                chat.gitUI.armed = Date.now();
+                repaintGit();
+                setTimeout(repaintGit, ARM_MS + 50);
+                return;
+              }
+              runGit('push', { force });
+            }, force ? 'force' + (armed ? ' armed' : '') : up ? 'primary' : '')),
+        ui.note ? h('p', { class: 'git-note' + (ui.note.error ? ' err' : ''), role: 'status' }, ui.note.text) : null);
+    }
+    const prs = (a.pullRequests || []).slice().reverse();
+    if (prs.length) {
+      if (g) out.push(h('div', 'pop-sep'));
+      out.push(h('div', 'pop-title', prs.length === 1 ? 'Pull request' : 'Pull requests'));
+      for (const p of prs) out.push(prRow(p));
+    }
+    return h('div', 'pop-pad', out);
+  }
+
+  function prRow(p) {
+    const ui = chat.prUI.get(p.url) || {};
+    const [word, cls] = prStatus(p);
+    const facts = [h('span', 'mono', `${p.repo}#${p.number}`)];
+    if (p.headBranch) facts.push(h('span', null, `${p.headBranch} → ${p.baseBranch}`));
+    if (p.changedFiles || p.additions || p.deletions) facts.push(h('span', null, h('span', 'add', '+' + p.additions), ' ', h('span', 'del', '−' + p.deletions), ` · ${plural(p.changedFiles, 'file')}`));
+    if (p.reviewDecision === 'approved') facts.push(h('span', 'add', 'approved'));
+    if (p.reviewDecision === 'changes_requested') facts.push(h('span', 'del', 'changes requested'));
+    if (p.state === 'merged' && p.mergedAtMs) facts.push(relTime(p.mergedAtMs, '', true));
+    if (p.detail) facts.push(h('span', 'del', p.detail));
+    const link = h('a', { href: p.url, target: '_blank', rel: 'noopener noreferrer', title: prTitle(p) }, p.title || p.url);
+    const acts = h('div', 'pr-acts', h('span', 'chip ' + cls, word));
+    if (p.state === 'open') {
+      const methods = p.mergeMethods && p.mergeMethods.length ? p.mergeMethods : ['squash', 'merge', 'rebase'];
+      const method = methods.includes(ui.method) ? ui.method : methods[0];
+      if (methods.length > 1) {
+        acts.append(h('select', { class: 'select', 'aria-label': 'Merge method', disabled: !!ui.busy, onchange: (ev) => chat.prUI.set(p.url, { ...ui, method: ev.target.value, armed: 0 }) },
+          methods.map((m) => h('option', { value: m, selected: m === method }, m))));
+      }
+      acts.append(h('label', null, h('input', { type: 'checkbox', checked: !!ui.deleteBranch, disabled: !!ui.busy, onchange: (ev) => chat.prUI.set(p.url, { ...chat.prUI.get(p.url), deleteBranch: ev.target.checked }) }), 'delete branch'));
+      const armed = ui.armed && Date.now() - ui.armed < ARM_MS;
+      acts.append(h('button', {
+        type: 'button', class: 'btn sm' + (armed ? ' armed' : ''), disabled: !!ui.busy,
+        title: p.draft ? 'Marks the draft ready for review, then merges it on GitHub' : `Merge #${p.number} on GitHub (${method})`,
+        onclick: () => {
+          const cur = chat.prUI.get(p.url) || {};
+          if (!(cur.armed && Date.now() - cur.armed < ARM_MS)) {
+            chat.prUI.set(p.url, { ...cur, armed: Date.now() });
+            repaintGit();
+            setTimeout(repaintGit, ARM_MS + 50);
+            return;
+          }
+          mergePull(p, method, !!cur.deleteBranch);
+        },
+      }, icon('merge'), ui.busy ? 'Merging…' : armed ? `Confirm ${method} merge` : 'Merge'));
+    }
+    return h('div', 'pr-row', icon(p.state === 'merged' ? 'merge' : 'pr'),
+      h('div', 'grow', h('div', 'pr-title', link), h('div', 'pr-sub', facts), acts));
+  }
+
+  // runGit runs a git action on the open session's checkout; key names it
+  // in chat.gitUI.busy (default: the action).
+  async function runGit(action, body, key) {
+    const { host, id, seq } = chat;
+    chat.gitUI = { busy: key || action };
+    repaintGit();
+    let note;
+    try {
+      const r = await api('POST', chatAPI('git'), { action, ...body });
+      setChatGit(host, id, seq, r && r.git);
+      const g = (r && r.git) || {};
+      const said = r && r.output ? r.output.trim().split('\n').pop().trim() : '';
+      if (action === 'push') note = `Pushed ${g.branch} to ${g.upstream || g.remote}`;
+      else if (action === 'pull') note = `Pulled into ${g.branch}` + (said ? ': ' + said : '');
+      else note = `Fetched ${g.remote}`;
+      note = { text: note };
+    } catch (e) {
+      note = { text: `git ${action}: ${e.message}`, error: true };
+    }
+    if (chat.seq === seq) {
+      chat.gitUI = { note };
+      repaintGit();
+      renderChatHead();
+    }
+  }
+
+  // setChatGit stores the git state an action returned on the agent.
+  function setChatGit(host, id, seq, git) {
+    const a = findAgent(host, id);
+    if (!a || !git) return;
+    const next = { ...a, git };
+    agentsOf(host).set(id, next);
+    if (chat.seq === seq) chat.agent = next;
+    invalidate('agents');
+  }
+
+  // refreshGit reads the open session's checkout when it opens, fetching
+  // first if the last fetch is older than GIT_FETCH_AGE, so ahead and behind
+  // are current. Failures stay quiet: the header shows what was last read.
+  const GIT_FETCH_AGE = 5 * 60 * 1000;
+  async function refreshGit(seq) {
+    const a = chat.agent;
+    if (!a || !a.git) return;
+    const g = a.git;
+    const action = g.remote && Date.now() - (g.fetchedAtMs || 0) > GIT_FETCH_AGE ? 'fetch' : 'status';
+    const { host, id } = chat;
+    try {
+      const r = await api('POST', chatAPI('git'), { action });
+      setChatGit(host, id, seq, r && r.git);
+      if (chat.seq === seq) {
+        renderChatHead();
+        if (!chat.gitUI.busy) repaintGit();
+      }
+    } catch {
+      // not a repository, gone, or offline
+    }
+  }
+
+  // mergePull merges pull request p of the open session.
+  async function mergePull(p, method, deleteBranch) {
+    const { host, id, seq } = chat;
+    chat.prUI.set(p.url, { ...chat.prUI.get(p.url), busy: true, armed: 0 });
+    repaintGit();
+    try {
+      const r = await api('POST', chatAPI('merge'), { pullRequest: p.url, method, deleteBranch });
+      const merged = r && r.pullRequest;
+      const a = findAgent(host, id);
+      if (a && merged) {
+        const next = { ...a, pullRequests: (a.pullRequests || []).map((q) => (q.url === merged.url ? merged : q)) };
+        agentsOf(host).set(id, next);
+        if (chat.seq === seq) chat.agent = next;
+        invalidate('agents');
+      }
+      toast(`Merged ${p.repo}#${p.number}`);
+    } catch (e) {
+      toast(`Could not merge #${p.number}: ${e.message}`, 'error');
+    }
+    if (chat.seq === seq) {
+      chat.prUI.set(p.url, { ...chat.prUI.get(p.url), busy: false, armed: 0 });
+      repaintGit();
+      renderChatHead();
+    }
+  }
+
+  // limitAction posts body to the open session's resume route: resume now,
+  // or switch auto-resume after a usage limit.
+  async function limitAction(btn, body, done) {
+    const { host, id } = chat;
+    btn.disabled = true;
+    try {
+      const r = await api('POST', chatAPI('resume'), body);
+      if (r && r.agent) putAgent(host, r.agent);
+      toast(`${label((r && r.agent) || { id })}: ${done}`);
+    } catch (e) {
+      btn.disabled = false;
+      toast(`Could not resume: ${e.message}`, 'error');
+    }
   }
 
   // ------------------------------------------------------------------- chat
   //
-  // One session: the conversation parsed from the agent's transcript
-  // (GET .../chat, long-polled), its terminal screen for dialogs the chat
-  // does not show, keys and messages typed into it, and stop. A session
-  // that runs workflows gets a Workflows tab (see workflows below).
+  // One session: the conversation parsed from the agent's transcript (GET
+  // .../chat, long-polled; see feeds), messages and keys typed into its
+  // terminal, its questions as a form, its model and effort, and its
+  // workflow, files, media and terminal in the panel beside it.
 
   const chat = {
     open: false,
     host: '',
     id: '',
     agent: null,
-    seq: 0, // bumped on open and close: requests of an old session are dropped
-    view: 'chat', // 'chat'; 'wf': its workflow runs; 'sub': one workflow agent
+    seq: 0, // bumped on open and leave: requests of an old session are dropped
     feed: null, // the conversation (see feeds)
-    screenOpen: false,
-    screenAuto: true, // open the screen by itself while the agent needs input
-    screenTimer: 0,
+    pending: null, // options of openChat, applied once its view shows
     sending: false,
     held: false, // the last message went into a dialog, without Enter
     model: null, // {model, name, effort, switch, models, efforts}; null: the agent offers no choice
     switching: false, // a model switch is in flight
     switchedAt: 0, // when the last one ended: replies read before it are stale
-    interrupting: false, // an interrupt is in flight
-    confirmStop: false,
-    dropWt: false, // the confirmation's "delete its worktree" choice
-    stopping: false,
-    screenAutoOpened: false, // the screen opened by itself for a dialog
-    asks: [], // questions the agent waits on, first shown first (see questions)
+    interrupting: false,
+    asks: [], // questions the agent waits on, the first shown first
     answered: new Set(), // ids of questions answered here: late replies may still list them
     askForm: null, // the form of asks[0]
     images: [], // {data (base64), url (data: URL), name} to send with the next message
     videos: [], // uploaded to the agent's machine for the next message (see addVideos)
+    keys: false, // the keys for the terminal's dialogs show
     prUI: new Map(), // pull request URL -> {method, deleteBranch, armed (ms), busy}
-    gitUI: {}, // {busy: the git action in flight, armed: when force push was clicked once, note: {text, error} of the last one}
+    gitUI: {}, // {busy: the git action in flight, armed: when force push was clicked once, note: {text, error}}
   };
+  const C = {}; // the chat view's elements
 
   const chatAPI = (rest) => {
     const base = chat.host ? `/api/hosts/${encodeURIComponent(chat.host)}/agents/` : '/api/agents/';
     return base + encodeURIComponent(chat.id) + '/' + rest;
   };
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const chatLive = () => chat.agent && !isFinished(chat.agent);
+  const chatLive = () => !!chat.agent && !isFinished(chat.agent);
   const chatDialog = () => chatLive() && chat.agent.state === 'needs_input';
-  // chatBusy: the agent works on a turn, or waits on a dialog of one;
-  // Stop and Ctrl+C interrupt it then.
+  // chatBusy: the agent works on a turn, or waits on a dialog of one; Stop
+  // and Ctrl+C interrupt it then.
   const chatBusy = () => chatLive() && (chat.agent.state === 'working' || chat.agent.state === 'needs_input');
 
   // A session's draft: what is typed into its message box stays in
-  // localStorage until it is sent, so notes outlive closing the session
-  // or reloading the page.
+  // localStorage until it is sent, across closing the session or reloading.
   const draftKey = (host, id) => 'fleet.draft.' + agentKey(host, id);
-  const loadDraft = (host, id) => localStorage.getItem(draftKey(host, id)) || '';
-
+  function loadDraft(host, id) {
+    try {
+      return localStorage.getItem(draftKey(host, id)) || '';
+    } catch {
+      return '';
+    }
+  }
   function saveDraft(host, id, text) {
     try {
       if (text) localStorage.setItem(draftKey(host, id), text);
       else localStorage.removeItem(draftKey(host, id));
-    } catch (e) {
-      // Storage full or blocked: the draft lives only in the box.
+    } catch {
+      // storage full or blocked: the draft lives only in the box
     }
   }
 
-  // openChat shows a session. opts.view 'wf' opens its Workflows tab, with
-  // run opts.run unfolded.
+  // openChat shows a session: opts.view 'wf' opens its workflow (run
+  // opts.run unfolded), opts.screen its terminal.
   function openChat(host, id, agent, opts) {
     if (!admin) return;
-    closeLaunch();
+    // A session just started may not be in the lists yet.
+    if (agent && !findAgent(host, id)) putAgent(host, agent);
+    chat.pending = opts || null;
+    go(chatHash(host, id));
+  }
+
+  function showChat(host, id) {
+    if (chat.open && chat.host === host && chat.id === id && C.root && C.root.isConnected) {
+      applyPending();
+      return;
+    }
+    if (chat.open) leaveChat();
     chat.seq++;
-    dropVideos(chat.videos);
-    const view = (opts && opts.view) || 'chat';
     Object.assign(chat, {
-      open: true, host, id, agent: agent || null, view,
-      sending: false, held: false, confirmStop: false, stopping: false, screenAuto: true,
-      model: null, switching: false, switchedAt: 0, interrupting: false, screenAutoOpened: false, asks: [], askForm: null, images: [], videos: [],
+      open: true, host, id, agent: findAgent(host, id), sending: false, held: false, model: null, switching: false, switchedAt: 0,
+      interrupting: false, asks: [], askForm: null, images: [], videos: [], keys: false, gitUI: {},
     });
     chat.answered.clear();
     chat.prUI.clear();
-    chat.gitUI = {};
-    $('chat-repo').open = repoOpen();
-    Object.assign(wf, { runs: [], v: '', loaded: false, sub: null, hint: (S.workflows.get(agentKey(host, id)) || []).length });
-    wf.shown.clear();
-    wf.known.clear();
-    wf.cards.clear();
+    resetWorkflows(host, id);
     resetMedia();
     resetFiles();
-    if (opts && opts.run) wf.shown.add(opts.run);
-    chat.screenOpen = !!agent && (agent.state === 'needs_input' || agent.adapter === 'shell');
-    chat.screenAutoOpened = chat.screenOpen && agent.adapter !== 'shell';
-    if (opts && opts.screen) Object.assign(chat, { screenOpen: true, screenAuto: false, screenAutoOpened: false });
-    $('chat-input').value = loadDraft(host, id);
-    renderChatImages();
-    $('chat-screen-pre').textContent = '';
-    $('chat-ask').replaceChildren();
-    $('chat-ask').hidden = true;
-    $('wf-list').replaceChildren();
-    const d = $('chat');
-    if (!d.open) d.showModal();
-    autosize();
+    insp.tab = '';
+    insp.open = insp.open && !small();
+    buildChatView();
+    chat.feed = newFeed({
+      scroller: C.scroll,
+      log: C.log,
+      url: (q) => chatAPI('chat?' + q),
+      imageURL: (q) => chatAPI('image?' + q),
+      live: chatLive,
+      working: () => !!chat.agent && chat.agent.state === 'working',
+      empty: chatEmpty,
+      query: (q) => q.set('asks', chat.asks.map((a) => a.id).join(',')),
+      onReply: (r) => {
+        if (r.agent) chatAgent(chat.host, r.agent);
+        chatModel(r.model);
+        chatAsks(r.asks);
+        // The media follow: in full at first, then with each image; so do
+        // the files, a moment after some were written.
+        if (r.reset || (r.entries || []).some((e) => e.images && e.images.length)) loadMedia();
+        if (r.reset) loadFiles();
+        else if ((r.entries || []).some((e) => e.files && e.files.length)) filesSoon(1500);
+      },
+      onStatus: renderChatStatus,
+    });
     renderChatHead();
-    renderChatView();
-    renderChatInput();
-    renderWorkflows();
-    refreshGit(chat.seq);
-    stopFeed(wf.feed);
+    renderBanners();
+    renderDock();
     startFeed(chat.feed);
     wfLoop(chat.seq);
-    if (!touch() && view === 'chat') $('chat-input').focus();
+    refreshGit(chat.seq);
+    if (chat.agent) markSeen(host, chat.agent);
+    renderInsp();
+    applyPending();
+    if (keyboard() && C.comp) C.comp.ta.focus({ preventScroll: true });
   }
 
-  function closeChat() {
-    const d = $('chat');
-    if (d.open) d.close();
+  // applyPending opens what openChat asked for: the workflow or terminal.
+  function applyPending() {
+    const o = chat.pending;
+    chat.pending = null;
+    if (!o) return;
+    if (o.view === 'wf') openRun(o.run || '');
+    else if (o.screen) openInsp('terminal');
+  }
+
+  // leaveChat stops following the session shown.
+  function leaveChat() {
+    if (!chat.open) return;
+    chat.open = false;
+    chat.seq++;
+    chat.videos = dropVideos(chat.videos);
+    stopScreen();
+    clearTimeout(files.timer);
+    revokeFileURL();
+    if (chat.feed) stopFeed(chat.feed);
+    stopFeed(wf.feed);
+    wf.sub = null;
+    if (MENU && MENU.anchor && C.root && C.root.contains(MENU.anchor)) closeMenu(false);
+    insp.panes = null;
+    renderInsp();
   }
 
   // chatAgent takes a newer state of an agent from the socket or a poll.
@@ -3715,69 +1914,940 @@
     if (chat.agent && (a.updatedAtMs || 0) < (chat.agent.updatedAtMs || 0)) return;
     const was = chat.agent && chat.agent.state;
     chat.agent = a;
-    if (a.state !== was) paintPending(chat.feed);
-    if (a.state === 'needs_input' && was !== 'needs_input' && chat.screenAuto && !chat.screenOpen && !chat.asks.length) {
-      chat.screenOpen = true;
-      chat.screenAutoOpened = true;
-      renderChatScreen();
-    }
+    markSeen(host, a);
+    if (a.state !== was && chat.feed) paintPending(chat.feed);
     renderChatHead();
-    renderChatAsk();
-    renderChatInput();
+    renderBanners();
+    renderDock();
+    repaintGit();
+    if (insp.open) renderInspTabs();
   }
 
-  // chatEmpty is the note for a session without a conversation.
   function chatEmpty() {
     const a = chat.agent || {};
-    return a.adapter === 'shell' ? 'A shell keeps no chat. Its terminal is under Screen.'
-      : chatLive() ? 'No messages yet. The conversation shows up here once the first message is sent.'
-      : 'This session left no conversation.';
+    return a.adapter === 'shell' ? 'A shell keeps no chat: type into it in its terminal.'
+      : chatLive() ? 'No messages yet. The conversation shows here once the first message is sent.'
+        : 'This session left no conversation.';
+  }
+
+  function buildChatView() {
+    C.head = h('header', 'topbar chead');
+    C.banners = h('div');
+    C.log = h('div', { class: 'col', role: 'log', 'aria-label': 'Conversation', 'aria-live': 'polite' });
+    C.scroll = h('div', 'cscroll', C.log);
+    stickToBottom(C.scroll);
+    C.ask = h('div');
+    C.dlg = h('div');
+    C.keys = h('div');
+    C.compBox = h('div');
+    C.status = h('div', { class: 'dock-status', role: 'status', 'aria-live': 'polite' });
+    C.comp = null;
+    C.root = h('div', 'view chat', C.head, C.banners, C.scroll, h('div', 'dock', h('div', 'dock-in', C.ask, C.dlg, C.keys, C.compBox, C.status)));
+    fill($('main'), C.root);
+    wireChatDrop(C.root);
+  }
+
+  // ---- header, banners
+
+  function renderChatHead() {
+    if (!chat.open || !C.head) return;
+    const a = chat.agent || { id: chat.id, name: chat.id, state: 'unspecified' };
+    const k = stateKey(a);
+    const g = a.git;
+    const meta = [];
+    meta.push(h('span', { class: 'dev hide-phone', title: (a.adapter || 'agent') + ' session' }, logo(a.adapter, 'i-xs'), h('span', 'mono', a.name || a.id)));
+    if (chat.host || S.remote.size) {
+      const st = hostState(chat.host);
+      meta.push(h('span', { class: 'dev', title: `${hostName(chat.host)}: ${MACHINE_STATE[st][1]}` }, h('span', MACHINE_STATE[st][0]), hostName(chat.host)));
+    }
+    meta.push(h('span', { class: 'path hide-phone', title: a.cwd || a.path || '' }, shortPath(a.path || a.cwd || '')));
+    if (g || (a.pullRequests || []).length) {
+      const up = g ? gitUnpushed(g) : 0;
+      meta.push(h('button', {
+        type: 'button', class: 'meta-btn', 'aria-haspopup': 'dialog', 'aria-expanded': 'false', title: g ? gitTitle(g) : 'Pull requests',
+        'aria-label': g ? `Git: branch ${g.branch || 'detached HEAD'}. Fetch, pull, push and pull requests` : 'Pull requests',
+        onclick: (ev) => gitPop(ev.currentTarget),
+      }, icon(g ? 'branch' : 'pr'),
+      g ? [h('span', 'trunc', g.branch || 'detached HEAD'),
+        up ? h('span', 'up', '↑' + up) : null, g.upstream && g.behind ? h('span', 'down', '↓' + g.behind) : null,
+        g.changed ? h('span', { class: 'dirty', title: `${g.changed} uncommitted` }, '●' + g.changed) : null,
+        g.operation || g.conflicts ? h('span', 'dirty', g.operation || 'conflicts') : null,
+        !g.upstream && g.branch && !isFinished(a) ? h('span', 'muted', 'not pushed') : null] : 'Pull requests'));
+    }
+    for (const p of (a.pullRequests || []).filter(prOpen).slice(-2)) meta.push(h('span', 'hide-phone', prChip(p)));
+
+    const acts = [];
+    if (!small()) {
+      if (!a.note) acts.push(iconBtn('note', 'Add a note', (ev) => noteEditor(ev.currentTarget, chat.host, a)));
+      if (chatLive()) acts.push(iconBtn('terminal', 'Terminal', () => toggleInsp('terminal'), { attrs: { 'aria-pressed': String(insp.open && insp.tab === 'terminal') } }));
+    }
+    const tabs = inspTabs();
+    if (tabs.some((t) => t.id !== 'terminal') || small()) {
+      const panel = iconBtn(small() ? 'layers' : 'panel-right', 'Workflow, files and media', () => toggleInsp(), { attrs: { 'aria-pressed': String(insp.open && insp.tab !== 'terminal') } });
+      if (wf.runs.some((r) => r.status === 'running')) panel.append(h('span', 'dot-mark'));
+      acts.push(panel);
+    }
+    acts.push(iconBtn('more', 'More actions', (ev) => moreMenu(ev.currentTarget)));
+
+    fill(C.head,
+      leadBtn(),
+      h('div', 'chead-title',
+        h('div', 'chead-row', h('h1', { title: label(a) }, label(a)),
+          k !== 'idle' && k !== 'running' ? h('span', 'pill ' + (k === 'unspecified' ? 'idle' : k), k === 'working' ? h('span', 'spin') : h('span', 'dot'), KEY_LABEL[k]) : null),
+        h('div', 'chead-meta', meta)),
+      h('div', 'chead-acts', acts));
+  }
+
+  function moreMenu(anchor) {
+    const a = chat.agent;
+    if (!a) return;
+    const act = endAction(a);
+    openMenu(anchor, (el, close) => {
+      if (small()) {
+        el.append(mi({ icon: 'note', label: a.note ? 'Edit the note' : 'Add a note', onSelect: () => { close(false); noteEditor(anchor, chat.host, a); } }));
+        if (chatLive()) el.append(mi({ icon: 'terminal', label: 'Terminal', onSelect: () => { close(false); openInsp('terminal'); } }));
+      }
+      el.append(
+        mi({ icon: 'copy', label: 'Copy the attach command', sub: `fleet attach ${a.name || a.id}`, onSelect: () => { close(); copyText(`fleet attach ${a.name || a.id}`); } }),
+        mi({ icon: 'folder', label: 'New session in this folder', sub: shortPath(a.path || a.cwd || ''), onSelect: () => { close(false); newIn(chat.host, a.path || a.cwd || ''); } }),
+        h('div', 'menu-sep'),
+        mi({ icon: act.forget ? 'trash' : 'archive', label: act.label, kbd: keyboard() ? (MAC ? '⌥A' : 'Alt+A') : null, danger: act.forget, onSelect: () => { close(false); confirmEnd(chat.host, a); } }));
+    }, { label: 'More actions', alignRight: true });
+  }
+
+  function renderBanners() {
+    if (!C.banners) return;
+    const a = chat.agent;
+    const out = [];
+    if (a && a.note) {
+      out.push(h('div', 'banner note', icon('note'), h('div', 'banner-text', a.note),
+        h('div', 'banner-acts', h('button', { type: 'button', class: 'btn sm', onclick: (ev) => noteEditor(ev.currentTarget, chat.host, a) }, 'Edit'))));
+    }
+    const l = a && !isFinished(a) && a.usageLimit;
+    if (l) {
+      const text = h('div', 'banner-text', h('strong', null, 'Usage limit reached' + (l.window ? ` (${l.window})` : '')));
+      if (l.resetsAtMs) text.append(` · resets ${clock(l.resetsAtMs)}`);
+      if (l.detail) text.append(' · ' + l.detail);
+      else if (l.resumeAtMs) text.append(` · fleet types “continue” at ${clock(l.resumeAtMs)}`);
+      else if (!l.autoResume) text.append(' · auto-resume is off');
+      const now = h('button', { type: 'button', class: 'btn sm', title: 'Type “continue” into the session now' }, icon('play'), 'Resume now');
+      now.addEventListener('click', () => limitAction(now, { now: true }, 'resumed'));
+      const auto = h('button', { type: 'button', class: 'btn sm' }, l.autoResume ? 'Turn auto-resume off' : 'Turn auto-resume on');
+      auto.addEventListener('click', () => limitAction(auto, { auto: !l.autoResume }, l.autoResume ? 'auto-resume off' : 'auto-resume on'));
+      out.push(h('div', { class: 'banner limit', role: 'status' }, icon('clock'), text, h('div', 'banner-acts', now, auto)));
+    }
+    fill(C.banners, out);
+  }
+
+  // ---- the dock: questions, a dialog, keys, the message box
+
+  function renderDock() {
+    if (!chat.open || !C.compBox) return;
+    const a = chat.agent;
+    renderChatAsk();
+    renderDialogCard();
+    renderKeys();
+    if (a && isFinished(a)) {
+      C.comp = null;
+      fill(C.compBox, h('div', 'banner locked', icon(a.state === 'failed' ? 'alert' : 'archive'),
+        h('div', 'banner-text', h('strong', null, a.state === 'failed' ? 'This session failed' : 'This session ended'),
+          a.exitCode != null ? ` · exit ${a.exitCode}` : '', a.stateDetail ? ' · ' + a.stateDetail : '', a.updatedAtMs ? [' · ', relTime(a.updatedAtMs, '', true)] : null),
+        h('div', 'banner-acts',
+          h('button', { type: 'button', class: 'btn sm', onclick: () => newIn(chat.host, a.path || a.cwd || '') }, 'New session here'),
+          h('button', { type: 'button', class: 'btn sm', onclick: () => confirmEnd(chat.host, a) }, icon('trash'), 'Delete'))));
+    } else {
+      if (!C.comp || !C.compBox.contains(C.comp.el)) {
+        C.comp = chatComposer();
+        fill(C.compBox, C.comp.el);
+      }
+      C.comp.update();
+    }
+    renderChatStatus();
+  }
+
+  function renderChatStatus() {
+    const st = C.status;
+    if (!st || !chat.open) return;
+    st.className = 'dock-status';
+    const a = chat.agent;
+    let t = '';
+    if (chat.feed && chat.feed.error) {
+      st.className = 'dock-status warn';
+      t = chat.feed.error;
+    } else if (chat.held && chatLive()) {
+      st.className = 'dock-status warn';
+      t = 'The agent shows a dialog: your text was typed, but Enter was not pressed. Answer with the keys.';
+    } else if (!a || !chatLive()) {
+      t = '';
+    } else if (a.adapter === 'shell') t = 'A shell takes input in its terminal: open it from the header.';
+    else if (chat.switching) t = 'Switching the model…';
+    else if (askShown()) t = 'A message sent now answers none of the questions: the agent reads it instead.';
+    else if (chat.interrupting) t = 'Interrupting…';
+    else if (chatDialog()) t = 'In a dialog, Send types your text without pressing Enter: Enter picks the highlighted option.';
+    else if (a.state === 'working') t = 'Working… replies show as the agent writes them' + (keyboard() ? ' · Ctrl+C interrupts' : '');
+    else if (a.state === 'starting') t = 'Starting the agent…';
+    st.textContent = t;
+  }
+
+  // The keys of the agent's own dialogs (permissions, trust, menus).
+  const KEYS = [
+    ['escape', 'Esc'], ['up', '↑'], ['down', '↓'], ['left', '←'], ['right', '→'], ['tab', 'Tab'],
+    ['enter', 'Enter'], ['1', '1'], ['2', '2'], ['3', '3'], ['4', '4'], ['5', '5'], ['6', '6'], ['ctrl-c', 'Ctrl‑C'],
+  ];
+
+  function keysStrip() {
+    return h('div', { class: 'keys', role: 'group', 'aria-label': 'Keys for the terminal' }, h('span', 'keys-l', 'Keys'),
+      KEYS.map(([k, text]) => h('button', { type: 'button', class: 'key', title: `Press ${text} in the agent’s terminal`, onclick: () => sendKey(k) }, text)));
+  }
+
+  function renderKeys() {
+    if (!C.keys) return;
+    const show = chat.keys && chatLive() && chat.agent.adapter !== 'shell' && !dialogShown();
+    fill(C.keys, show ? keysStrip() : null);
+  }
+
+  // A dialog in the terminal the chat has no form for (a permission, a
+  // trust prompt, a menu): its screen and the keys, under the chat.
+  const dialogShown = () => chatLive() && !askShown() && (chatDialog() || chat.held);
+
+  function renderDialogCard() {
+    if (!C.dlg) return;
+    if (!dialogShown()) {
+      if (C.dlgPre) {
+        fill(C.dlg);
+        C.dlgPre = null;
+        screenNeeded();
+      }
+      return;
+    }
+    if (!C.dlgPre) {
+      C.dlgPre = h('pre', { 'aria-label': 'The bottom of the terminal' }, screen.text || 'Reading the terminal…');
+      C.dlgDetail = h('span', 'grow trunc');
+      fill(C.dlg, h('section', { class: 'dlgcard', 'aria-label': 'The agent waits in its terminal' },
+        h('div', 'dlgcard-h', icon('alert'), C.dlgDetail,
+          h('button', { type: 'button', class: 'btn sm', onclick: () => openInsp('terminal') }, 'Terminal')),
+        C.dlgPre, keysStrip()));
+      // The dialog is at the bottom of the screen.
+      C.dlgPre.scrollTop = C.dlgPre.scrollHeight;
+      screenNeeded();
+    }
+    const a = chat.agent;
+    C.dlgDetail.textContent = chat.held && !chatDialog() ? 'Your text went into a dialog: answer it with the keys'
+      : `${a.adapter === 'claude' ? 'Claude' : a.adapter === 'codex' ? 'Codex' : 'The agent'} waits in its terminal${a.stateDetail ? ': ' + a.stateDetail : ''}`;
+  }
+
+  // ---- the message box
+
+  // effortLevel is how many bars an effort gets: its place among the
+  // agent's efforts, for names the page does not know.
+  const EFFORT_LEVEL = { none: 0, minimal: 1, low: 1, medium: 2, high: 3, xhigh: 4, max: 5, ultra: 6, ultracode: 6 };
+  const effortLevel = (id, list) => EFFORT_LEVEL[id] ?? Math.max(1, Math.min(6, (list || []).findIndex((e) => e.id === id) + 1));
+
+  function effortBars(n) {
+    return h('span', { class: 'effort-bars', 'aria-hidden': 'true' }, [4, 5.5, 7, 8.5, 10, 12].map((ht, i) => {
+      const b = h('span', i < n ? 'on' : null);
+      b.style.height = ht + 'px';
+      return b;
+    }));
+  }
+
+  function chatComposer() {
+    const ta = h('textarea', { id: 'chat-input', rows: 1, spellcheck: 'true' });
+    ta.value = loadDraft(chat.host, chat.id);
+    const thumbs = h('div', 'attach-list');
+    const file = h('input', { type: 'file', accept: 'image/*,video/*', multiple: true, hidden: true, tabindex: '-1', 'aria-hidden': 'true' });
+    const attach = h('button', { type: 'button', class: 'cpick icon-only', 'aria-label': 'Attach images or videos', title: 'Attach images or videos (or paste, or drop them)', onclick: () => file.click() }, icon('clip'));
+    const modelBtn = h('button', { type: 'button', class: 'cpick model', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => chatModelMenu(ev.currentTarget) });
+    const effortBtn = h('button', { type: 'button', class: 'cpick effort', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => chatEffortMenu(ev.currentTarget) });
+    const keysBtn = h('button', { type: 'button', class: 'cpick icon-only', 'aria-label': 'Terminal keys', title: 'Keys for the agent’s own dialogs', 'aria-pressed': 'false', onclick: () => { chat.keys = !chat.keys; renderKeys(); api_.update(); } }, icon('keyboard'));
+    const stop = h('button', { type: 'button', class: 'stop-btn', 'aria-label': 'Stop', title: 'Interrupt the agent’s turn, as Esc in its terminal (Ctrl+C)', onclick: interruptChat }, icon('stop'), h('span', 'stop-lbl', 'Stop'));
+    const send = h('button', { type: 'submit', class: 'send', 'aria-label': 'Send' }, icon('arrow-up'));
+    const form = h('form', { class: 'composer', novalidate: true },
+      thumbs, ta, h('div', 'ctoolbar', attach, modelBtn, effortBtn, h('span', 'grow'), keysBtn, stop, send), file);
+
+    const fit = () => {
+      ta.style.height = 'auto';
+      ta.style.height = Math.min(ta.scrollHeight + 2, innerHeight * 0.4) + 'px';
+    };
+    file.addEventListener('change', () => {
+      addChatFiles(file.files);
+      file.value = '';
+    });
+    ta.addEventListener('paste', (ev) => {
+      const files = mediaFiles(ev.clipboardData);
+      if (!files.length) return;
+      ev.preventDefault();
+      addChatFiles(files);
+    });
+    ta.addEventListener('input', () => {
+      fit();
+      if (chat.open) saveDraft(chat.host, chat.id, ta.value);
+      api_.update();
+    });
+    ta.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing && !touch()) {
+        ev.preventDefault();
+        sendMessage();
+      }
+    });
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      sendMessage();
+    });
+    thumbs.addEventListener('click', (ev) => {
+      const b = ev.target.closest('button[data-image], button[data-video]');
+      if (!b) return;
+      if (b.dataset.video) dropVideos(chat.videos.splice(Number(b.dataset.video), 1));
+      else chat.images.splice(Number(b.dataset.image), 1);
+      api_.paint();
+      if (!touch()) ta.focus();
+    });
+
+    const api_ = {
+      el: form, ta, fit,
+      paint() {
+        renderThumbs(thumbs, chat.images, chat.videos);
+        api_.update();
+      },
+      update() {
+        const a = chat.agent || {};
+        const live = chatLive();
+        const shell = a.adapter === 'shell';
+        const short = a.adapter === 'claude' ? 'Claude' : a.adapter === 'codex' ? 'Codex' : 'the agent';
+        ta.disabled = !live || shell;
+        ta.setAttribute('aria-label', 'Message ' + short);
+        ta.placeholder = shell ? 'A shell takes input in its terminal'
+          : askShown() ? 'Or reply in your own words instead'
+            : chatDialog() ? 'Type into the dialog (Enter is not pressed)'
+              : keyboard() ? `Message ${short} · Enter sends, Shift+Enter adds a line` : 'Message ' + short;
+        attach.disabled = !live || shell || chat.sending || askShown();
+        stop.hidden = !chatBusy();
+        stop.disabled = chat.interrupting;
+        keysBtn.hidden = shell || !live;
+        keysBtn.setAttribute('aria-pressed', String(chat.keys || dialogShown()));
+        send.disabled = !live || shell || chat.sending || (!ta.value.trim() && !chat.images.length && !chat.videos.length);
+        // model and effort
+        const m = chat.model;
+        modelBtn.hidden = !m;
+        effortBtn.hidden = true;
+        if (!m) return;
+        const cur = m.models.find((x) => x.id === m.model);
+        fill(modelBtn, logo(a.adapter), h('span', 'lbl', cur ? cur.label : m.name || 'default model'), icon('chevron-down', 'chev'));
+        modelBtn.setAttribute('aria-label', 'Model: ' + (cur ? cur.label : m.name || 'default'));
+        const efforts = cur ? m.efforts.filter((e) => cur.efforts.includes(e.id)) : m.efforts;
+        const ecur = efforts.find((e) => e.id === m.effort);
+        effortBtn.hidden = !efforts.length && !m.effort;
+        fill(effortBtn, effortBars(effortLevel(m.effort, m.efforts)), h('span', 'lbl', ecur ? ecur.label : m.effort || 'Effort'), icon('chevron-down', 'chev'));
+        effortBtn.setAttribute('aria-label', 'Effort: ' + (ecur ? ecur.label : m.effort || 'default'));
+        const can = m.switch && live && !chat.switching;
+        const why = !live ? 'the session has ended' : !m.switch ? 'this agent cannot switch a running session: choose when starting one' : 'a switch holds for this session only';
+        modelBtn.title = `Model${m.name ? ': ' + m.name : ''} · ${why}`;
+        effortBtn.title = `Effort${m.effort ? ': ' + m.effort : ''} · ${why}`;
+        modelBtn.disabled = !can && !m.models.length;
+        effortBtn.disabled = !can || !efforts.length;
+      },
+    };
+    api_.paint();
+    requestAnimationFrame(fit);
+    return api_;
+  }
+
+  function chatModelMenu(anchor) {
+    const m = chat.model;
+    if (!m) return;
+    const can = m.switch && chatLive() && !chat.switching;
+    openMenu(anchor, (el, close) => {
+      el.append(h('div', 'menu-l', 'Model'));
+      if (!m.models.some((x) => x.id === m.model)) el.append(mi({ label: m.name || 'default model', checked: true, disabled: true }));
+      for (const x of m.models) {
+        el.append(mi({ label: x.label, checked: x.id === m.model, disabled: !can && x.id !== m.model, onSelect: () => {
+          close();
+          if (x.id !== m.model) switchChatModel(x.id, '');
+        } }));
+      }
+      el.append(h('div', 'menu-sep'), h('p', 'menu-note', can ? 'Switches this session only; your defaults stay.'
+        : !chatLive() ? 'The session has ended.' : 'This agent cannot switch a running session: choose the model when you start one.'));
+    }, { label: 'Model' });
+  }
+
+  function chatEffortMenu(anchor) {
+    const m = chat.model;
+    if (!m) return;
+    const cur = m.models.find((x) => x.id === m.model);
+    const efforts = cur ? m.efforts.filter((e) => cur.efforts.includes(e.id)) : m.efforts;
+    const can = m.switch && chatLive() && !chat.switching;
+    openMenu(anchor, (el, close) => {
+      el.append(h('div', 'menu-l', 'Effort'));
+      for (const e of efforts) {
+        el.append(mi({ custom: effortBars(effortLevel(e.id, m.efforts)), label: e.label, checked: e.id === m.effort, disabled: !can && e.id !== m.effort, onSelect: () => {
+          close();
+          if (e.id !== m.effort) switchChatModel('', e.id);
+        } }));
+      }
+      el.append(h('div', 'menu-sep'), h('p', 'menu-note', can ? 'For this session only.' : 'This agent cannot change it mid-session.'));
+    }, { label: 'Effort' });
+  }
+
+  // chatModel takes the model of a chat reply. Replies read while a switch
+  // went on, or just before it ended, would undo it on the page.
+  function chatModel(m) {
+    if (chat.switching || Date.now() - chat.switchedAt < 2000) return;
+    if (same(m || null, chat.model)) return;
+    chat.model = m || null;
+    if (C.comp) C.comp.update();
+  }
+
+  // switchChatModel switches the session to model and/or effort; a new
+  // model keeps the effort shown if it runs at it.
+  async function switchChatModel(model, effort) {
+    const m = chat.model;
+    if (!m || chat.switching || !chatLive()) return;
+    const body = { model: model && model !== m.model ? model : '', effort: '' };
+    const to = m.models.find((x) => x.id === (body.model || m.model));
+    if (body.model) body.effort = to && to.efforts.includes(m.effort) ? m.effort : '';
+    else if (effort && effort !== m.effort) body.effort = effort;
+    if (!body.model && !body.effort) return;
+    const text = [to ? to.label : m.name, (m.efforts.find((e) => e.id === (body.effort || m.effort)) || {}).label].filter(Boolean).join(' · ');
+    const seq = chat.seq;
+    chat.switching = true;
+    C.comp?.update();
+    renderChatStatus();
+    try {
+      const r = await api('POST', chatAPI('model'), body);
+      if (seq !== chat.seq) return;
+      chat.model = (r && r.model) || m;
+      toast(`${text || 'Switched'} for this session`);
+    } catch (e) {
+      if (seq !== chat.seq) return;
+      toast(`Could not switch: ${e.message}`, 'error');
+    }
+    chat.switching = false;
+    chat.switchedAt = Date.now();
+    C.comp?.update();
+    renderChatStatus();
+  }
+
+  async function sendMessage() {
+    if (!C.comp) return;
+    const ta = C.comp.ta;
+    const text = ta.value;
+    const images = chat.images;
+    const videos = chat.videos.slice();
+    const { host, id } = chat;
+    if ((!text.trim() && !images.length && !videos.length) || chat.sending || !chatLive()) return;
+    if (askShown() && chat.askForm) {
+      if (images.length || videos.length) {
+        toast(`Answer the questions first, then send the ${images.length ? 'images' : 'videos'}`, 'warn');
+        return;
+      }
+      // In place of answers: the agent gets the text instead.
+      if (await sendAnswer(chat.askForm, { decline: text }) && ta.value === text) {
+        ta.value = '';
+        C.comp.fit();
+        saveDraft(host, id, '');
+      }
+      return;
+    }
+    const problem = videosProblem(videos);
+    if (problem) {
+      toast(problem, 'warn');
+      return;
+    }
+    const seq = chat.seq;
+    chat.sending = true;
+    chat.held = false;
+    C.comp.update();
+    let held = false;
+    try {
+      // The daemon holds Enter back if the agent shows a dialog, where
+      // Enter picks the highlighted option whatever was typed.
+      const body = { text: withVideos(text, videos), submit: true };
+      if (images.length) body.images = images.map((im) => im.data);
+      const r = await api('POST', chatAPI('input'), body);
+      held = !!(r && r.held);
+      if (seq === chat.seq || loadDraft(host, id) === text) saveDraft(host, id, '');
+      if (seq === chat.seq) {
+        ta.value = '';
+        C.comp.fit();
+        chat.images = chat.images.filter((im) => !images.includes(im));
+        chat.videos = chat.videos.filter((v) => !videos.includes(v));
+        C.comp.paint();
+        C.scroll.scrollTop = C.scroll.scrollHeight;
+      }
+    } catch (e) {
+      toast(`Could not send: ${e.message}`, 'error');
+    }
+    if (seq !== chat.seq) return;
+    chat.sending = false;
+    chat.held = held;
+    renderDock();
+    if (keyboard()) ta.focus();
+  }
+
+  async function sendKey(key) {
+    if (!chatLive()) return;
+    chat.held = false;
+    try {
+      await api('POST', chatAPI('input'), { keys: [key] });
+    } catch (e) {
+      toast(`Could not send the key: ${e.message}`, 'error');
+      return;
+    }
+    renderDock();
+    setTimeout(refreshScreen, 150);
+  }
+
+  // interruptChat interrupts the agent's turn as Esc in its terminal does
+  // (POST .../interrupt): the daemon waits for the transcript to record it
+  // and makes the agent idle. A daemon without that route gets Esc.
+  async function interruptChat() {
+    if (!chatBusy() || chat.interrupting) return;
+    const { host, seq } = chat;
+    chat.interrupting = true;
+    C.comp?.update();
+    renderChatStatus();
+    let r = null;
+    try {
+      r = await api('POST', chatAPI('interrupt'));
+    } catch (e) {
+      if (e.status === 404 || e.status === 405) {
+        r = await api('POST', chatAPI('input'), { keys: ['escape'] }).then(() => ({ interrupted: true }), (e2) => ({ error: e2 }));
+      } else r = { error: e };
+    }
+    if (seq !== chat.seq) return;
+    chat.interrupting = false;
+    if (r.error) toast(`Could not interrupt: ${r.error.message}`, 'error');
+    else if (!r.interrupted) toast('Esc was pressed, but the agent shows no interruption yet', 'warn');
+    if (r.agent) putAgent(host, r.agent);
+    renderDock();
+    setTimeout(refreshScreen, 150);
+  }
+
+  // ---- questions
+  //
+  // Questions the agent asks in a dialog of choices (Claude's
+  // AskUserQuestion), as a form above the message box: each chat reply
+  // lists those it waits on (asks), POST .../answer answers one. The dialog
+  // stays open in the terminal too; whichever answers first wins. A message
+  // sent while the form shows replies in place of answers.
+
+  const askShown = () => (chatLive() && chat.asks[0]) || null;
+
+  function chatAsks(asks) {
+    asks = (asks || []).filter((a) => !chat.answered.has(a.id));
+    if (asks.map((a) => a.id).join(',') === chat.asks.map((a) => a.id).join(',')) return;
+    chat.asks = asks;
+    renderDock();
+  }
+
+  function renderChatAsk() {
+    if (!C.ask) return;
+    const a = askShown();
+    if (!a) {
+      if (chat.askForm) fill(C.ask);
+      chat.askForm = null;
+      return;
+    }
+    // Built once per question: a reply must not undo the picks.
+    if (!chat.askForm || chat.askForm.id !== a.id) {
+      chat.askForm = askForm(a);
+      fill(C.ask, chat.askForm.el);
+    }
+    paintAsk();
+  }
+
+  // askForm builds the form of a question: per question its options, one to
+  // type, a preview of the option looked at, and a note.
+  function askForm(a) {
+    const form = { id: a.id, sending: false, qs: [] };
+    const body = h('div', 'ask-body');
+    a.questions.forEach((q, qi) => {
+      const name = `ask-${a.id}-${qi}`;
+      const type = q.multiSelect ? 'checkbox' : 'radio';
+      const fq = { q, opts: [], other: null, note: null };
+      const opts = h('div', 'opts');
+      // The preview of the option looked at, else of the one picked. Its
+      // box keeps its size: options moving under the pointer would take
+      // the click meant for another.
+      const hasPreview = (q.options || []).some((o) => o.preview);
+      const preview = h('pre', 'opt-preview');
+      preview.hidden = !hasPreview;
+      const showPreview = (o) => {
+        if (!hasPreview) return;
+        const p = (o && o.preview) || (fq.opts.find((x) => x.input.checked && x.preview) || {}).preview;
+        preview.textContent = p || 'Point at an option to see its preview.';
+        preview.classList.toggle('empty-p', !p);
+      };
+      for (const o of q.options || []) {
+        const input = h('input', { type, name, value: o.label, onchange: () => { showPreview(o.preview ? o : null); paintAsk(); } });
+        const lab = h('label', 'opt', input, h('span', null, h('span', 'opt-l', o.label), o.description ? h('span', 'opt-d', o.description) : null));
+        if (o.preview) {
+          lab.addEventListener('mouseenter', () => showPreview(o));
+          lab.addEventListener('mouseleave', () => showPreview(null));
+          lab.addEventListener('focusin', () => showPreview(o));
+        }
+        fq.opts.push({ label: o.label, input, preview: o.preview || '' });
+        opts.append(lab);
+      }
+      // One of their own, as in the terminal's "Type something".
+      const oin = h('input', { type, name, 'aria-label': 'Your own answer' });
+      const otext = h('input', { class: 'input', type: 'text', maxlength: 8000, placeholder: 'Something else…', 'aria-label': `Your own answer to: ${q.question}` });
+      otext.addEventListener('input', () => {
+        oin.checked = otext.value.trim() !== '' || (!q.multiSelect && oin.checked);
+        paintAsk();
+      });
+      otext.addEventListener('focus', () => {
+        if (!q.multiSelect && otext.value.trim()) oin.checked = true;
+        paintAsk();
+      });
+      otext.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' && !ev.isComposing) {
+          ev.preventDefault();
+          submitAsk();
+        }
+      });
+      oin.addEventListener('change', () => {
+        if (oin.checked && !otext.value.trim()) otext.focus();
+        paintAsk();
+      });
+      fq.other = { input: oin, text: otext };
+      opts.append(h('label', 'opt own', oin, otext));
+      const note = h('textarea', { class: 'input', rows: 2, maxlength: 8000, placeholder: 'A note for the agent on this answer', 'aria-label': `Note on: ${q.question}`, hidden: true });
+      const addNote = h('button', { type: 'button', class: 'btn ghost sm ask-note-btn', onclick: () => { note.hidden = false; addNote.hidden = true; note.focus(); } }, icon('plus'), 'Note');
+      fq.note = note;
+      body.append(h('fieldset', 'ask-fs',
+        h('legend', 'ask-q', q.header ? h('span', 'ask-tag', q.header) : null, h('span', null, q.question), q.multiSelect ? h('span', 'ask-multi', 'pick any') : null),
+        opts, preview, addNote, note));
+      showPreview(null);
+      form.qs.push(fq);
+    });
+    form.progress = h('span', 'prog');
+    form.send = h('button', { type: 'button', class: 'btn primary sm', onclick: submitAsk }, 'Answer');
+    form.more = h('span', 'more');
+    const who = chat.agent && chat.agent.adapter === 'claude' ? 'Claude asks' : 'The agent asks';
+    form.el = h('section', { class: 'ask', 'aria-label': 'Questions from the agent' },
+      h('div', 'ask-h', icon('alert'), who, form.more),
+      body,
+      h('div', 'ask-foot', h('span', 'hint', 'Answer here or in the terminal, or reply below instead'), form.progress, form.send));
+    return form;
+  }
+
+  // askAnswer is what the form says: {answers, notes}, and how many
+  // questions are still unanswered.
+  function askAnswer(form) {
+    const answers = {};
+    const notes = {};
+    let open = 0;
+    for (const fq of form.qs) {
+      const picks = fq.opts.filter((o) => o.input.checked).map((o) => o.label);
+      const own = fq.other.text.value.trim();
+      if (fq.other.input.checked && own) picks.push(own);
+      if (!picks.length) open++;
+      else answers[fq.q.question] = picks;
+      const note = fq.note.value.trim();
+      if (note) notes[fq.q.question] = note;
+    }
+    return { answers, notes, open };
+  }
+
+  function paintAsk() {
+    const form = chat.askForm;
+    if (!form) return;
+    const { open } = askAnswer(form);
+    const n = form.qs.length;
+    form.progress.textContent = n > 1 ? `${n - open} of ${n} answered` : '';
+    form.send.disabled = open > 0 || form.sending || !chatLive();
+    form.send.textContent = form.sending ? 'Sending…' : 'Answer';
+    form.more.textContent = chat.asks.length > 1 ? `${chat.asks.length - 1} more after this` : '';
+  }
+
+  async function submitAsk() {
+    const form = chat.askForm;
+    if (!form) return;
+    const { answers, notes, open } = askAnswer(form);
+    if (open) return;
+    await sendAnswer(form, Object.keys(notes).length ? { answers, notes } : { answers });
+  }
+
+  // sendAnswer answers the form's question; it reports whether that worked.
+  async function sendAnswer(form, body) {
+    if (form.sending || !chatLive()) return false;
+    const seq = chat.seq;
+    form.sending = true;
+    paintAsk();
+    let ok = false;
+    try {
+      await api('POST', chatAPI('answer'), Object.assign({ ask: form.id }, body));
+      ok = true;
+    } catch (e) {
+      toast(e.status === 404 ? 'That question was answered already, or is gone' : `Could not answer: ${e.message}`, 'error');
+      if (e.status !== 404) {
+        form.sending = false;
+        if (seq === chat.seq) paintAsk();
+        return false;
+      }
+    }
+    if (seq !== chat.seq) return ok;
+    chat.answered.add(form.id);
+    chat.asks = chat.asks.filter((x) => x.id !== form.id);
+    renderDock();
+    return ok;
+  }
+
+  // ---- images and videos sent with a message
+  //
+  // Images: the daemon pastes each into the agent's prompt, where Claude and
+  // Codex show it as [Image #n]. Big photos are scaled down here (the models
+  // shrink them anyway) to keep requests small; formats the agents cannot
+  // read (HEIC, …) are re-encoded as JPEG. Videos are too big to go with a
+  // message: each is uploaded to the agent's machine as soon as it is
+  // picked (POST .../uploads, streamed), and the message gets a line with
+  // its path there, for the agent to open with its own tools.
+
+  const MAX_IMAGES = 10;
+  const IMAGE_SIDE = 2000; // longest side, px
+  const IMAGE_BYTES = 3.5 * 1024 * 1024; // the daemon's limit per image
+  const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+  const MAX_VIDEOS = 5;
+  const VIDEO_BYTES = 4 * 1024 ** 3; // the daemon's limit per file
+  const VIDEO_EXT = /\.(?:mp4|m4v|mov|webm|mkv|avi|3gp|mpe?g|ogv|wmv|flv)$/i;
+
+  const isImage = (f) => f.type.startsWith('image/');
+  // Some browsers give no type for some videos (MKV): the name tells.
+  const isVideo = (f) => f.type.startsWith('video/') || (!f.type && VIDEO_EXT.test(f.name || ''));
+  // mediaFiles is the image and video files pasted or dropped, if any.
+  const mediaFiles = (dt) => [...(dt ? dt.files : [])].filter((f) => isImage(f) || isVideo(f));
+  const chatUploads = () => (chat.host ? `/api/hosts/${encodeURIComponent(chat.host)}/uploads` : '/api/uploads');
+
+  async function addChatFiles(files) {
+    if (!chatLive() || chat.sending || askShown()) return;
+    const seq = chat.seq;
+    addVideos(files, chat.videos, chatUploads(), () => {
+      if (seq === chat.seq) C.comp?.paint();
+    });
+    if (await readImages(files, chat.images, () => seq === chat.seq)) C.comp?.paint();
+  }
+
+  // A file dropped anywhere on the chat goes with the next message; it
+  // must not open in the tab.
+  function wireChatDrop(el) {
+    el.addEventListener('dragover', (ev) => {
+      if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files') && chatLive()) ev.preventDefault();
+    });
+    el.addEventListener('drop', (ev) => {
+      if (!ev.dataTransfer || !ev.dataTransfer.files.length) return;
+      ev.preventDefault();
+      addChatFiles(ev.dataTransfer.files);
+    });
+  }
+
+  // readImages adds the image files among files to images, ready to send,
+  // up to MAX_IMAGES in all. It stops, answering false, once alive() is
+  // false: the message they were for is gone.
+  async function readImages(files, images, alive) {
+    for (const f of [...files].filter(isImage)) {
+      if (images.length >= MAX_IMAGES) {
+        toast(`At most ${MAX_IMAGES} images per message`, 'warn');
+        break;
+      }
+      try {
+        const blob = await fitImage(f);
+        const url = await blobURL(blob);
+        if (!alive()) return false;
+        if (images.length < MAX_IMAGES) images.push({ data: url.slice(url.indexOf(',') + 1), url, name: f.name || 'pasted image' });
+      } catch (e) {
+        if (!alive()) return false;
+        toast(`${f.name || 'image'}: ${e.message}`, 'error');
+      }
+    }
+    return alive();
+  }
+
+  // fitImage returns f as is if the agents can read it and it is small
+  // enough, else scaled down and re-encoded (GIFs lose their animation).
+  async function fitImage(f) {
+    let bmp;
+    try {
+      bmp = await createImageBitmap(f);
+    } catch {
+      throw new Error('this browser cannot read the image');
+    }
+    try {
+      const scale = Math.min(1, IMAGE_SIDE / Math.max(bmp.width, bmp.height));
+      if (IMAGE_TYPES.includes(f.type) && scale === 1 && f.size <= IMAGE_BYTES) return f;
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(bmp.width * scale));
+      c.height = Math.max(1, Math.round(bmp.height * scale));
+      c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+      // PNG keeps screenshots sharp; photos (and PNGs too big) go JPEG.
+      for (const [type, q] of [['image/png'], ['image/jpeg', 0.9], ['image/jpeg', 0.75]]) {
+        if (type === 'image/png' && f.type !== 'image/png') continue;
+        const b = await new Promise((res) => c.toBlob(res, type, q));
+        if (b && b.size <= IMAGE_BYTES) return b;
+      }
+      throw new Error('too large, even scaled down');
+    } finally {
+      bmp.close();
+    }
+  }
+
+  function blobURL(blob) {
+    return new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.onerror = () => rej(new Error('cannot read the image'));
+      r.readAsDataURL(blob);
+    });
+  }
+
+  // addVideos starts uploading the videos among files to url, the uploads
+  // route of the agent's machine, adding each to videos as {name, size,
+  // sent, path, error, xhr}; changed() runs when one is added, done or
+  // failed.
+  function addVideos(files, videos, url, changed) {
+    let added = false;
+    for (const f of [...files].filter(isVideo)) {
+      if (videos.length >= MAX_VIDEOS) {
+        toast(`At most ${MAX_VIDEOS} videos per message`, 'warn');
+        break;
+      }
+      if (f.size > VIDEO_BYTES) {
+        toast(`${f.name || 'video'}: too large (at most 4 GB)`, 'error');
+        continue;
+      }
+      const v = { name: f.name || 'video', size: f.size, sent: 0, path: '', error: '', xhr: null };
+      v.xhr = uploadFile(url, f, (sent) => {
+        v.sent = sent;
+        paintVideo(v);
+      }, (err, r) => {
+        v.xhr = null;
+        if (err) v.error = err;
+        else v.path = r.path;
+        changed();
+      });
+      videos.push(v);
+      added = true;
+    }
+    if (added) changed();
+  }
+
+  // uploadFile posts file to url (XHR, for its progress), named after it.
+  // done gets an error message, or '' and the decoded reply.
+  function uploadFile(url, file, progress, done) {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url + '?' + new URLSearchParams({ name: file.name || 'video' }));
+    const token = getToken();
+    if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+    xhr.upload.onprogress = (ev) => progress(ev.loaded);
+    xhr.onload = () => {
+      let data = null;
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        // not JSON
+      }
+      if (xhr.status === 401) lostAdmin();
+      if (xhr.status >= 200 && xhr.status < 300 && data && data.path) done('', data);
+      else done((data && data.error) || `upload failed (${xhr.status})`);
+    };
+    xhr.onerror = () => done('cannot reach the daemon');
+    xhr.send(file);
+    return xhr;
+  }
+
+  // dropVideos stops the uploads of videos still on their way and returns
+  // an empty list. What has arrived stays on the machine until pruned.
+  function dropVideos(videos) {
+    for (const v of videos || []) if (v.xhr) v.xhr.abort();
+    return [];
+  }
+
+  function videosProblem(videos) {
+    if (videos.some((v) => v.error)) return 'A video could not be uploaded: remove it.';
+    if (videos.some((v) => !v.path)) return 'Wait for the videos to finish uploading.';
+    return '';
+  }
+
+  // withVideos is text with a line for each video's path appended.
+  function withVideos(text, videos) {
+    if (!videos.length) return text;
+    const lines = videos.map((v) => `Video: ${v.path}`).join('\n');
+    return text.trim() ? text.trimEnd() + '\n\n' + lines : lines;
+  }
+
+  // renderThumbs shows the images and videos to send in box, each with a
+  // button to remove it (data-image or data-video is its index).
+  function renderThumbs(box, images, videos = []) {
+    box.hidden = !images.length && !videos.length;
+    const remove = (kind, i, name) => h('button', { type: 'button', class: 'icon-btn', ['data-' + kind]: String(i), 'aria-label': `Remove ${name}` }, icon('x'));
+    fill(box, images.map((im, i) => h('div', 'att', h('img', { src: im.url, alt: im.name, title: im.name }), remove('image', i, im.name))),
+      videos.map((v, i) => {
+        v.statusEl = h('span', 'st');
+        v.barEl = h('span');
+        const el = h('div', { class: 'att video', title: v.path || v.name }, h('span', 'nm', '▶ ' + v.name), v.statusEl, h('span', 'bar', v.barEl), remove('video', i, v.name));
+        paintVideo(v);
+        return el;
+      }));
+  }
+
+  // paintVideo shows how far video v's upload is.
+  function paintVideo(v) {
+    if (!v.statusEl) return;
+    const pct = v.path ? 100 : v.size ? Math.min(99, Math.floor((v.sent / v.size) * 100)) : 0;
+    v.statusEl.textContent = v.error ? v.error : v.path ? `${fmtSize(v.size)} · uploaded` : `uploading ${pct}%`;
+    v.statusEl.className = 'st' + (v.error ? ' bad' : '');
+    v.barEl.style.width = (v.error ? 0 : pct) + '%';
   }
 
   // ------------------------------------------------------------------ feeds
   //
-  // A feed shows one transcript in a log: its latest entries first, then
-  // new ones as they are written (long polls), older ones on request. The
-  // session's conversation is one, a workflow agent's another.
+  // A feed shows one transcript in a log: its latest entries first, then new
+  // ones as they are written (long polls), older ones on request. The
+  // session's conversation is one, a workflow agent's another. The tool
+  // calls between two messages fold into one line, a group, open while the
+  // agent works on them.
 
   // newFeed makes a feed. o holds its scroller and log elements; url(query)
-  // of its chat requests; live() while more may be written; working()
-  // while its agent works (a call without output yet is then running);
-  // empty(), the note for no transcript; imageURL(query) of its images; and
-  // optionally query(q) to add to its long polls, onReply(reply),
-  // onStatus() when its error or entries changed, onFile() when a
-  // transcript appeared or went.
+  // of its chat requests; live() while more may be written; working() while
+  // its agent works (a call without output yet is running then); empty(),
+  // the note for no transcript; imageURL(query) of its images; and
+  // optionally query(q) to add to its long polls, onReply(reply), and
+  // onStatus() when its error or entries changed.
   function newFeed(o) {
     return Object.assign({
       seq: 0, // bumped on start and stop: loops of an old start stop
       file: '', // transcript the offsets belong to; '' = none yet
       start: 0, // offset of the oldest entry shown
       end: 0, // offset after the newest
-      loaded: false, // first reply in
+      loaded: false,
       earlier: false, // loading older entries
       error: '',
-      tools: new Map(), // tool call id -> {el, status, body, name, done}
-      orphans: new Map(), // tool call id -> {el, output, error}: a result shown without its call
+      tools: new Map(), // tool call id -> step (or a card that shows a call)
+      orphans: new Map(), // tool call id -> {t, output, error, images}: a result shown before its call
       watch: new Set(), // repaints of the nodes that show workflow runs (see applyWorkflows)
+      group: null, // the group the next tool call joins
+      groups: [], // every group shown
+      day: '', // the day of the last message shown
     }, o);
   }
 
   function startFeed(f) {
     stopFeed(f);
-    Object.assign(f, { file: '', start: 0, end: 0, loaded: false, earlier: false, error: '' });
-    f.log.replaceChildren(h('div', 'py-10 text-center font-mono text-xs text-zinc-600', '// loading…'));
+    Object.assign(f, { file: '', start: 0, end: 0, loaded: false, earlier: false, error: '', group: null, groups: [], day: '' });
+    fill(f.log, h('p', 'empty-note', 'Loading…'));
     feedLoop(f, f.seq);
   }
 
   function stopFeed(f) {
+    if (!f) return;
     f.seq++;
     f.tools.clear();
     f.orphans.clear();
     f.watch.clear();
   }
 
-  // feedLoop follows a transcript until the feed stops or the dialog
-  // closes: the latest entries first, then long polls for more.
+  // feedLoop follows a transcript until the feed stops or the session
+  // leaves: the latest entries first, then long polls for more.
   async function feedLoop(f, seq) {
     let failures = 0;
     while (chat.open && seq === f.seq) {
@@ -3815,16 +2885,15 @@
   function feedApply(f, r, first) {
     const { log, scroller } = f;
     const atBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120;
-    const hadFile = !!f.file;
     f.file = r.file || '';
     f.end = r.end || 0;
-    if (hadFile !== !!f.file && f.onFile) f.onFile();
     if (r.reset || first) {
       f.start = r.start || 0;
       f.tools.clear();
       f.orphans.clear();
       f.watch.clear();
-      log.replaceChildren(...feedHead(f), ...entryNodes(f, r.entries));
+      Object.assign(f, { group: null, groups: [], day: '' });
+      fill(log, feedHead(f), entryNodes(f, r.entries));
       if (f.onStatus) f.onStatus();
       scroller.scrollTop = scroller.scrollHeight;
       return;
@@ -3838,20 +2907,31 @@
     if (atBottom) scroller.scrollTop = scroller.scrollHeight;
   }
 
+  // stickToBottom keeps a conversation at its end, when it was there, as
+  // it gets shorter (a question or a dialog opens under it, a keyboard) or
+  // its content taller (images load). Not right after a click or a key in
+  // it: what that unfolded stays in view.
+  function stickToBottom(scroller) {
+    let end = true;
+    let touched = 0;
+    scroller.addEventListener('scroll', () => {
+      end = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120;
+    }, { passive: true });
+    for (const type of ['pointerdown', 'keydown']) scroller.addEventListener(type, () => (touched = Date.now()), { passive: true });
+    const ro = new ResizeObserver(() => {
+      if (end && Date.now() - touched > 600) scroller.scrollTop = scroller.scrollHeight;
+    });
+    ro.observe(scroller);
+    if (scroller.firstElementChild) ro.observe(scroller.firstElementChild);
+  }
+
   // feedHead is what goes above the entries: "load earlier", or a note
   // when there is nothing to show.
   function feedHead(f) {
     if (f.start > 0) {
-      const b = h('button', 'touch:min-h-11 mx-auto rounded-md border border-ink-600 bg-ink-850 px-3 py-1 text-xs text-zinc-400 hover:bg-ink-800 hover:text-zinc-100 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-emerald-400', 'Load earlier');
-      b.type = 'button';
-      b.addEventListener('click', (ev) => loadEarlier(f, ev));
-      return [b];
+      return [h('button', { type: 'button', class: 'btn sm load-earlier', onclick: (ev) => loadEarlier(f, ev) }, 'Load earlier messages')];
     }
-    if (!f.file) {
-      const el = h('div', 'py-10 text-center', h('div', 'font-mono text-xs text-zinc-600', '// ' + f.empty()));
-      el.dataset.empty = '1';
-      return [el];
-    }
+    if (!f.file) return [h('p', { class: 'empty-note', 'data-empty': '1' }, f.empty())];
     return [];
   }
 
@@ -3866,40 +2946,52 @@
     try {
       r = await api('GET', f.url(new URLSearchParams({ file: f.file, before: String(f.start) })));
     } catch (e) {
-      toast(`could not load earlier messages: ${e.message}`, 'error');
+      toast(`Could not load earlier messages: ${e.message}`, 'error');
     }
     f.earlier = false;
     if (seq !== f.seq) return;
     if (!r || r.reset || r.file !== f.file) {
       btn.disabled = false;
-      btn.textContent = 'Load earlier';
+      btn.textContent = 'Load earlier messages';
       return;
     }
     const scroller = f.scroller;
     const fromBottom = scroller.scrollHeight - scroller.scrollTop;
     f.start = r.start || 0;
-    // Results in this page attach to the calls in it; later results whose
-    // call is in it already showed on their own.
-    const known = f.tools;
-    f.tools = new Map();
+    // The page gets its own groups and days; results in it attach to the
+    // calls in it; later results whose call is in it already showed on
+    // their own.
+    const keep = { tools: f.tools, group: f.group, day: f.day };
+    Object.assign(f, { tools: new Map(), group: null, day: '' });
     const nodes = entryNodes(f, r.entries);
-    // Their results, if any, are already shown on their own.
+    if (f.group) f.group.closed = true;
     for (const t of f.tools.values()) {
-      if (!t.done) t.status.className = TOOL_STATUS.stale;
-      t.done = true;
+      if (!t.done && t.g) {
+        t.done = true;
+        t.stale = true;
+        paintStep(t);
+      }
     }
-    for (const [k, v] of known) f.tools.set(k, v);
+    for (const g of f.groups) paintGroup(g);
+    for (const [k, v] of keep.tools) f.tools.set(k, v);
+    f.group = keep.group;
+    const lastDay = [...nodes].reverse().find((n) => n.classList && n.classList.contains('day'));
+    f.day = keep.day;
     btn.replaceWith(...feedHead(f), ...nodes);
+    // The page's last day and the next one shown may be the same.
+    if (lastDay) {
+      let n = lastDay.nextElementSibling;
+      while (n && !n.classList.contains('day')) n = n.nextElementSibling;
+      if (n && n.textContent === lastDay.textContent) n.remove();
+    }
     scroller.scrollTop = scroller.scrollHeight - fromBottom;
   }
 
-  // entryNodes renders entries; a result is attached to its tool call.
+  // entryNodes renders entries: a tool call joins the open group (its node
+  // is returned when the group starts), a result attaches to its call.
   function entryNodes(f, entries) {
     const out = [];
-    for (const e of entries || []) {
-      const n = entryNode(f, e);
-      if (n) out.push(n);
-    }
+    for (const e of entries || []) out.push(...entryNode(f, e));
     return out;
   }
 
@@ -3908,137 +3000,164 @@
     return el;
   };
 
+  function closeGroup(f) {
+    const g = f.group;
+    if (!g) return;
+    f.group = null;
+    g.closed = true;
+    paintGroup(g);
+  }
+
+  function dayLabel(ts) {
+    const d = new Date(ts);
+    const today = new Date();
+    if (d.toDateString() === today.toDateString()) return 'Today';
+    if (d.toDateString() === new Date(today.getTime() - DAY).toDateString()) return 'Yesterday';
+    return d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+  }
+
   function entryNode(f, e) {
+    const main = f === chat.feed;
     switch (e.kind) {
-      case 'user': {
-        if (f !== chat.feed) return taskNode(e);
-        const imgs = e.images && e.images.length ? imagesNode(f, e.images, 'max-w-[85%] justify-end') : null;
-        return timeTitle(h('div', 'flex flex-col items-end gap-1.5',
-          e.text ? h('div', 'max-w-[85%] whitespace-pre-wrap break-words rounded-lg rounded-br-sm bg-emerald-400/10 px-3 py-2 text-[13.5px] leading-relaxed text-zinc-100 ring-1 ring-inset ring-emerald-400/20', e.text) : null,
-          imgs), e);
+      case 'title':
+        return [];
+      case 'tool': {
+        if (e.name === 'Workflow' && main) {
+          closeGroup(f);
+          return [workflowNode(f, e)];
+        }
+        if ((e.name === 'Agent' || e.name === 'Task') && main) {
+          closeGroup(f);
+          return [agentCallNode(f, e)];
+        }
+        const fresh = !f.group;
+        const g = f.group || newGroup(f);
+        addStep(g, e);
+        return fresh ? [g.el] : [];
       }
-      case 'assistant':
-        return timeTitle(md(e.text || ''), e);
-      case 'tool':
-        return toolNode(f, e);
-      case 'task':
-        return taskEndNode(f, e);
       case 'result': {
         const t = e.id && f.tools.get(e.id);
         if (t) {
-          setToolOutput(t, e.output, e.error, e.images);
-          return null;
+          setToolOutput(t, e.output, e.error, e.images, e.ts);
+          return [];
         }
         // The call is before the loaded range (or, rarely, written after
         // its result): shown on its own until the call turns up.
-        const el = toolNode(f, { kind: 'tool', name: 'result', text: oneLine(e.output) || (e.images ? 'image' : ''), output: e.output, error: e.error, images: e.images });
-        if (e.id) f.orphans.set(e.id, { el, output: e.output, error: e.error, images: e.images });
-        return el;
+        const fresh = !f.group;
+        const g = f.group || newGroup(f);
+        const o = addStep(g, { kind: 'tool', name: 'result', text: oneLine(e.output) || (e.images ? 'image' : ''), output: e.output, error: e.error, images: e.images, ts: e.ts });
+        if (e.id) f.orphans.set(e.id, { t: o, output: e.output, error: e.error, images: e.images });
+        return fresh ? [g.el] : [];
       }
+      case 'user': {
+        closeGroup(f);
+        if (!main) return [taskNode(e)];
+        const out = [];
+        if (e.ts) {
+          const day = dayLabel(e.ts);
+          if (day !== f.day) {
+            f.day = day;
+            out.push(h('div', 'day', day));
+          }
+        }
+        out.push(timeTitle(h('div', 'msg-user',
+          e.images && e.images.length ? imagesNode(f, e.images) : null,
+          e.text ? h('div', 'bubble', e.text) : null), e));
+        return out;
+      }
+      case 'assistant':
+        closeGroup(f);
+        return [timeTitle(md(e.text || ''), e)];
+      case 'task':
+        closeGroup(f);
+        return [taskEndNode(f, e)];
       default:
-        return timeTitle(h('div', 'whitespace-pre-wrap break-words py-0.5 text-center font-mono text-[11px] text-zinc-500', e.text || ''), e);
+        closeGroup(f);
+        return [timeTitle(h('div', e.text === 'interrupted' ? 'meta-line' : 'note-line', e.text === 'interrupted' ? 'Interrupted' : e.text || ''), e)];
     }
   }
 
   const oneLine = (s) => ((s || '').split('\n').find((l) => l.trim()) || '').trim();
 
-  // taskNode shows what a workflow agent was told: written by the script,
-  // often pages long, so folded to its start.
-  function taskNode(e) {
-    const text = e.text || '';
-    const body = h('div', 'whitespace-pre-wrap break-words text-[13px] leading-relaxed text-zinc-300', text);
-    const box = h('div', 'min-w-0 rounded-lg border border-fuchsia-400/20 bg-fuchsia-400/5 px-3 py-2',
-      h('div', 'mb-1 text-[10px] font-semibold uppercase tracking-wider text-fuchsia-300/80', 'Task'), body);
-    foldLong(box, body, text, 'max-h-36', 'touch:min-h-11 mt-1.5 rounded px-1.5 py-0.5 text-xs font-medium text-fuchsia-300 hover:bg-fuchsia-400/10 hover:text-fuchsia-200 focus-visible:outline-2 focus-visible:outline-fuchsia-400');
-    return timeTitle(box, e);
+  // ---- groups of tool calls
+
+  function newGroup(f) {
+    const g = { f, steps: [], open: null, closed: false, t0: 0, t1: 0 };
+    g.sum = h('button', { type: 'button', class: 'act-sum', 'aria-expanded': 'false', onclick: () => {
+      g.open = !groupOpen(g);
+      paintGroup(g);
+    } });
+    g.list = h('ul', 'steps');
+    g.imgs = h('div', 'imgs');
+    g.imgs.hidden = true;
+    g.el = h('div', 'act', g.sum, g.list, g.imgs);
+    f.group = g;
+    f.groups.push(g);
+    return g;
   }
 
-  const TOOL_STATUS = {
-    pending: 'size-2 shrink-0 rounded-full border-[1.5px] border-sky-400 border-t-transparent animate-spin motion-reduce:animate-none',
-    stale: 'size-1.5 shrink-0 rounded-full bg-zinc-600',
-    ok: 'size-1.5 shrink-0 rounded-full bg-emerald-400',
-    error: 'size-1.5 shrink-0 rounded-full bg-rose-500',
-  };
+  const groupLive = (g) => !g.closed && g.f.working() && g.steps.some((t) => !t.done);
+  const groupOpen = (g) => (g.open !== null ? g.open : groupLive(g));
 
-  // toolNode shows a call folded to one line. Its input and output are
-  // drawn when it is first opened: most never are.
-  function toolNode(f, e) {
-    if (e.name === 'Workflow' && f === chat.feed) return workflowNode(f, e);
-    if ((e.name === 'Agent' || e.name === 'Task') && f === chat.feed) return agentCallNode(f, e);
-    return plainToolNode(f, e);
+  function paintGroup(g) {
+    const live = groupLive(g);
+    const open = groupOpen(g);
+    g.el.classList.toggle('live', live);
+    g.list.hidden = !open;
+    g.sum.setAttribute('aria-expanded', String(open));
+    if (live) {
+      const cur = [...g.steps].reverse().find((t) => !t.done) || g.steps[g.steps.length - 1];
+      fill(g.sum, h('span', 'spin'), h('span', 'trunc', stepVerb(cur)), g.t0 ? elapsed(g.t0, 0, 'dur') : null);
+      return;
+    }
+    const failed = g.steps.filter((t) => t.done && t.error).length;
+    fill(g.sum, icon('chevron-right', 'chev'), h('span', 'trunc', summarize(g.steps)),
+      g.t1 > g.t0 && g.t0 ? h('span', 'dur', '· ' + dur(g.t1 - g.t0)) : null,
+      failed ? h('span', 'bad', `· ${failed} failed`) : null);
   }
 
-  function plainToolNode(f, e) {
-    const d = h('details', 'group min-w-0 rounded-md border border-ink-700 bg-ink-850/50 open:bg-ink-850');
-    const status = h('span', '');
-    const sum = h('summary', 'touch:min-h-11 flex cursor-pointer list-none items-center gap-2 rounded-md px-2.5 py-1.5 font-mono text-[12px] hover:bg-ink-800/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400',
-      status,
-      h('span', 'shrink-0 font-semibold text-sky-300', e.name || 'tool'),
-      h('span', 'min-w-0 truncate text-zinc-400', FILE_TOOLS.has(e.name) ? relPath(e.text) : e.text || ''));
-    const body = h('div', 'flex min-w-0 flex-col gap-2 border-t border-ink-700 px-2.5 py-2');
-    d.append(sum, body);
-    timeTitle(sum, e);
-    const t = { f, el: d, status, body, name: e.name, call: e, done: false, output: null, error: false, images: null, built: false };
-    d.addEventListener('toggle', () => {
-      if (d.open) buildTool(t);
-    });
-    trackTool(f, t, e);
-    return d;
+  const READS = new Set(['Read', 'NotebookRead', 'read_file', 'view']);
+  const EDITS = new Set(['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'edit', 'apply_patch', 'write_file']);
+  const RUNS = new Set(['Bash', 'shell', 'exec_command', 'local_shell', 'BashOutput']);
+  const FINDS = new Set(['Grep', 'Glob', 'LS', 'search', 'find', 'ToolSearch']);
+  const WEB = new Set(['WebFetch', 'WebSearch', 'web_search', 'web_fetch']);
+
+  // summarize sums up a group: "Read 3 files, searched twice, ran a command".
+  function summarize(steps) {
+    const n = (set) => steps.filter((t) => set.has(t.name)).length;
+    const parts = [];
+    const reads = n(READS);
+    const finds = n(FINDS);
+    const edits = n(EDITS);
+    const runs = n(RUNS);
+    const web = n(WEB);
+    const other = steps.length - reads - finds - edits - runs - web;
+    if (reads) parts.push(reads === 1 ? 'read a file' : `read ${reads} files`);
+    if (finds) parts.push(finds === 1 ? 'searched once' : finds === 2 ? 'searched twice' : `searched ${finds} times`);
+    if (edits) parts.push(edits === 1 ? 'edited a file' : `edited ${edits} files`);
+    if (runs) parts.push(runs === 1 ? 'ran a command' : `ran ${runs} commands`);
+    if (web) parts.push(web === 1 ? 'looked something up' : `looked up ${web} things`);
+    if (other) parts.push(other === 1 ? `used ${steps.find((t) => ![READS, FINDS, EDITS, RUNS, WEB].some((s) => s.has(t.name))).name}` : `used ${other} more tools`);
+    const s = parts.join(', ') || 'Worked';
+    return s[0].toUpperCase() + s.slice(1);
   }
 
-  // agentCallNode is an Agent call with the subagent it started, live from
-  // the Subagents tab's data: what it does now, and a way to its
-  // conversation. A subagent knows its call, or (a teammate) only its
-  // description.
-  function agentCallNode(f, e) {
-    const d = plainToolNode(f, e);
-    const sum = d.firstChild;
-    const live = h('span', 'ml-auto flex min-w-0 flex-1 items-center justify-end gap-2 font-sans');
-    sum.lastChild.classList.add('shrink-0', 'max-w-[50%]'); // its description goes first
-    sum.append(live);
-    const find = () => {
-      let byLabel = null;
-      for (const run of wf.runs) {
-        if (!run.id.startsWith('agents-')) continue;
-        for (const a of run.agents) {
-          if (a.call && a.call === e.id) return { run, a };
-          if (!a.call && !byLabel && a.label && a.label === e.text) byLabel = { run, a };
-        }
-      }
-      return byLabel;
-    };
-    let shown = '';
-    const paint = () => {
-      const m = find();
-      const sig = m ? JSON.stringify([m.run.id, m.a.status, m.a.tool, m.a.activity]) : '';
-      if (sig === shown) return;
-      shown = sig;
-      if (!m) {
-        live.replaceChildren();
-        return;
-      }
-      const st = wfStatus(m.a.status);
-      const open = h('button', 'touch:min-h-11 shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-fuchsia-300 hover:bg-fuchsia-400/10 hover:text-fuchsia-200 focus-visible:outline-2 focus-visible:outline-fuchsia-400', 'Open ›');
-      open.type = 'button';
-      open.setAttribute('aria-label', `Open the conversation of ${m.a.label || m.a.id}`);
-      open.addEventListener('click', (ev) => {
-        ev.preventDefault(); // not the details' toggle
-        ev.stopPropagation();
-        openSub(m.run.id, m.a.id);
-      });
-      const act = m.a.status === 'running'
-        ? h('span', 'min-w-0 truncate text-[11px] text-zinc-500 max-sm:hidden',
-          m.a.tool ? h('span', 'font-mono text-sky-300/80', m.a.tool + ' ') : null, m.a.activity || 'starting…')
-        : null;
-      live.replaceChildren(act || '', h('span', st.badge, h('span', st.dot), st.label), open);
-    };
-    paint();
-    f.watch.add(paint);
-    return d;
+  function stepVerb(t) {
+    if (!t) return 'Working…';
+    const e = t.call;
+    const arg = stepArg(e);
+    const short = FILE_TOOLS.has(e.name) ? baseName(arg) || arg : arg;
+    if (READS.has(e.name)) return 'Reading ' + short;
+    if (EDITS.has(e.name)) return 'Editing ' + short;
+    if (RUNS.has(e.name)) return 'Running ' + short;
+    if (FINDS.has(e.name)) return 'Searching ' + short;
+    if (WEB.has(e.name)) return 'Looking up ' + short;
+    return `${e.name} ${short}`.trim();
   }
 
   // Tools whose summary is a file's path.
-  const FILE_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+  const FILE_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'NotebookRead']);
+  const TOOL_ICON = { Read: 'file', NotebookRead: 'file', Edit: 'pencil', MultiEdit: 'pencil', Write: 'pencil', NotebookEdit: 'pencil', Bash: 'terminal', shell: 'terminal', Grep: 'search', Glob: 'search', WebFetch: 'globe', WebSearch: 'globe', TodoWrite: 'checklist', Skill: 'sliders' };
 
   // relPath shortens a path in the session's folder to the part in it, so
   // the file's name shows.
@@ -4047,46 +3166,117 @@
     return cwd && p && p.startsWith(cwd + '/') ? p.slice(cwd.length + 1) : shortPath(p);
   }
 
+  const stepArg = (e) => (FILE_TOOLS.has(e.name) ? relPath(e.text) : e.text || '');
+
+  // diffCount counts the lines a diff adds and removes.
+  function diffCount(text) {
+    let add = 0;
+    let del = 0;
+    for (const l of (text || '').split('\n')) {
+      if (l.startsWith('+') && !l.startsWith('+++')) add++;
+      else if (l.startsWith('-') && !l.startsWith('---')) del++;
+    }
+    return [add, del];
+  }
+
+  function addStep(g, e) {
+    const f = g.f;
+    const t = { f, g, call: e, name: e.name, done: false, stale: false, output: null, error: false, images: null, built: false, open: false };
+    t.status = h('span', 'st');
+    t.meta = h('span', 'step-meta');
+    t.row = h('button', { type: 'button', class: 'step-row', 'aria-expanded': 'false', onclick: () => {
+      t.open = !t.open;
+      if (t.open) buildTool(t);
+      t.body.hidden = !t.open;
+      t.row.setAttribute('aria-expanded', String(t.open));
+    } }, t.status, h('span', 'step-name', e.name || 'tool'), h('span', 'step-arg', stepArg(e)), t.meta);
+    timeTitle(t.row, e);
+    t.body = h('div', 'step-detail');
+    t.body.hidden = true;
+    t.el = h('li', 'step', t.row, t.body);
+    g.steps.push(t);
+    g.list.append(t.el);
+    if (e.ts) {
+      if (!g.t0) g.t0 = e.ts;
+      g.t1 = Math.max(g.t1, e.ts);
+    }
+    trackTool(f, t, e);
+    paintStep(t);
+    paintGroup(g);
+    return t;
+  }
+
+  function paintStep(t) {
+    const e = t.call;
+    t.el.classList.toggle('err', t.done && t.error);
+    if (!t.done) fill(t.status, t.f.working() ? h('span', 'spin') : h('span', { class: 'st-stale', title: 'No result: interrupted, or waiting' }));
+    else fill(t.status, icon(TOOL_ICON[e.name] || (EDITS.has(e.name) ? 'pencil' : RUNS.has(e.name) ? 'terminal' : FINDS.has(e.name) ? 'search' : 'sliders')));
+    let meta = '';
+    if (!t.done) meta = t.f.working() ? 'running' : '';
+    else if (t.error) meta = h('span', 'bad', 'failed');
+    else if ((e.name === 'Edit' || e.name === 'MultiEdit' || e.name === 'edit') && e.detail) {
+      const [a, d] = diffCount(e.detail);
+      meta = [h('span', 'add', '+' + a), ' ', h('span', 'del', '−' + d)];
+    } else if (e.name === 'Write') meta = 'written';
+    fill(t.meta, meta);
+  }
+
   // trackTool gives a call its output: its own, a result shown before the
   // call turned up, or (Claude) the result that follows.
   function trackTool(f, t, e) {
     const early = e.id && f.orphans.get(e.id);
     if (early) {
       f.orphans.delete(e.id);
-      early.el.remove();
+      dropStep(early.t);
       f.tools.set(e.id, t);
       setToolOutput(t, early.output, early.error, early.images);
     } else if (e.id) {
-      t.status.className = f.working() ? TOOL_STATUS.pending : TOOL_STATUS.stale;
       f.tools.set(e.id, t);
-    } else {
-      setToolOutput(t, e.output, e.error, e.images);
+    } else if (e.output != null || e.error) {
+      setToolOutput(t, e.output, e.error, e.images, e.ts);
     }
   }
 
-  // paintPending shows calls without output as running while the feed's
-  // agent works, and as unfinished otherwise (interrupted, or waiting for
-  // a permission).
-  function paintPending(f, tools) {
-    const cls = f.working() ? TOOL_STATUS.pending : TOOL_STATUS.stale;
-    for (const t of (tools || f.tools).values()) if (!t.done) t.status.className = cls;
+  // dropStep removes step t (an orphan result whose call turned up).
+  function dropStep(t) {
+    if (!t || !t.g) return;
+    const g = t.g;
+    g.steps = g.steps.filter((x) => x !== t);
+    t.el.remove();
+    if (!g.steps.length) g.el.remove();
+    else paintGroup(g);
   }
 
-  // setToolOutput gives a call what it returned. A call that returned
-  // images opens to show them.
-  function setToolOutput(t, output, error, images) {
+  // paintPending shows calls without output as running while the feed's
+  // agent works, and as unfinished otherwise (interrupted, or waiting for a
+  // permission).
+  function paintPending(f) {
+    for (const g of f.groups) {
+      if (g.steps.some((t) => !t.done)) for (const t of g.steps) if (!t.done) paintStep(t);
+      paintGroup(g);
+    }
+    for (const t of f.tools.values()) if (!t.g && t.paint) t.paint();
+  }
+
+  // setToolOutput gives a call what it returned. Images it returned show
+  // under its group, folded or not.
+  function setToolOutput(t, output, error, images, ts) {
     t.done = true;
     t.output = output || '';
     t.error = !!error;
     t.images = images && images.length ? images : null;
-    t.status.className = error ? TOOL_STATUS.error : TOOL_STATUS.ok;
     if (t.onOutput) {
       t.onOutput();
       return;
     }
-    if (error) t.el.classList.add('border-rose-500/30');
+    if (ts && t.g) t.g.t1 = Math.max(t.g.t1, ts);
+    paintStep(t);
     if (t.built) addOutput(t);
-    else if (t.images) t.el.open = true; // builds it (toggle)
+    if (t.images && t.g) {
+      t.g.imgs.hidden = false;
+      t.g.imgs.append(imagesNode(t.f, t.images));
+    }
+    if (t.g) paintGroup(t.g);
   }
 
   function buildTool(t) {
@@ -4098,16 +3288,56 @@
   }
 
   function addOutput(t) {
-    if (t.output == null) return; // shown on its own (see loadEarlier)
-    if (t.images) t.body.append(imagesNode(t.f, t.images));
+    if (t.output == null) return;
     if (t.output) t.body.append(outputView(t));
-    else if (!t.body.childElementCount) t.body.append(h('div', 'font-mono text-[11px] text-zinc-600', '// no output'));
+    else if (!t.images && !t.body.childElementCount) t.body.append(h('p', 'note-line', 'No output'));
   }
 
-  // ---- images: pasted into a message, or returned by a tool
+  // Tools whose output is the agent's or a page's text, in markdown.
+  const MD_OUTPUT = new Set(['Agent', 'Task', 'WebFetch', 'WebSearch']);
 
+  // inputView shows a call's input: a command, a diff, a file's content, a
+  // script, a plan, or JSON.
+  function inputView(e) {
+    const n = e.name;
+    if (n === 'ExitPlanMode') return mdView(e.detail, 'Plan');
+    const o = { label: 'Input', text: e.detail, wrap: true, max: true };
+    if (n === 'Bash' || n === 'shell') o.lang = 'sh';
+    else if (n === 'Edit' || n === 'MultiEdit' || n === 'edit') {
+      o.lang = 'diff';
+      o.inner = extLang((e.text || '').split(', ')[0]);
+    } else if (n === 'Write') o.lang = extLang(e.text);
+    else if (n === 'Workflow') o.lang = 'js';
+    else if (looksJSON(e.detail)) o.lang = 'json';
+    return codeView(o);
+  }
+
+  // outputView shows what a call returned: a file with its line numbers
+  // (Read), markdown, JSON, a diff, or text.
+  function outputView(t) {
+    const out = t.output;
+    const o = { label: t.error ? 'Error' : 'Output', text: out, error: t.error, wrap: true, max: true };
+    if (t.error) return codeView(o);
+    // MCP tools (Codex names them server.tool) often answer in markdown.
+    if (MD_OUTPUT.has(t.name) || (/^mcp__|\./.test(t.name || '') && looksMarkdown(out))) return mdView(out, o.label);
+    if (t.name === 'Read' && READ_LINE.test(out)) {
+      o.lang = extLang(t.call.text);
+      o.read = true;
+    } else if (looksJSON(out)) o.lang = 'json';
+    else if (looksDiff(out)) o.lang = 'diff';
+    return codeView(o);
+  }
+
+  const looksJSON = (s) => /^\s*[[{]\s*["[{\]}]/.test(s || '');
+  const looksDiff = (s) => /^diff --git /m.test(s) || (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(s) && /^[+-]/m.test(s));
+  const looksMarkdown = (s) => /^#{1,6} \S/m.test(s) || /^\s*(?:```|~~~)/m.test(s) || /^\s*\|.*\|\s*\n\s*\|?[\s:|-]*-[\s:|-]*$/m.test(s) ||
+    (/\*\*[^*\n]+\*\*/.test(s) && /^\s*(?:[-*]|\d+\.) \S/m.test(s));
+
+  // ---- images: pasted into a message, or returned by a tool
+  //
   // Images stay in the transcript: the page asks for each as it scrolls
   // into view (GET .../image, its data as JSON) and keeps the latest few.
+
   const IMG_KEEP = 48;
   const imgCache = new Map(); // url -> Promise of a data: URL, oldest first
 
@@ -4131,23 +3361,19 @@
     }
   }, { rootMargin: '600px' }) : null;
 
-  // imagesNode shows images of feed f's entries as thumbnails, which open
+  // imagesNode shows images of feed f's entries as thumbnails that open
   // full size.
-  function imagesNode(f, images, cls) {
-    const row = h('div', 'flex min-w-0 flex-wrap gap-2 ' + (cls || ''));
+  function imagesNode(f, images) {
+    const row = h('div', 'imgs');
     for (const im of images) {
       const url = f.imageURL(new URLSearchParams({ file: f.file, line: String(im.line), n: String(im.n) }));
-      const img = h('img', 'block max-h-64 max-w-full object-contain');
-      img.alt = 'image';
-      const b = h('button', 'flex min-h-20 min-w-28 max-w-full items-center justify-center overflow-hidden rounded-md border border-ink-600 bg-ink-950 hover:border-zinc-500 focus-visible:outline-2 focus-visible:outline-emerald-400',
-        h('span', 'font-mono text-[11px] text-zinc-600', 'image…'));
-      b.type = 'button';
-      b.title = 'Open full size';
+      const img = h('img', { alt: 'image' });
+      const b = h('button', { type: 'button', class: 'img-btn', title: 'Open full size' }, 'image…');
       b.loadImage = () => loadImage(url).then((src) => {
         img.src = src;
-        b.replaceChildren(img);
+        fill(b, img);
       }, (e) => {
-        b.replaceChildren(h('span', 'px-2 font-mono text-[11px] text-zinc-500', '// image: ' + e.message));
+        fill(b, 'image: ' + e.message);
         b.disabled = true;
       });
       b.addEventListener('click', () => {
@@ -4160,606 +3386,63 @@
     return row;
   }
 
-  function openImage(src) {
-    viewer.list = null;
-    viewer.seq++;
-    $('img-view-bar').hidden = true;
-    showImage(src);
-  }
-
-  function showImage(src) {
-    const img = $('img-view-img');
-    img.src = src;
-    delete img.dataset.loading;
-    img.classList.toggle('max-h-[94dvh]', !viewer.list);
-    img.classList.toggle('max-h-[calc(94dvh-3.5rem)]', !!viewer.list);
-    const d = $('img-view');
-    if (d.open) return;
-    d.showModal();
-    d.focus(); // not its first button: the arrow keys step from anywhere
-  }
-
-  // ---- the Media tab: every image of the session's conversation
-  //
-  // GET .../media lists them (offsets into the transcript, like the
-  // chat); the page asks again for newer ones whenever the chat shows an
-  // image, and loads each as it scrolls into view.
-
-  const media = {
-    items: [], // {line, n, type, ts, from, tool, text}, oldest first
-    file: '', // transcript the offsets belong to
-    end: 0, // offset after the last read
-    loaded: false,
-    error: '',
-    busy: false, // a request is in flight
-    again: false, // ask once more after it: the chat showed newer images
-    els: new Map(), // file:line:n -> grid button, kept across renders
-  };
-
-  // viewer is what the full-size view steps through: the Media tab's
-  // images, newest first; null for a single image of the chat.
-  const viewer = { list: null, i: 0, seq: 0 };
-
-  const mediaKey = (m) => `${media.file}:${m.line}:${m.n}`;
-  const mediaURL = (m) => chatAPI('image?' + new URLSearchParams({ file: media.file, line: String(m.line), n: String(m.n) }));
-
-  function mediaLabel(m) {
-    if (m.from === 'user') return 'sent by you';
-    const t = m.text || m.tool || 'tool output';
-    return /^\S+$/.test(t) ? t.split('/').pop() : t; // a path: its file name
-  }
-
-  function resetMedia() {
-    Object.assign(media, { items: [], file: '', end: 0, loaded: false, error: '', busy: false, again: false });
-    media.els.clear();
-    $('media-grid').replaceChildren();
-  }
-
-  // loadMedia reads the images the page does not know yet.
-  async function loadMedia() {
-    if (media.busy) {
-      media.again = true;
-      return;
-    }
-    const seq = chat.seq;
-    media.busy = true;
-    try {
-      for (;;) {
-        media.again = false;
-        const q = new URLSearchParams();
-        if (media.file) {
-          q.set('file', media.file);
-          q.set('after', String(media.end));
-        }
-        const r = await api('GET', chatAPI('media?' + q));
-        if (seq !== chat.seq) return;
-        if (r.reset) {
-          media.items = [];
-          media.els.clear();
-        }
-        media.items.push(...(r.media || []));
-        Object.assign(media, { file: r.file || '', end: r.end || 0, loaded: true, error: '' });
-        renderTabs();
-        if (chat.view === 'media') renderMedia();
-        if (!r.more && !media.again) break;
-      }
-    } catch (e) {
-      if (seq !== chat.seq) return;
-      // A fleet without the media route has none to show.
-      Object.assign(media, { loaded: true, error: e.status === 404 ? '' : e.message });
-      if (chat.view === 'media') renderMedia();
-    } finally {
-      if (seq === chat.seq) media.busy = false;
-    }
-  }
-
-  // renderMedia draws the grid, newest first. Thumbnails already drawn are
-  // kept, with their images.
-  function renderMedia() {
-    const grid = $('media-grid');
-    if (!media.items.length) {
-      grid.replaceChildren(h('div', 'col-span-full py-10 text-center font-mono text-xs text-zinc-600',
-        !media.loaded ? '// loading…' : media.error ? '// ' + media.error : '// No images in this conversation yet.'));
-      return;
-    }
-    const list = [...media.items].reverse();
-    grid.replaceChildren(...list.map((m, i) => {
-      const key = mediaKey(m);
-      let b = media.els.get(key);
-      if (!b) {
-        b = mediaThumb(m);
-        media.els.set(key, b);
-      }
-      b.dataset.i = String(i);
-      return b;
-    }));
-  }
-
-  function mediaThumb(m) {
-    const label = mediaLabel(m);
-    const when = m.ts ? new Date(m.ts).toLocaleString() : '';
-    const b = h('button', 'group relative grid aspect-square min-w-0 place-items-center overflow-hidden rounded-md border border-ink-600 bg-ink-950 hover:border-zinc-500 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400',
-      h('span', 'font-mono text-[11px] text-zinc-600', 'image…'),
-      h('span', 'pointer-events-none absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/85 to-transparent px-1.5 pb-1 pt-5 text-left font-mono text-[10px] text-zinc-200', label));
-    b.type = 'button';
-    b.title = [m.from === 'user' ? 'sent by you' : [m.tool, m.text].filter(Boolean).join(': '), when].filter(Boolean).join('\n');
-    b.setAttribute('aria-label', `${label}${when ? ', ' + when : ''}. Open full size`);
-    b.loadImage = () => loadImage(mediaURL(m)).then((src) => {
-      const img = h('img', 'absolute inset-0 size-full object-cover');
-      img.alt = '';
-      img.src = src;
-      b.firstChild.replaceWith(img);
-    }, (e) => {
-      b.firstChild.replaceWith(h('span', 'px-2 text-center font-mono text-[10px] text-zinc-500', '// ' + e.message));
-    });
-    b.addEventListener('click', () => openMedia(Number(b.dataset.i)));
-    if (imgSeen) imgSeen.observe(b);
-    else b.loadImage();
-    return b;
-  }
-
-  // openMedia shows image i of the Media tab (newest first) full size.
-  function openMedia(i) {
-    const list = viewer.list && $('img-view').open ? viewer.list : [...media.items].reverse();
-    const m = list[i];
-    if (!m) return;
-    Object.assign(viewer, { list, i });
-    const seq = ++viewer.seq;
-    $('img-view-bar').hidden = false;
-    $('img-view-cap').textContent = `${i + 1}/${list.length} · ${mediaLabel(m)}${m.ts ? ' · ' + new Date(m.ts).toLocaleString() : ''}`;
-    $('img-view-prev').disabled = i === 0;
-    $('img-view-next').disabled = i === list.length - 1;
-    if ($('img-view').open) $('img-view-img').dataset.loading = '';
-    loadImage(mediaURL(m)).then((src) => {
-      if (seq === viewer.seq) showImage(src);
-    }, (e) => {
-      if (seq === viewer.seq) toast(`could not load the image: ${e.message}`, 'error');
-    });
-  }
-
-  function wireImageView() {
-    const d = $('img-view');
-    d.addEventListener('click', () => d.close());
-    $('img-view-bar').addEventListener('click', (ev) => ev.stopPropagation());
-    $('img-view-prev').addEventListener('click', () => openMedia(viewer.i - 1));
-    $('img-view-next').addEventListener('click', () => openMedia(viewer.i + 1));
-    d.addEventListener('keydown', (ev) => {
-      if (!viewer.list || (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight')) return;
-      ev.preventDefault();
-      openMedia(viewer.i + (ev.key === 'ArrowLeft' ? -1 : 1));
-    });
-    // Swiping sideways steps through the images too.
-    let x0 = null;
-    d.addEventListener('touchstart', (ev) => {
-      x0 = viewer.list && ev.touches.length === 1 ? ev.touches[0] : null;
-    }, { passive: true });
-    d.addEventListener('touchend', (ev) => {
-      const t = ev.changedTouches[0];
-      if (!x0 || !t) return;
-      const dx = t.clientX - x0.clientX, dy = t.clientY - x0.clientY;
-      x0 = null;
-      if (Math.abs(dx) < 50 || Math.abs(dx) < 2 * Math.abs(dy)) return;
-      ev.preventDefault(); // no click: it would close the view
-      openMedia(viewer.i + (dx > 0 ? -1 : 1));
-    });
-  }
-
-  // ---- the Files tab: what the agent wrote and changed, and a search
-  // through its folder
-  //
-  // GET .../files lists them, newest first: the files its tool calls
-  // wrote, wherever they are, and those of its folder changed since the
-  // session started; with q, those whose path holds every word of it, and
-  // in found the folder's other files that do. The page asks again when
-  // the tab is shown, a search is typed, or the chat shows a tool call
-  // that wrote files. GET .../file reads one, its content in base64.
-
-  const files = {
-    list: [], // {path, rel, size, mtimeMs, written, gone}, newest first
-    found: [], // with a search: the folder's other files that match
-    q: '', // the search the lists are for
-    dir: '', // the agent's folder, '' if it has none
-    total: 0, // files written and changed, without a search: the tab's count
-    partial: false,
-    loaded: false,
-    error: '',
-    missing: false, // the fleet has no files route
-    busy: false,
-    again: false, // ask once more after the request in flight
-    timer: 0, // a search typed or files written: waits for a pause
-    open: null, // the list item opened
-    shown: null, // its content: {path, rel, size, mtimeMs, type, text, data, big}
-    seq: 0, // file reads: only the latest is shown
-    url: '', // object URL of the video or audio shown
-  };
-
-  // Images shown from a data: URL (in an <img> an SVG runs no script).
-  const IMG_TYPE = /^image\/(?:png|jpeg|gif|webp|avif|bmp|svg\+xml|x-icon|vnd\.microsoft\.icon)$/;
-  // The most text a file view shows.
-  const FILE_TEXT_MAX = 512 << 10;
-  // The colour of a file's badge, by its extension.
-  const FILE_KINDS = [
-    [/^(?:png|jpe?g|gif|webp|avif|svg|bmp|ico|heic)$/, 'border-sky-400/30 text-sky-300'],
-    [/^(?:mp4|webm|mov|m4v|mkv|mp3|wav|ogg|m4a|flac)$/, 'border-violet-400/30 text-violet-300'],
-    [/^(?:md|mdx|markdown|txt|pdf|docx?|rtf|csv|tsv|xlsx?|pptx?|html?)$/, 'border-amber-400/30 text-amber-200'],
-  ];
-
-  const fmtSize = (n) => (n < 1024 ? `${n} B`
-    : n < 1 << 20 ? `${(n / 1024).toFixed(n < 10 << 10 ? 1 : 0)} KB`
-      : `${(n / (1 << 20)).toFixed(n < 10 << 20 ? 1 : 0)} MB`);
-
-  function b64bytes(s) {
-    const bin = atob(s || '');
-    const out = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-    return out;
-  }
-
-  function resetFiles() {
-    clearTimeout(files.timer);
-    closeFile();
-    Object.assign(files, { list: [], found: [], q: '', dir: '', total: 0, partial: false, loaded: false, error: '', missing: false, busy: false, again: false });
-    $('files-q').value = '';
-    $('files-list').replaceChildren();
-  }
-
-  // filesSoon reads the lists again after ms: a search being typed, or a
-  // run of files being written, asks once.
-  function filesSoon(ms) {
-    clearTimeout(files.timer);
-    files.timer = setTimeout(loadFiles, ms);
-  }
-
-  // loadFiles reads the lists for the search in the box.
-  async function loadFiles() {
-    clearTimeout(files.timer);
-    if (files.busy) {
-      files.again = true;
-      return;
-    }
-    const seq = chat.seq;
-    files.busy = true;
-    $('files-reload').disabled = true;
-    try {
-      do {
-        files.again = false;
-        const q = $('files-q').value.trim();
-        const r = await api('GET', chatAPI('files' + (q ? '?' + new URLSearchParams({ q }) : '')));
-        if (seq !== chat.seq) return;
-        Object.assign(files, { list: r.files || [], found: r.found || [], q, dir: r.dir || '', partial: !!r.partial, loaded: true, error: '', missing: false });
-        if (!q) files.total = files.list.length;
-      } while (files.again);
-    } catch (e) {
-      if (seq !== chat.seq) return;
-      // A fleet without the files route has none to show.
-      Object.assign(files, { loaded: true, error: e.message, missing: e.status === 404 && !files.dir });
-    } finally {
-      if (seq === chat.seq) {
-        files.busy = false;
-        $('files-reload').disabled = false;
-      }
-    }
-    renderTabs();
-    if (chat.view === 'files') renderFiles();
-  }
-
-  function renderFiles() {
-    const box = $('files-list');
-    const note = (t) => h('div', 'py-10 text-center font-mono text-xs text-zinc-600', t);
-    $('files-q').placeholder = files.dir ? `Search files in ${baseName(files.dir) || '/'}` : 'Search the files written';
-    if (!files.loaded) return box.replaceChildren(note('// loading…'));
-    if (files.error) return box.replaceChildren(note('// ' + (files.missing ? 'This fleet cannot list files: update it.' : files.error)));
-    const head = (label, n) => h('h4', 'flex items-baseline gap-2 px-1 pb-1.5 pt-4 text-[10.5px] font-medium uppercase tracking-wider text-zinc-500 first:pt-0',
-      label, h('span', 'font-mono tabular-nums text-zinc-600', String(n)));
-    const out = [];
-    if (files.q) {
-      if (files.list.length) out.push(head('Written or changed by the agent', files.list.length), fileRows(files.list));
-      if (files.found.length) out.push(head('Elsewhere in the folder', files.found.length), fileRows(files.found));
-      if (!files.list.length && !files.found.length) out.push(note(`// No file matches “${files.q}”.`));
-    } else if (files.list.length) {
-      out.push(head('Written or changed since the session started', files.list.length), fileRows(files.list));
-    } else {
-      out.push(h('div', 'py-10 text-center',
-        h('div', 'font-mono text-xs text-zinc-600', '// The agent has not written or changed a file yet.'),
-        files.dir ? h('div', 'mt-1 text-xs text-zinc-500', 'Search to find any file in ', h('span', 'break-all font-mono text-zinc-400', files.dir), '.') : null));
-    }
-    if (files.partial) out.push(h('div', 'px-1 pt-3 font-mono text-[10.5px] text-zinc-600', '// Not everything is listed: the folder is large.'));
-    box.replaceChildren(...out);
-  }
-
-  function fileBadge(name) {
-    const dot = name.lastIndexOf('.');
-    const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
-    const kind = FILE_KINDS.find(([re]) => re.test(ext));
-    return h('span', 'grid h-7 w-10 shrink-0 place-items-center overflow-hidden rounded border bg-ink-950 font-mono text-[9.5px] font-semibold uppercase ' +
-      (kind ? kind[1] : 'border-ink-600 text-zinc-400'), ext.slice(0, 5) || '—');
-  }
-
-  // fileRows lists files: name, folder (./ for the agent's, else absolute),
-  // size and age. A file gone is struck through.
-  function fileRows(list) {
-    const ul = h('ul', 'divide-y divide-ink-700/60 overflow-hidden rounded-md border border-ink-700 bg-ink-900/40');
-    for (const f of list) {
-      const name = baseName(f.path);
-      const where = f.rel ? './' + f.rel.slice(0, -name.length) : f.path.slice(0, -name.length);
-      const b = h('button', 'touch:min-h-11 flex w-full min-w-0 items-center gap-2.5 px-2.5 py-1.5 text-left hover:bg-ink-850 disabled:cursor-default disabled:hover:bg-transparent focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-amber-400',
-        fileBadge(name),
-        h('span', 'min-w-0 flex-1',
-          h('span', 'block truncate font-mono text-[12.5px] ' + (f.gone ? 'text-zinc-500 line-through' : 'text-zinc-200'), name),
-          h('span', 'block truncate font-mono text-[10.5px] text-zinc-500', where)),
-        h('span', 'shrink-0 text-right font-mono text-[10.5px] leading-tight',
-          h('span', 'block tabular-nums text-zinc-400', f.gone ? 'deleted' : fmtSize(f.size)),
-          f.mtimeMs ? relTime(f.mtimeMs, '', 'block tabular-nums text-zinc-600') : null));
-      b.type = 'button';
-      b.title = f.path + (f.written ? '\nwritten by the agent' : '');
-      if (f.gone) b.disabled = true;
-      else b.addEventListener('click', () => openFile(f));
-      ul.append(h('li', '', b));
-    }
-    return ul;
-  }
-
-  // openFile shows file f in place of the lists.
-  async function openFile(f) {
-    const seq = ++files.seq;
-    revokeFileURL();
-    Object.assign(files, { open: f, shown: null });
-    $('file-name').textContent = baseName(f.path);
-    $('file-name').title = f.path;
-    $('file-meta').textContent = f.rel || f.path;
-    $('file-download').disabled = true;
-    $('file-body').replaceChildren(h('div', 'py-10 text-center font-mono text-xs text-zinc-600', '// loading…'));
-    $('files-browse').hidden = true;
-    $('file-view').hidden = false;
-    $('file-body').scrollTop = 0;
-    $('file-back').focus();
-    try {
-      const r = await api('GET', chatAPI('file?' + new URLSearchParams({ path: f.path })));
-      if (seq !== files.seq) return;
-      files.shown = r;
-      const when = r.mtimeMs ? new Date(r.mtimeMs).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : '';
-      $('file-meta').textContent = [fmtSize(r.size), when, r.rel || r.path].filter(Boolean).join(' · ');
-      $('file-download').disabled = !!r.big;
-      $('file-body').replaceChildren(filePreview(r, baseName(r.path)));
-    } catch (e) {
-      if (seq !== files.seq) return;
-      $('file-body').replaceChildren(h('div', 'py-10 text-center font-mono text-xs text-zinc-500', '// ' + e.message));
-    }
-  }
-
-  // closeFile goes back to the lists, as they were.
-  function closeFile() {
-    files.seq++;
-    closeFileSend();
-    fileSendNote('');
-    $('file-send').disabled = false;
-    revokeFileURL();
-    Object.assign(files, { open: null, shown: null });
-    $('file-view').hidden = true;
-    $('files-browse').hidden = false;
-    $('file-body').replaceChildren();
-  }
-
-  function revokeFileURL() {
-    if (files.url) URL.revokeObjectURL(files.url);
-    files.url = '';
-  }
-
-  // filePreview shows a file's content: an image, text (markdown
-  // rendered, code highlighted with line numbers), a video or a sound.
-  function filePreview(r, name) {
-    const note = (t) => h('div', 'py-10 text-center font-mono text-xs text-zinc-500', t);
-    const type = (r.type || '').split(';')[0].trim().toLowerCase();
-    if (r.big) return note(`// ${fmtSize(r.size)}: too large to open here.`);
-    if (IMG_TYPE.test(type) && (!r.text || type === 'image/svg+xml')) {
-      const src = `data:${type};base64,${r.data}`;
-      const img = h('img', 'mx-auto block max-h-[75dvh] max-w-full cursor-zoom-in rounded-md border border-ink-700 bg-ink-950 object-contain');
-      img.alt = name;
-      img.src = src;
-      img.addEventListener('click', () => openImage(src));
-      return img;
-    }
-    if (r.text) {
-      let text = new TextDecoder().decode(b64bytes(r.data));
-      if (!text) return note('// The file is empty.');
-      const cut = text.length > FILE_TEXT_MAX;
-      if (cut) text = text.slice(0, FILE_TEXT_MAX);
-      const more = cut ? h('div', 'pt-2 font-mono text-[10.5px] text-zinc-600', '// … the rest is not shown: download the file.') : null;
-      if (/\.(?:md|mdx|markdown)$/i.test(name)) return h('div', 'mx-auto max-w-3xl', md(text), more);
-      const lang = extLang(name);
-      const numbered = text.replace(/\n$/, '').split('\n').map((l, i) => `${i + 1}\t${l}`).join('\n');
-      return h('div', 'mx-auto max-w-5xl', codeView({ text: numbered, read: true, lang, tag: lang || 'text' }), more);
-    }
-    if (/^(?:video|audio)\//.test(type)) {
-      files.url = URL.createObjectURL(new Blob([b64bytes(r.data)], { type }));
-      const v = h(type.startsWith('video/') ? 'video' : 'audio', 'mx-auto block max-h-[75dvh] max-w-full rounded-md');
-      v.controls = true;
-      v.playsInline = true;
-      v.preload = 'metadata';
-      v.src = files.url;
-      return v;
-    }
-    return note(`// ${type || 'binary file'}: no preview here, download it to open it.`);
-  }
-
-  // ---- sending the open file straight to another machine of the fleet
-  // (POST .../send); the list is the same "Fleet on the network" peers
-  // the dashboard already tracks, minus this file's own machine.
-
-  function sendTargets() {
-    return S.peers.filter((p) => !p.self && p.id !== chat.host);
-  }
-
-  function closeFileSend() {
-    $('file-send').setAttribute('aria-expanded', 'false');
-    $('file-send-menu').hidden = true;
-  }
-
-  function toggleFileSend() {
-    const menu = $('file-send-menu');
-    if (!menu.hidden) return closeFileSend();
-    renderFileSendMenu();
-    $('file-send').setAttribute('aria-expanded', 'true');
-    menu.hidden = false;
-  }
-
-  function renderFileSendMenu() {
-    const menu = $('file-send-menu');
-    const targets = sendTargets();
-    const item = (cls, text) => h('div', 'px-3 py-2 font-mono text-[11px] text-zinc-500 ' + cls, text);
-    if (!targets.length) {
-      menu.replaceChildren(item('', S.peers.length ? 'No other machine is on the network.' : 'No other machine found yet.'));
-      return;
-    }
-    menu.replaceChildren(...targets.map((p) => {
-      const b = h('button', 'touch:min-h-11 flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-zinc-200 hover:bg-ink-800 focus-visible:bg-ink-800 focus-visible:outline-none disabled:opacity-40',
-        h('span', 'min-w-0 flex-1 truncate', p.name || p.host || p.id));
-      b.type = 'button';
-      b.addEventListener('click', () => sendFileTo(p));
-      return h('div', '', b);
-    }));
-  }
-
-  // fileSendNote shows how a send went under the file's header (toasts
-  // would be under the session dialog); '' hides it.
-  function fileSendNote(text, kind) {
-    const el = $('file-send-note');
-    el.hidden = !text;
-    el.textContent = text;
-    el.className = el.className.replace(/\btext-(?:zinc|emerald|rose)-\d+\b/g, '') +
-      (kind === 'error' ? ' text-rose-300' : kind === 'ok' ? ' text-emerald-300' : ' text-zinc-400');
-  }
-
-  // sendFileTo pushes the open file to peer p's machine.
-  async function sendFileTo(p) {
-    const f = files.open;
-    closeFileSend();
-    if (!f) return;
-    const seq = files.seq;
-    const label = p.name || p.host || p.id;
-    $('file-send').disabled = true;
-    fileSendNote(`// sending ${baseName(f.path)} to ${label}…`);
-    try {
-      const r = await api('POST', chatAPI('send'), { path: f.path, host: p.id });
-      if (seq === files.seq) fileSendNote(`sent to ${r.name || label}: ${r.path}`, 'ok');
-    } catch (e) {
-      if (seq === files.seq) fileSendNote(`sending to ${label} failed: ${e.message}`, 'error');
-    } finally {
-      if (seq === files.seq) $('file-send').disabled = false;
-    }
-  }
-
-  function downloadFile() {
-    const r = files.shown;
-    if (!r || r.big) return;
-    const url = URL.createObjectURL(new Blob([b64bytes(r.data)], { type: 'application/octet-stream' }));
-    const a = h('a', 'hidden');
-    a.href = url;
-    a.download = baseName(r.path);
-    document.body.append(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
-  }
-
-  // Tools whose output is the agent's or a page's text, in markdown.
-  const MD_OUTPUT = new Set(['Agent', 'Task', 'WebFetch', 'WebSearch']);
-
-  // inputView shows a call's input: a command, a diff, a file's content,
-  // a script, a plan, or JSON.
-  function inputView(e) {
-    const n = e.name;
-    if (n === 'ExitPlanMode') return mdView(e.detail, 'plan');
-    const o = { label: 'input', text: e.detail, wrap: true, max: true };
-    if (n === 'Bash' || n === 'shell') o.lang = 'sh';
-    else if (n === 'Edit' || n === 'MultiEdit' || n === 'edit') {
-      o.lang = 'diff';
-      o.inner = extLang((e.text || '').split(', ')[0]);
-    } else if (n === 'Write') o.lang = extLang(e.text);
-    else if (n === 'Workflow') o.lang = 'js';
-    else if (looksJSON(e.detail)) o.lang = 'json';
-    return codeView(o);
-  }
-
-  // outputView shows what a call returned: a file with its line numbers
-  // (Read), markdown, JSON, a diff, or text.
-  function outputView(t) {
-    const out = t.output;
-    const o = { label: t.error ? 'error' : 'output', text: out, error: t.error, wrap: true, max: true };
-    if (t.error) return codeView(o);
-    // MCP tools (Codex names them server.tool) often answer in markdown.
-    if (MD_OUTPUT.has(t.name) || (/^mcp__|\./.test(t.name || '') && looksMarkdown(out))) return mdView(out, o.label);
-    if (t.name === 'Read' && READ_LINE.test(out)) {
-      o.lang = extLang(t.call.text);
-      o.read = true;
-    } else if (looksJSON(out)) o.lang = 'json';
-    else if (looksDiff(out)) o.lang = 'diff';
-    return codeView(o);
-  }
-
-  const looksJSON = (s) => /^\s*[[{]\s*["[{\]}]/.test(s || '');
-  const looksDiff = (s) => /^diff --git /m.test(s) || (/^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@/m.test(s) && /^[+-]/m.test(s));
-  const looksMarkdown = (s) => /^#{1,6} \S/m.test(s) || /^\s*(?:```|~~~)/m.test(s) || /^\s*\|.*\|\s*\n\s*\|?[\s:|-]*-[\s:|-]*$/m.test(s) ||
-    (/\*\*[^*\n]+\*\*/.test(s) && /^\s*(?:[-*]|\d+\.) \S/m.test(s));
-
   // ---- the workflow a call started, and background tasks that ended
 
-  // workflowNode shows a Workflow call as the run it started, live from
-  // the Workflows tab's data: its phases, the agents at work, its totals,
-  // and the script. Its output names the run.
+  const WF = {
+    running: ['working', 'Running'],
+    completed: ['idle', 'Completed'],
+    done: ['idle', 'Done'],
+    failed: ['failed', 'Failed'],
+    stopped: ['exited', 'Stopped'],
+  };
+  const wfPill = (status) => {
+    const [cls, text] = WF[status] || WF.stopped;
+    return h('span', 'pill ' + cls, status === 'running' ? h('span', 'spin') : h('span', 'dot'), text);
+  };
+
+  // workflowNode shows a Workflow call as the run it started, live from the
+  // panel's data: its phases, the agents at work, its totals. Its output
+  // names the run.
   function workflowNode(f, e) {
     const [name, ...desc] = (e.text || '').split(': ');
-    const status = h('span', '');
-    const title = h('span', 'min-w-0 truncate font-mono text-[13px] font-semibold text-fuchsia-50', name || 'workflow');
-    const badge = h('span', 'flex shrink-0 items-center');
-    const time = h('span', 'flex items-center');
-    const about = h('p', 'mt-1 text-xs leading-relaxed text-zinc-400', desc.join(': '));
-    const live = h('div', 'min-w-0');
-    const open = h('button', 'touch:min-h-11 shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-fuchsia-300 hover:bg-fuchsia-400/10 hover:text-fuchsia-200 focus-visible:outline-2 focus-visible:outline-fuchsia-400', 'Open run ›');
-    open.type = 'button';
-    open.hidden = true;
-    const head = h('div', 'px-3.5 pb-2.5 pt-3',
-      h('div', 'flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1',
-        status, h('span', 'font-mono text-fuchsia-400/70', '⧉'), title, badge,
-        h('span', 'ml-auto flex shrink-0 items-center gap-2', time, open)),
-      about);
-    const card = h('div', 'min-w-0 overflow-hidden rounded-lg border border-fuchsia-400/20 bg-fuchsia-400/[0.03]', head, live);
-    timeTitle(head, e);
-    const t = { el: card, status, name: e.name, call: e, done: false, output: null, error: false, run: '' };
-    open.addEventListener('click', () => setView('wf', t.run));
-
+    const title = h('div', 'wf-name', name || 'workflow');
+    const kind = h('div', 'wf-kind', 'Workflow');
+    const pill = h('span', null);
+    const time = h('span', 'wf-time');
+    const about = h('p', 'wf-desc', desc.join(': '));
+    const live = h('div');
+    const out = h('div');
+    const card = h('section', { class: 'wf', 'aria-label': 'Workflow' },
+      h('div', 'wf-h', h('span', 'wf-ic', icon('workflow')), h('div', 'wf-title', title, kind), pill, time), about, live, out);
+    timeTitle(card, e);
+    const t = { el: card, name: e.name, call: e, done: false, output: null, error: false, run: '' };
     const paint = () => {
       const run = t.run && wf.runs.find((r) => r.id === t.run);
-      open.hidden = !t.run;
       if (!run) {
-        badge.replaceChildren(h('span', 'text-[11px] text-zinc-500', t.error ? '' : !t.done ? 'launching…' : t.run && wf.loaded ? 'starting…' : ''));
+        fill(kind, t.error ? 'Workflow · did not start' : !t.done ? 'Workflow · launching…' : 'Workflow · starting…');
         return;
       }
-      status.hidden = true; // the badge says it now
       title.textContent = run.name;
       if (run.description) about.textContent = run.description;
-      badge.replaceChildren(wfBadge(run.status));
-      time.replaceChildren(elapsed(run.startedMs, run.status === 'running' ? 0 : run.endedMs || run.updatedMs, 'font-mono text-xs tabular-nums text-zinc-400'));
-      live.replaceChildren(...runLive(run));
+      kind.textContent = run.status === 'running' && run.phase ? `Workflow · ${run.phase}` : 'Workflow';
+      fill(pill, wfPill(run.status));
+      fill(time, elapsed(run.startedMs, run.status === 'running' ? 0 : run.endedMs || run.updatedMs));
+      card.classList.toggle('done', run.status !== 'running');
+      fill(live, runLive(run));
     };
     t.onOutput = () => {
       const m = /\bRun ID: (wf_[\w-]+)/.exec(t.output);
       if (m) t.run = m[1];
       // A launch that failed, or said something else than expected.
-      if (t.error || !m) head.append(h('div', 'mt-2', codeView({ label: t.error ? 'error' : 'output', text: t.output || '(no output)', error: t.error, wrap: true, max: true })));
+      if (t.error || !m) fill(out, h('div', 'wf-out', codeView({ label: t.error ? 'Error' : 'Output', text: t.output || '(no output)', error: t.error, wrap: true, max: true })));
       paint();
     };
-
     if (e.detail) {
-      const script = h('details', 'group min-w-0 border-t border-fuchsia-400/10');
-      script.append(h('summary', 'touch:min-h-11 flex cursor-pointer list-none items-center gap-2 px-3.5 py-1.5 text-[11px] text-zinc-500 hover:bg-fuchsia-400/5 hover:text-zinc-300 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-fuchsia-400',
-        h('span', 'inline-block transition-transform group-open:rotate-90 motion-reduce:transition-none', '▸'),
-        'Script',
-        h('span', 'font-mono text-zinc-600', `${e.detail.split('\n').length} lines`)));
+      const script = h('details', 'wf-script', h('summary', 'act-sum', icon('chevron-right', 'chev'), 'Script', h('span', 'dur', `· ${e.detail.split('\n').length} lines`)));
       script.addEventListener('toggle', () => {
-        if (script.open && script.childElementCount === 1) script.append(h('div', 'px-3.5 pb-3', codeView({ text: e.detail, lang: 'js', tag: 'js', wrap: true, max: true })));
+        if (script.open && script.childElementCount === 1) script.append(h('div', 'wf-out', codeView({ text: e.detail, lang: 'js', tag: 'js', wrap: true, max: true })));
       });
-      card.append(script);
+      out.after(script);
     }
     trackTool(f, t, e);
     paint();
@@ -4770,84 +3453,113 @@
   // runLive is a run in the chat: its phases at a glance, the agents at
   // work (each opens its conversation), and its totals.
   function runLive(run) {
-    const out = [phaseStrip(run)];
     const busy = run.agents.filter((a) => a.status === 'running');
-    if (busy.length) {
-      const list = h('ul', 'flex min-w-0 flex-col px-2 pb-2');
-      for (const a of busy.slice(-3)) {
-        const b = h('button', 'touch:min-h-11 group flex w-full min-w-0 items-center gap-2 rounded px-1.5 py-1 text-left text-xs hover:bg-fuchsia-400/5 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-fuchsia-400',
-          h('span', 'flex w-3 shrink-0 justify-center', h('span', WF.running.dot)),
-          h('span', 'shrink-0 font-mono text-[11.5px] text-zinc-200', a.label || a.id),
-          h('span', 'min-w-0 flex-1 truncate text-zinc-500',
-            a.tool ? h('span', 'font-mono text-sky-300/80', a.tool + ' ') : null, a.activity || 'starting…'),
-          h('span', 'shrink-0 text-zinc-600 group-hover:text-zinc-300', '›'));
-        b.type = 'button';
-        b.addEventListener('click', () => openSub(run.id, a.id));
-        b.setAttribute('aria-label', `${a.label || a.id}, at work. Open its conversation`);
-        list.append(h('li', '', b));
-      }
-      if (busy.length > 3) list.append(h('li', 'py-0.5 pl-7 pr-1.5 text-[11px] text-zinc-600', `+${busy.length - 3} more at work`));
-      out.push(list);
-    }
-    const done = run.counts.done + run.counts.failed + run.counts.stopped;
-    out.push(h('div', 'flex flex-wrap gap-x-3 gap-y-0.5 border-t border-fuchsia-400/10 px-3.5 py-1.5 font-mono text-[11px] tabular-nums text-zinc-500',
-      h('span', '', `${done}/${run.agents.length} agents`),
-      run.counts.failed ? h('span', 'text-rose-300/80', `${run.counts.failed} failed`) : null,
-      h('span', '', `${run.toolUses} tool calls`),
-      h('span', '', `${fmtTokens(run.tokens)} tokens`),
-      h('span', 'ml-auto text-zinc-600', run.id)));
-    return out;
+    const fin = run.counts.done + run.counts.failed + run.counts.stopped;
+    return [
+      phaseStrip(run),
+      busy.length ? h('ul', 'wf-agents', busy.slice(-3).map((a) => h('li', null, wfAgentBtn(run, a))),
+        busy.length > 3 ? h('li', 'more-row', `+${busy.length - 3} more at work`) : null) : null,
+      h('div', 'wf-foot',
+        h('span', null, `${fin}/${run.agents.length} agents`),
+        run.counts.failed ? h('span', 'del', `${run.counts.failed} failed`) : null,
+        h('span', null, `${run.toolUses} tool calls`),
+        h('span', null, `${fmtTokens(run.tokens)} tokens`),
+        h('button', { type: 'button', class: 'btn ghost sm', onclick: () => openRun(run.id) }, 'Open run', icon('chevron-right', 'i-xs'))),
+    ];
   }
 
-  const TASK_END = {
-    completed: ['min-w-0 overflow-hidden rounded-lg border border-emerald-400/20 bg-emerald-400/[0.03]', 'shrink-0 text-[11px] font-semibold uppercase tracking-wider text-emerald-300/90', 'min-w-0 border-t border-emerald-400/15 px-3.5 py-2.5'],
-    failed: ['min-w-0 overflow-hidden rounded-lg border border-rose-500/30 bg-rose-500/[0.04]', 'shrink-0 text-[11px] font-semibold uppercase tracking-wider text-rose-300', 'min-w-0 border-t border-rose-500/20 px-3.5 py-2.5'],
-    stopped: ['min-w-0 overflow-hidden rounded-lg border border-ink-600 bg-ink-850/40', 'shrink-0 text-[11px] font-semibold uppercase tracking-wider text-zinc-400', 'min-w-0 border-t border-ink-700 px-3.5 py-2.5'],
-  };
+  // agentCallNode is an Agent call with the subagent it started, live from
+  // the panel's data: what it does now, a way to its conversation, and its
+  // report once it is done.
+  function agentCallNode(f, e) {
+    const status = h('span');
+    const what = h('span', 'what');
+    const open = h('button', { type: 'button', class: 'btn ghost sm', hidden: true }, 'Open', icon('chevron-right', 'i-xs'));
+    const report = h('div');
+    const card = h('div', 'sub-call', icon('bot'), h('div', 'grow', h('div', 'trunc', e.text || 'Subagent'), what), status, open);
+    const box = timeTitle(h('div', 'act', card, report), e);
+    const t = { el: box, name: e.name, call: e, done: false, output: null, error: false };
+    const find = () => {
+      let byLabel = null;
+      for (const run of wf.runs) {
+        if (!run.id.startsWith('agents-')) continue;
+        for (const a of run.agents) {
+          if (a.call && a.call === e.id) return { run, a };
+          if (!a.call && !byLabel && a.label && a.label === e.text) byLabel = { run, a };
+        }
+      }
+      return byLabel;
+    };
+    let shown = '';
+    t.paint = () => {
+      const m = find();
+      const sig = JSON.stringify([m && m.run.id, m && m.a.status, m && m.a.tool, m && m.a.activity, t.done, t.error]);
+      if (sig === shown) return;
+      shown = sig;
+      if (m) {
+        open.hidden = false;
+        open.onclick = () => openSub(m.run.id, m.a.id);
+        fill(status, wfPill(m.a.status));
+        fill(what, m.a.status === 'running' ? [m.a.tool ? h('b', null, m.a.tool + ' ') : null, m.a.activity || 'starting…'] : '');
+      } else {
+        fill(status, t.done ? wfPill(t.error ? 'failed' : 'done') : chat.feed.working() ? wfPill('running') : null);
+      }
+    };
+    t.onOutput = () => {
+      t.paint();
+      if (!t.output) return;
+      const d = h('details', null, h('summary', 'act-sum', icon('chevron-right', 'chev'), t.error ? 'The error' : 'Its report'));
+      d.addEventListener('toggle', () => {
+        if (d.open && d.childElementCount === 1) d.append(t.error ? codeView({ label: 'Error', text: t.output, error: true, wrap: true, max: true }) : mdView(t.output, 'Report'));
+      });
+      fill(report, d);
+    };
+    trackTool(f, t, e);
+    t.paint();
+    f.watch.add(t.paint);
+    return box;
+  }
 
   // taskEndNode shows that a background task ended: a workflow run, with
   // what it returned, or a background command or agent.
   function taskEndNode(f, e) {
     const st = e.error ? 'failed' : e.name === 'completed' ? 'completed' : 'stopped';
     const call = e.id ? f.tools.get(e.id) : null;
-    const runOf = () => (call && call.run && wf.runs.find((r) => r.id === call.run)) ||
-      wf.runs.find((r) => r.summary && r.summary === e.text);
+    const runOf = () => (call && call.run && wf.runs.find((r) => r.id === call.run)) || wf.runs.find((r) => r.summary && r.summary === e.text);
     if (!(call && call.name === 'Workflow') && !runOf() && !/^Dynamic workflow\b/.test(e.text || '')) return bgTaskNode(e, st);
-    const [boxCls, labelCls, bodyCls] = TASK_END[st];
-    const title = h('span', 'min-w-0 truncate font-mono text-[12.5px] font-semibold text-zinc-100');
-    const stats = h('span', 'flex items-center gap-1 font-mono text-[11px] tabular-nums text-zinc-500');
-    const open = h('button', 'touch:min-h-11 shrink-0 rounded px-1.5 py-0.5 text-[11px] font-medium text-fuchsia-300 hover:bg-fuchsia-400/10 hover:text-fuchsia-200 focus-visible:outline-2 focus-visible:outline-fuchsia-400', 'Open run ›');
-    open.type = 'button';
-    open.addEventListener('click', () => {
-      const run = runOf();
-      setView('wf', run ? run.id : '');
-    });
-    const head = h('div', 'flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 px-3.5 py-2',
-      h('span', wfStatus(st).dot), h('span', 'font-mono text-fuchsia-400/70', '⧉'),
-      h('span', labelCls, `workflow ${wfStatus(st).label}`), title,
-      h('span', 'ml-auto flex shrink-0 items-center gap-2', stats, open));
-    const part = h('div', bodyCls);
-    const box = timeTitle(h('div', boxCls, head, part), e);
+    const title = h('div', 'wf-name');
+    const kind = h('div', 'wf-kind');
+    const openBtn = h('button', { type: 'button', class: 'btn ghost sm', onclick: () => { const r = runOf(); openRun(r ? r.id : ''); } }, 'Open run', icon('chevron-right', 'i-xs'));
+    const part = h('div');
+    const box = timeTitle(h('section', { class: 'wf done' + (st === 'failed' ? ' failed' : ''), 'aria-label': 'Workflow ended' },
+      h('div', 'wf-h', h('span', 'wf-ic ' + (st === 'failed' ? 'bad' : 'ok'), icon(st === 'failed' ? 'alert' : 'check')), h('div', 'wf-title', title, kind), openBtn), part), e);
     let shown = null;
+    let folded = true;
     const paint = () => {
       const run = runOf();
-      title.textContent = run ? run.name : call ? (call.call.text || '').split(': ')[0] : (/"(.*)"/.exec(e.text || '') || [])[1] || '';
+      title.textContent = run ? run.name : call ? (call.call.text || '').split(': ')[0] : (/"(.*)"/.exec(e.text || '') || [])[1] || 'workflow';
       title.title = e.text || '';
-      open.hidden = !run;
-      if (run) stats.replaceChildren(`${run.agents.length} agents ·`, elapsed(run.startedMs, run.endedMs || run.updatedMs));
+      openBtn.hidden = !run;
+      kind.textContent = `Workflow ${WF[st][1].toLowerCase()}` + (run ? ` · ${plural(run.agents.length, 'agent')} · ${dur((run.endedMs || run.updatedMs) - run.startedMs)}` : '');
       // The notification cuts the result at 8000 characters; the run has
       // all of it.
       const result = (run && run.result) || e.output || '';
       if (result === shown) return;
       shown = result;
-      part.hidden = !result && st !== 'failed';
       if (!result) {
-        part.replaceChildren(h('pre', 'whitespace-pre-wrap break-words font-mono text-[11.5px] leading-snug text-rose-100/90', e.text || ''));
+        fill(part, st === 'failed' ? h('pre', 'result-err', e.text || '') : null);
         return;
       }
-      const body = h('div', 'min-w-0', resultNode(result));
-      part.replaceChildren(body);
-      foldLong(part, body, result, 'max-h-60', 'touch:min-h-11 mt-1.5 rounded px-1.5 py-0.5 text-xs font-medium text-emerald-300 hover:bg-emerald-400/10 hover:text-emerald-200 focus-visible:outline-2 focus-visible:outline-emerald-400');
+      const res = h('div', 'result' + (folded ? ' folded' : ''), resultNode(result));
+      const long = result.length > 600 || result.split('\n').length > 8;
+      const more = long ? h('div', 'result-more', h('button', { type: 'button', class: 'btn ghost sm', 'aria-expanded': String(!folded), onclick: (ev) => {
+        folded = !folded;
+        res.classList.toggle('folded', folded);
+        ev.currentTarget.textContent = folded ? 'Show the whole result' : 'Show less';
+        ev.currentTarget.setAttribute('aria-expanded', String(!folded));
+      } }, folded ? 'Show the whole result' : 'Show less')) : null;
+      if (!long) res.classList.remove('folded');
+      fill(part, res, more);
     };
     paint();
     f.watch.add(paint);
@@ -4857,62 +3569,67 @@
   // bgTaskNode shows a background command or agent that ended, and what it
   // returned (an agent's report) when opened.
   function bgTaskNode(e, st) {
-    const text = h('span', 'min-w-0 flex-1 break-words', e.text || '');
-    if (!e.output) {
-      return timeTitle(h('div', 'flex min-w-0 items-center gap-2 rounded-md border border-ink-700/70 bg-ink-850/30 px-2.5 py-1.5 text-xs text-zinc-400', h('span', wfStatus(st).dot), text), e);
-    }
-    const d = h('details', 'group min-w-0 rounded-md border border-ink-700/70 bg-ink-850/30 open:bg-ink-850');
-    d.append(timeTitle(h('summary', 'touch:min-h-11 flex cursor-pointer list-none items-center gap-2 rounded-md px-2.5 py-1.5 text-xs text-zinc-400 hover:bg-ink-800/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-emerald-400',
-      h('span', wfStatus(st).dot), text,
-      h('span', 'shrink-0 text-[10px] font-medium uppercase tracking-wider text-zinc-600 group-open:hidden', 'result')), e));
+    const dot = h('span', 'dot' + (st === 'failed' ? ' bad' : st === 'stopped' ? ' off' : ''));
+    if (!e.output) return timeTitle(h('div', 'bg-task', dot, h('span', null, e.text || '')), e);
+    const d = h('details', null, h('summary', null, e.text || 'A background task ended'));
     d.addEventListener('toggle', () => {
-      if (d.open && d.childElementCount === 1) d.append(h('div', 'border-t border-ink-700 px-2.5 py-2', mdView(e.output, 'result')));
+      if (d.open && d.childElementCount === 1) d.append(mdView(e.output, 'Result'));
     });
-    return d;
+    return timeTitle(h('div', 'bg-task', dot, d), e);
   }
 
-  // foldLong caps body, a part of box, at cls (a max height) when text is
-  // long, with a button (of classes btn) to show it all.
-  function foldLong(box, body, text, cls, btn) {
-    if (text.length <= 600 && text.split('\n').length <= 8) return;
-    body.classList.add(cls, 'overflow-hidden');
-    const more = h('button', btn, 'Show all');
-    more.type = 'button';
-    more.setAttribute('aria-expanded', 'false');
-    more.addEventListener('click', () => {
-      const folded = body.classList.toggle(cls);
-      body.classList.toggle('overflow-hidden', folded);
-      more.textContent = folded ? 'Show all' : 'Show less';
-      more.setAttribute('aria-expanded', String(!folded));
-    });
-    box.append(more);
+  // taskNode shows what a workflow agent was told: written by the script,
+  // often pages long, so folded to its start.
+  function taskNode(e) {
+    const text = e.text || '';
+    const body = h('div', 'md', h('p', null, text));
+    const box = h('div', 'answered', h('div', 'answered-l', 'Task'), body);
+    if (text.length > 600 || text.split('\n').length > 8) {
+      body.classList.add('folded-task');
+      box.append(h('button', { type: 'button', class: 'btn ghost sm', onclick: (ev) => {
+        ev.currentTarget.textContent = body.classList.toggle('folded-task') ? 'Show all' : 'Show less';
+      } }, 'Show all'));
+    }
+    return timeTitle(box, e);
   }
 
-  // ---- code
+  // resultNode draws a run's result: JSON (mostly objects and lists of
+  // them, with markdown text) as labelled parts, text as markdown, and JSON
+  // cut short as JSON.
+  function resultNode(text) {
+    try {
+      return resultValue(JSON.parse(text), 0);
+    } catch {
+      return looksJSON(text) ? codeView({ text, lang: 'json', tag: 'json', wrap: true }) : md(text);
+    }
+  }
+
+  function resultValue(x, depth) {
+    if (typeof x === 'string') return md(x);
+    if (x === null || typeof x !== 'object') return h('div', 'mono', String(x));
+    if (depth > 2) return codeView({ text: JSON.stringify(x, null, 2), lang: 'json', tag: 'json', wrap: true });
+    const box = h('div', depth ? 'res-part nested' : 'res-part');
+    const labelOf = (v, i) => {
+      const t = v && typeof v === 'object' && !Array.isArray(v) && [v.title, v.name, v.id, v.page, v.key].find((s) => typeof s === 'string' && s);
+      return t || String(i + 1);
+    };
+    const parts = Array.isArray(x) ? x.map((v, i) => [labelOf(v, i), v]) : Object.entries(x);
+    if (!parts.length) box.append(h('p', 'note-line', Array.isArray(x) ? 'An empty list' : 'Empty'));
+    for (const [k, v] of parts) box.append(h('div', null, h('div', 'res-key', k), resultValue(v, depth + 1)));
+    return box;
+  }
+
+  // ---------------------------------------------------------------- code
 
   // A clipped text ends with this note (transcript.Clip).
   const CLIP = /\n… \((\d+) more bytes\)$/;
   // A line of a Read output: its number, then a tab.
   const READ_LINE = /^ *(\d+)(?:\t|→)/;
 
-  const fmtBytes = (n) => (n < 1024 ? `${n} bytes` : `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`);
-
-  // codeBar is the bar over code: a label (input, output, error) or a tag
-  // (the language a fence names), and a button to copy raw.
-  function codeBar(o, raw) {
-    const copy = h('button', 'touch:min-h-11 ml-auto shrink-0 rounded px-1.5 py-0.5 text-[10.5px] font-medium text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-emerald-400', 'Copy');
-    copy.type = 'button';
-    copy.addEventListener('click', () => copyRaw(raw, copy));
-    return h('div', 'flex min-w-0 items-center gap-2 border-b border-ink-700/70 bg-ink-900/70 py-0.5 pl-2.5 pr-1',
-      o.label ? h('span', o.error ? 'text-[10px] font-medium uppercase tracking-wider text-rose-300/80' : 'text-[10px] font-medium uppercase tracking-wider text-zinc-500', o.label) : null,
-      o.tag ? h('span', 'font-mono text-[10.5px] text-zinc-500', o.tag) : null,
-      copy);
-  }
-
-  // codeView frames o.text as code, highlighted as o.lang ('diff': a
-  // diff, its code highlighted as o.inner). o.read shows the line numbers
-  // of a Read output in a gutter; o.wrap wraps long lines instead of
-  // scrolling them; o.max caps the height; o.error tints it.
+  // codeView frames o.text as code, highlighted as o.lang ('diff': a diff,
+  // its code highlighted as o.inner). o.read shows the line numbers of a
+  // Read output in a gutter; o.wrap wraps long lines; o.max caps the
+  // height; o.error tints it; o.label or o.tag heads it.
   function codeView(o) {
     let text = o.text || '';
     const clip = CLIP.exec(text);
@@ -4922,24 +3639,21 @@
     const rows = o.lang === 'diff' || o.read;
     if (o.lang === 'diff') body = diffRows(text, o.inner || '');
     else if (o.read) [body, raw] = readRows(text, o.lang);
-    else body = hlInto(h('code', ''), text, o.lang);
-    const cls = ['font-mono leading-snug text-zinc-300', o.max ? 'max-h-80 overflow-auto text-[11.5px]' : 'overflow-x-auto text-[12px]'];
-    if (rows) cls.push('py-1.5');
-    else cls.push(o.wrap ? 'whitespace-pre-wrap break-words px-2.5 py-1.5' : 'px-3 py-2');
-    return h('div', o.error ? 'min-w-0 overflow-hidden rounded-md border border-rose-500/30 bg-ink-950' : 'min-w-0 overflow-hidden rounded-md border border-ink-700 bg-ink-950',
-      codeBar(o, raw),
-      h('pre', cls.join(' '), body),
-      clip ? h('div', 'border-t border-ink-700/70 px-2.5 py-1 font-mono text-[10.5px] text-zinc-600', `… ${fmtBytes(Number(clip[1]))} more not shown`) : null);
+    else body = hlInto(h('code'), text, langKey(o.lang));
+    const copy = h('button', { type: 'button', class: 'btn' }, 'Copy');
+    copy.addEventListener('click', () => copyText(raw, copy));
+    return h('div', 'codev' + (o.error ? ' err' : ''),
+      h('div', 'codev-h', o.label ? h('span', 'lbl', o.label) : null, o.tag ? h('span', 'tag', o.tag) : null, copy),
+      h('pre', [rows ? 'rows' : '', !rows && o.wrap ? 'wrap' : '', o.max ? 'capped' : ''].filter(Boolean).join(' '), body),
+      clip ? h('div', 'clipped', `… ${fmtBytes(Number(clip[1]))} more not shown`) : null);
   }
 
   // mdView frames markdown text, rendered.
-  function mdView(text, label) {
-    return h('div', 'min-w-0 overflow-hidden rounded-md border border-ink-700 bg-ink-900/40',
-      codeBar({ label }, text),
-      h('div', 'max-h-96 overflow-y-auto px-3 py-2', md(text)));
+  function mdView(text, lbl) {
+    const copy = h('button', { type: 'button', class: 'btn' }, 'Copy');
+    copy.addEventListener('click', () => copyText(text, copy));
+    return h('div', 'codev', h('div', 'codev-h', lbl ? h('span', 'lbl', lbl) : null, copy), h('div', 'codev-md', md(text)));
   }
-
-  const GUTTER = ['w-7', 'w-7', 'w-7', 'w-9', 'w-11', 'w-13'];
 
   // readRows shows a Read output ("N\tline" a line) with the numbers in a
   // gutter. It returns the rows and the file's text without them.
@@ -4951,35 +3665,26 @@
       return m ? l.slice(m[0].length) : l;
     });
     const raw = code.join('\n');
-    const w = GUTTER[Math.min(5, nums.reduce((n, s) => Math.max(n, s.length), 0))];
-    const box = h('div', '');
-    hlLines(raw, lang).forEach((nodes, i) => box.append(h('div', 'flex min-w-0 px-1.5',
-      h('span', 'shrink-0 select-none pr-3 text-right tabular-nums text-zinc-600 ' + w, nums[i]),
-      h('span', 'min-w-0 flex-1 whitespace-pre-wrap break-words', ...(nodes.length ? nodes : [' '])))));
+    const box = h('div');
+    hlLines(raw, langKey(lang)).forEach((nodes, i) => box.append(h('div', 'gl', h('span', 'ln', nums[i]), h('span', 'lc', nodes.length ? nodes : ' '))));
     return [box, raw];
   }
 
-  const DIFF_ROW = {
-    '+': ['flex min-w-0 bg-emerald-400/10 px-1.5', 'w-4 shrink-0 select-none text-emerald-400'],
-    '-': ['flex min-w-0 bg-rose-500/10 px-1.5', 'w-4 shrink-0 select-none text-rose-400'],
-    ' ': ['flex min-w-0 px-1.5', 'w-4 shrink-0 select-none'],
-  };
   // A diff's file header: git's, or Codex's "M path" (A, M, D).
   const DIFF_FILE = /^(?:diff --git |index [\da-f]+\.\.|--- (?:a\/|\/dev\/null)|\+\+\+ (?:b\/|\/dev\/null)|[^+\- @\\])/;
 
-  // diffRows shows a diff: added and removed lines marked and tinted,
-  // their code highlighted as lang, or as the file a header names.
+  // diffRows shows a diff: added and removed lines marked and tinted, their
+  // code highlighted as lang, or as the file a header names.
   function diffRows(text, lang) {
-    const box = h('div', '');
-    let cur = lang;
+    const box = h('div');
+    let cur = langKey(lang);
     let code = []; // [mark, line] of the current hunk
     const flush = () => {
       if (!code.length) return;
       const lines = hlLines(code.map((c) => c[1]).join('\n'), cur);
       code.forEach(([mark], i) => {
-        const [row, sign] = DIFF_ROW[mark];
-        box.append(h('div', row, h('span', sign, mark.trim()),
-          h('span', 'min-w-0 flex-1 whitespace-pre-wrap break-words', ...(lines[i].length ? lines[i] : [' ']))));
+        box.append(h('div', 'dr' + (mark === '+' ? ' add' : mark === '-' ? ' del' : ''),
+          h('span', 'sg', mark === '-' ? '−' : mark.trim()), h('span', 'lc', lines[i].length ? lines[i] : ' ')));
       });
       code = [];
     };
@@ -4987,13 +3692,11 @@
       if (l && DIFF_FILE.test(l)) {
         flush();
         const p = /^diff --git a\/.* b\/(.*)$/.exec(l) || /^\+\+\+ b\/(.*)$/.exec(l) || /^[AMD] (?:.* -> )?(\S.*)$/.exec(l);
-        if (p) cur = extLang(p[1]) || lang;
-        // A file starts at git's "diff --git" or Codex's "M path"; git's
-        // index and ---/+++ lines follow.
-        box.append(h('div', /^(?:diff --git |[AMD] )/.test(l) ? 'px-1.5 pt-1.5 font-semibold text-zinc-100 first:pt-0' : 'px-1.5 text-zinc-500', l));
+        if (p) cur = extLang(p[1]) || langKey(lang);
+        box.append(h('div', /^(?:diff --git |[AMD] )/.test(l) ? 'dr-file' : 'dr-meta', l));
       } else if (l.startsWith('@@') || l.startsWith('\\')) {
         flush();
-        box.append(h('div', 'px-1.5 text-cyan-300/80', l));
+        box.append(h('div', 'dr-hunk', l));
       } else {
         const mark = l[0] === '+' || l[0] === '-' ? l[0] : ' ';
         code.push([mark, l[0] === mark ? l.slice(1) : l]);
@@ -5003,53 +3706,14 @@
     return box;
   }
 
-  // copyRaw copies text. Plain HTTP has no Clipboard API: then a hidden
-  // textarea and the old copy command (in the dialog, which makes the rest
-  // of the page inert).
-  async function copyRaw(text, btn) {
-    let ok = false;
-    try {
-      await navigator.clipboard.writeText(text);
-      ok = true;
-    } catch (e) {
-      const ta = h('textarea', 'fixed left-0 top-0 size-px opacity-0');
-      ta.value = text;
-      ta.readOnly = true;
-      (btn.closest('dialog') || document.body).append(ta);
-      ta.select();
-      try {
-        ok = document.execCommand('copy');
-      } catch (e2) {
-        ok = false;
-      }
-      ta.remove();
-      btn.focus();
-    }
-    btn.textContent = ok ? 'Copied' : 'Copy failed';
-    setTimeout(() => {
-      btn.textContent = 'Copy';
-    }, 1500);
-  }
-
   // ---- highlighting
   //
   // A tokenizer per language family (comments, strings, numbers, keywords,
   // a few more), not a parser: enough to read code by.
 
-  const TOK = {
-    c: 'italic text-zinc-500', // comment
-    s: 'text-emerald-300', // string
-    n: 'text-amber-300', // number, constant
-    k: 'text-violet-300', // keyword
-    t: 'text-yellow-200', // type
-    f: 'text-sky-300', // function, command
-    p: 'text-rose-300', // key, property, tag, variable
-    m: 'text-cyan-300', // meta: decorator, flag, section, heading
-  };
-
   const words = (s) => new Set(s.split(' '));
 
-  // Parts of the patterns. Every group is (?:…): hl numbers the parts.
+  // Parts of the patterns. Every group is (?:…): tokens numbers the parts.
   const P = {
     slash: String.raw`\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|(?![\s\S]))`,
     hash: String.raw`(?:^|[ \t])#[^\n]*`,
@@ -5087,8 +3751,8 @@
     sql: words('int integer bigint smallint serial bigserial text varchar char boolean bool date time timestamp timestamptz uuid json jsonb real numeric decimal float double'),
   };
 
-  // tokenizer builds one from [kind, pattern] parts, tried in order at
-  // each position. Kind w is a word (see wordKind), x a word after a lead
+  // tokenizer builds one from [kind, pattern] parts, tried in order at each
+  // position. Kind w is a word (see wordKind), x a word after a lead
   // (o.lead; the word is o.xkind, or a command), g an HTML tag.
   function tokenizer(parts, o) {
     return Object.assign({
@@ -5237,7 +3901,7 @@
 
   // hlInto appends text to el, highlighted as lang.
   function hlInto(el, text, name) {
-    for (const [s, k] of tokens(text, name)) el.append(k ? h('span', TOK[k], s) : s);
+    for (const [s, k] of tokens(text, name)) el.append(k ? h('span', 'hl-' + k, s) : s);
     return el;
   }
 
@@ -5247,7 +3911,7 @@
     for (const [s, k] of tokens(text, name)) {
       s.split('\n').forEach((part, i) => {
         if (i) lines.push([]);
-        if (part) lines[lines.length - 1].push(k ? h('span', TOK[k], part) : part);
+        if (part) lines[lines.length - 1].push(k ? h('span', 'hl-' + k, part) : part);
       });
     }
     return lines;
@@ -5257,18 +3921,17 @@
 
   const MD_ITEM = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
   const MD_TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
-  const MD_INDENT = ['', 'pl-5', 'pl-10', 'pl-14'];
 
   // md renders the agent's markdown: headings, paragraphs, lists, quotes,
   // tables, rules and fenced code (highlighted), with inline code, bold,
   // italics and links. Nothing is parsed as HTML.
   function md(text) {
-    const box = h('div', 'flex min-w-0 flex-col gap-2 text-[13.5px] leading-relaxed text-zinc-200');
+    const box = h('div', 'md');
     const lines = text.split('\n');
     let para = [];
-    let list = null;
+    let list = null; // {el, ordered, depth}
     const flush = () => {
-      if (para.length) box.append(inline(h('p', 'whitespace-pre-wrap break-words'), para.join('\n')));
+      if (para.length) box.append(inline(h('p'), para.join('\n')));
       para = [];
     };
     const end = () => {
@@ -5285,8 +3948,7 @@
         const code = [];
         for (i++; i < lines.length && !close.test(lines[i]); i++) code.push(lines[i].replace(indent, ''));
         const src = code.join('\n');
-        const k = langKey(fence[3]) || (looksJSON(src) ? 'json' : '');
-        box.append(codeView({ text: src, lang: k, tag: fence[3] || 'text' }));
+        box.append(codeView({ text: src, lang: langKey(fence[3]) || (looksJSON(src) ? 'json' : ''), tag: fence[3] || 'text' }));
         continue;
       }
       if (!l.trim()) {
@@ -5296,12 +3958,12 @@
       const head = /^\s{0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/.exec(l);
       if (head) {
         end();
-        box.append(inline(h('div', head[1].length <= 2 ? 'pt-1 text-[15px] font-semibold text-zinc-50' : 'pt-1 font-semibold text-zinc-50'), head[2]));
+        box.append(inline(h('h' + Math.min(6, head[1].length + 2)), head[2]));
         continue;
       }
       if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(l)) {
         end();
-        box.append(h('hr', 'my-1 border-ink-700'));
+        box.append(h('hr'));
         continue;
       }
       if (l.includes('|') && i + 1 < lines.length && lines[i + 1].includes('|') && MD_TABLE_SEP.test(lines[i + 1])) {
@@ -5318,22 +3980,27 @@
         const quote = [];
         for (; i < lines.length && /^\s{0,3}>/.test(lines[i]); i++) quote.push(lines[i].replace(/^\s{0,3}>\s?/, ''));
         i--;
-        box.append(h('blockquote', 'border-l-2 border-ink-600 pl-3 text-zinc-400', md(quote.join('\n'))));
+        box.append(h('blockquote', null, md(quote.join('\n'))));
         continue;
       }
       const item = MD_ITEM.exec(l);
       if (item) {
         flush();
-        if (!list) {
-          list = h('ul', 'flex min-w-0 flex-col gap-1');
-          box.append(list);
+        const ordered = /\d/.test(item[2]);
+        const depth = Math.min(3, Math.floor(item[1].replace(/\t/g, '    ').length / 2));
+        if (!list || list.ordered !== ordered || list.depth !== depth) {
+          const el = h(ordered ? 'ol' : 'ul');
+          if (ordered && parseInt(item[2], 10) > 1) el.start = parseInt(item[2], 10);
+          if (depth) el.style.marginLeft = depth * 18 + 'px';
+          list = { el, ordered, depth };
+          box.append(el);
         }
-        list.append(mdItem(item));
+        list.el.append(mdItem(item[3]));
         continue;
       }
       if (list && /^\s{2,}\S/.test(l)) {
         // More of the item above.
-        inline(list.lastElementChild.lastElementChild, '\n' + l.trim());
+        inline(list.el.lastElementChild, '\n' + l.trim());
         continue;
       }
       list = null;
@@ -5343,35 +4010,22 @@
     return box;
   }
 
-  function mdItem(m) {
-    const depth = Math.min(3, Math.floor(m[1].replace(/\t/g, '    ').length / 2));
-    const num = /\d/.test(m[2]);
-    let marker = num ? m[2] : depth ? '◦' : '•';
-    let text = m[3];
+  function mdItem(text) {
     const task = /^\[([ xX])\]\s+/.exec(text);
-    if (task) {
-      marker = task[1] === ' ' ? '☐' : '☑';
-      text = text.slice(task[0].length);
-    }
-    return h('li', 'flex min-w-0 gap-2 ' + MD_INDENT[depth],
-      h('span', num && !task ? 'min-w-5 shrink-0 select-none text-right tabular-nums text-zinc-500' : 'shrink-0 select-none text-zinc-500', marker),
-      inline(h('span', 'min-w-0 flex-1 whitespace-pre-wrap break-words'), text));
+    if (!task) return inline(h('li'), text);
+    return inline(h('li', { class: 'task', 'data-mark': task[1] === ' ' ? '☐' : '☑' }), text.slice(task[0].length));
   }
 
-  // mdTable renders a table: its head row, the separator (which aligns
-  // the columns) and the body rows.
+  // mdTable renders a table: its head row, the separator (which aligns the
+  // columns) and the body rows.
   function mdTable(head, sep, rows) {
     const align = splitRow(sep).map((c) => {
       const s = c.trim();
-      return !s.endsWith(':') ? '' : s.startsWith(':') ? 'text-center' : 'text-right';
+      return !s.endsWith(':') ? '' : s.startsWith(':') ? 'c' : 'n';
     });
-    const th = splitRow(head).map((c, j) => inline(h('th', 'border-b border-ink-600 px-2.5 py-1.5 font-semibold text-zinc-100 ' + (align[j] || 'text-left')), c.trim()));
-    const trs = rows.map((r) => h('tr', 'border-t border-ink-700/70 first:border-t-0',
-      ...splitRow(r).map((c, j) => inline(h('td', 'px-2.5 py-1.5 align-top text-zinc-300 ' + (align[j] || '')), c.trim()))));
-    return h('div', 'min-w-0 overflow-x-auto rounded-md border border-ink-700',
-      h('table', 'w-full border-collapse text-[12.5px] leading-snug',
-        h('thead', 'bg-ink-850', h('tr', '', ...th)),
-        h('tbody', '', ...trs)));
+    return h('div', 'tbl', h('table', null,
+      h('thead', null, h('tr', null, splitRow(head).map((c, j) => inline(h('th', align[j] || null), c.trim())))),
+      h('tbody', null, rows.map((r) => h('tr', null, splitRow(r).map((c, j) => inline(h('td', align[j] || null), c.trim())))))));
   }
 
   // splitRow splits a table row into cells: on | outside `code`, not \|.
@@ -5429,1488 +4083,85 @@
 
   function inlineNode(m) {
     const t = m[0];
-    if (t[0] === '`') return h('code', 'rounded bg-ink-800 px-1 py-px font-mono text-[12px] text-emerald-200/90', t.slice(1, -1));
+    if (t[0] === '`') return h('code', null, t.slice(1, -1));
     if (m[1] !== undefined) return link(m[2], m[1]);
     if (t.startsWith('http')) return link(t, t);
-    if (t.startsWith('**') || t.startsWith('__')) return inline(h('strong', 'font-semibold text-zinc-50'), t.slice(2, -2));
-    if (t.startsWith('~~')) return inline(h('del', 'text-zinc-500'), t.slice(2, -2));
-    return inline(h('em', 'italic'), t.slice(1, -1));
+    if (t.startsWith('**') || t.startsWith('__')) return inline(h('strong'), t.slice(2, -2));
+    if (t.startsWith('~~')) return inline(h('del'), t.slice(2, -2));
+    return inline(h('em'), t.slice(1, -1));
   }
 
   function link(href, text) {
-    const a = h('a', 'break-all text-sky-300 underline decoration-sky-300/30 underline-offset-2 hover:decoration-sky-300', text);
-    a.href = href;
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
-    return a;
+    return h('a', { href, target: '_blank', rel: 'noopener noreferrer' }, text);
   }
 
-  function renderChatHead() {
+  // -------------------------------------------------------------- the panel
+  //
+  // Beside the chat (over it below 1200 px, a screen of its own on phones):
+  // the session's workflow runs and their agents' conversations, the files
+  // it wrote and a search through its folder, the images of its
+  // conversation, and its terminal.
+
+  const insp = { open: false, tab: '', panes: null };
+
+  // inspTabs are the tabs the open session has.
+  function inspTabs() {
+    if (!chat.open) return [];
+    const out = [];
+    if (wf.runs.length || wf.hint) out.push({ id: 'workflow', text: 'Workflow', icon: 'workflow', extra: wf.runs.some((r) => r.status === 'running') ? h('span', 'spin') : wf.runs.length ? h('span', 'n', String(wf.runs.length)) : null });
+    if (!files.missing && (files.dir || files.total)) out.push({ id: 'files', text: 'Files', icon: 'files', extra: files.total ? h('span', 'n', String(files.total)) : null });
+    if (media.items.length) out.push({ id: 'media', text: 'Media', icon: 'image', extra: h('span', 'n', String(media.items.length)) });
+    if (chatLive()) out.push({ id: 'terminal', text: 'Terminal', icon: 'terminal', extra: null });
+    return out;
+  }
+
+  function openInsp(tab) {
     if (!chat.open) return;
-    const a = chat.agent || { id: chat.id, name: chat.id, state: 'unspecified' };
-    $('chat-h').textContent = a.name || a.id;
-    const badges = [stateBadge(a)];
-    if (chat.host || S.remote.size) badges.push(hostChip(chat.host));
-    if (a.adapter) badges.push(chip(a.adapter));
-    if (a.sandbox === 'docker') badges.push(chip('docker', 'inline-flex items-center rounded border border-cyan-500/30 bg-cyan-500/10 px-1.5 py-px font-mono text-[11px] text-cyan-300'));
-    $('chat-badges').replaceChildren(...badges);
-    const sub = $('chat-sub');
-    sub.replaceChildren();
-    if (a.root) sub.append(h('span', 'text-zinc-400', a.root), h('span', 'text-zinc-600', ' : '));
-    sub.append(shortPath(a.path || a.cwd || ''));
-    if (a.branch) sub.append(h('span', 'text-zinc-600', '  ⎇ '), h('span', 'text-violet-300/80', a.branch));
-    sub.title = a.cwd || a.path || '';
-    $('chat-note').hidden = !a.note;
-    $('chat-note').replaceChildren(...(a.note ? [noteLine(chat.host, a)] : []));
-    $('chat-note-btn').hidden = !chat.agent || !!a.note;
-
-    const det = $('chat-detail');
-    if (askShown()) {
-      det.hidden = true; // the form says it
-    } else if (a.usageLimit && !isFinished(a)) {
-      det.hidden = false;
-      det.replaceChildren(...limitDetail(a.usageLimit));
-    } else if (a.state === 'needs_input') {
-      det.hidden = false;
-      det.replaceChildren(h('span', 'font-semibold', 'Needs input'), a.stateDetail ? ': ' + a.stateDetail : '',
-        h('span', 'text-amber-200/60', ' · answer on the screen below with the keys'));
-    } else if (isFinished(a) && a.stateDetail) {
-      det.hidden = false;
-      det.replaceChildren(h('span', 'text-zinc-400', 'Session ended: ' + a.stateDetail));
-    } else {
-      det.hidden = true;
-    }
-    renderChatGit(a);
-    renderChatPulls(a);
-    renderChatStop();
-  }
-
-  // renderChatPulls draws the pull requests the session's agent created,
-  // newest first, with a button to merge an open one: a first click arms
-  // it, a second within prArmFor merges.
-  const prArmFor = 5000;
-  function renderChatPulls(a) {
-    const box = $('chat-prs');
-    const prs = (a.pullRequests || []).slice().reverse();
-    box.hidden = !prs.length;
-    box.replaceChildren(...prs.map((p) => prLine(p)));
-    renderChatRepo(a);
-  }
-
-  // prLine is a pull request's row: a merged or closed one in a line, an
-  // open one with its facts and the buttons to merge it.
-  function prLine(p) {
-    const ui = chat.prUI.get(p.url) || {};
-    const [word, color] = prStatus(p);
-    const pill = h('span', 'inline-flex shrink-0 items-center rounded border px-1.5 py-px font-mono text-[11px] ' + color, word);
-    const title = link(p.url, '');
-    title.className = 'min-w-0 truncate text-zinc-100 hover:underline';
-    title.append(h('span', 'font-mono text-zinc-400', `${p.repo}#${p.number}`), p.title ? '  ' + p.title : '');
-    title.title = prTitle(p);
-    if (!prOpen(p)) {
-      return h('div', 'flex min-w-0 items-center gap-2 py-1.5', pill, title,
-        p.state === 'merged' && p.mergedAtMs ? relTime(p.mergedAtMs, '', 'ml-auto shrink-0 font-mono text-[11px] tabular-nums text-zinc-600') : null);
-    }
-    const facts = [];
-    if (p.changedFiles || p.additions || p.deletions) {
-      facts.push(h('span', 'font-mono tabular-nums', h('span', 'text-emerald-300/80', '+' + p.additions), ' ', h('span', 'text-rose-300/80', '−' + p.deletions),
-        h('span', 'text-zinc-500', ` · ${p.changedFiles} file${p.changedFiles === 1 ? '' : 's'}`)));
-    }
-    if (p.headBranch) facts.push(h('span', 'font-mono text-violet-300/70', `${p.headBranch} → ${p.baseBranch}`));
-    if (p.state === 'open') {
-      if (p.checks === 'passing') facts.push(h('span', 'text-emerald-300/80', '✓ checks pass'));
-      if (p.checks === 'failing') facts.push(h('span', 'text-rose-300', '✗ checks fail'));
-      if (p.checks === 'pending') facts.push(h('span', 'text-amber-200/80', '● checks running'));
-      if (p.reviewDecision === 'approved') facts.push(h('span', 'text-emerald-300/80', 'approved'));
-      if (p.reviewDecision === 'changes_requested') facts.push(h('span', 'text-rose-300', 'changes requested'));
-      if (p.reviewDecision === 'review_required') facts.push(h('span', 'text-amber-200/80', 'review required'));
-    }
-    if (p.state === 'merged' && p.mergedAtMs) facts.push(relTime(p.mergedAtMs, 'merged ', 'font-mono text-violet-300/70'));
-    if (p.detail) facts.push(h('span', 'text-amber-200/80', p.detail));
-    const info = h('div', 'flex min-w-0 flex-1 basis-full flex-col gap-0.5 sm:basis-0',
-      h('div', 'flex min-w-0 items-center gap-2', pill, title),
-      facts.length ? h('div', 'flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-zinc-500', ...facts) : null);
-
-    const row = h('div', 'flex flex-wrap items-center gap-x-3 gap-y-2 py-1.5', info);
-    if (p.state !== 'open') return row;
-
-    const btn = 'touch:min-h-11 rounded-md border px-2 py-1 text-xs font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 disabled:opacity-50';
-    const acts = h('div', 'flex shrink-0 flex-wrap items-center gap-2 max-sm:ml-auto');
-    const methods = p.mergeMethods && p.mergeMethods.length ? p.mergeMethods : ['squash', 'merge', 'rebase'];
-    const method = methods.includes(ui.method) ? ui.method : methods[0];
-    if (methods.length > 1) {
-      const sel = h('select', 'touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-1.5 py-1 text-xs text-zinc-300 focus-visible:outline-2 focus-visible:outline-emerald-400');
-      sel.setAttribute('aria-label', 'Merge method');
-      for (const m of methods) {
-        const o = h('option', '', m);
-        o.value = m;
-        o.selected = m === method;
-        sel.append(o);
-      }
-      sel.disabled = !!ui.busy;
-      sel.addEventListener('change', () => chat.prUI.set(p.url, { ...ui, method: sel.value, armed: 0 }));
-      acts.append(sel);
-    }
-    const del = h('input', 'size-3.5 accent-emerald-500');
-    del.type = 'checkbox';
-    del.checked = !!ui.deleteBranch;
-    del.disabled = !!ui.busy;
-    del.addEventListener('change', () => chat.prUI.set(p.url, { ...chat.prUI.get(p.url), deleteBranch: del.checked }));
-    acts.append(h('label', 'touch:min-h-11 inline-flex cursor-pointer items-center gap-1.5 text-xs text-zinc-400', del, 'delete branch'));
-
-    const armed = ui.armed && Date.now() - ui.armed < prArmFor;
-    const merge = h('button', btn + (armed
-      ? ' border-emerald-400 bg-emerald-500 text-ink-950 hover:bg-emerald-400'
-      : ' border-emerald-400/40 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20'),
-    ui.busy ? 'Merging…' : armed ? `Confirm ${method} merge` : 'Merge');
-    merge.type = 'button';
-    merge.disabled = !!ui.busy;
-    merge.title = p.draft ? 'Marks the draft ready for review, then merges it on GitHub' : `Merge #${p.number} on GitHub (${method})`;
-    merge.addEventListener('click', () => {
-      const cur = chat.prUI.get(p.url) || {};
-      if (!(cur.armed && Date.now() - cur.armed < prArmFor)) {
-        chat.prUI.set(p.url, { ...cur, armed: Date.now() });
-        renderChatPulls(chat.agent || {});
-        setTimeout(() => { if (chat.open) renderChatPulls(chat.agent || {}); }, prArmFor + 50);
-        return;
-      }
-      mergePull(p, method, !!cur.deleteBranch);
-    });
-    acts.append(merge);
-    row.append(acts);
-    return row;
-  }
-
-  // mergePull merges pull request p of the open session.
-  async function mergePull(p, method, deleteBranch) {
-    const host = chat.host, id = chat.id, seq = chat.seq;
-    chat.prUI.set(p.url, { ...chat.prUI.get(p.url), busy: true, armed: 0 });
-    renderChatPulls(chat.agent || {});
-    try {
-      const r = await api('POST', chatAPI('merge'), { pullRequest: p.url, method, deleteBranch });
-      const merged = r && r.pullRequest;
-      // Show it merged at once; the agent's next update says the same.
-      const agents = host ? (S.remote.get(host) || {}).agents : S.agents;
-      const a = agents && agents.get(id);
-      if (a && merged) {
-        const next = { ...a, pullRequests: (a.pullRequests || []).map((q) => q.url === merged.url ? merged : q) };
-        agents.set(id, next);
-        if (chat.seq === seq) chat.agent = next;
-        invalidate('agents');
-      }
-      toast(`merged ${p.repo}#${p.number}`);
-    } catch (e) {
-      toast(`could not merge #${p.number}: ${e.message}`, 'error');
-    } finally {
-      if (chat.seq === seq) {
-        chat.prUI.set(p.url, { ...chat.prUI.get(p.url), busy: false, armed: 0 });
-        renderChatPulls(chat.agent || {});
-      }
-    }
-  }
-
-  // renderChatGit draws the git state of the session's checkout, with
-  // buttons to fetch, pull and push it. Pulling waits while the agent
-  // works; pushing a branch that diverged from its upstream is a force
-  // push, which a first click arms and a second within prArmFor runs.
-  const PULL_MODE = 'fleet.pullMode';
-  const pullModes = [['ff_only', 'fast-forward'], ['rebase', 'rebase'], ['merge', 'merge']];
-  const pullMode = () => {
-    const m = localStorage.getItem(PULL_MODE);
-    return pullModes.some(([v]) => v === m) ? m : 'ff_only';
-  };
-
-  function renderChatGit(a) {
-    const box = $('chat-git');
-    const g = a.git;
-    box.hidden = !g;
-    if (!g) return box.replaceChildren();
-    const ui = chat.gitUI;
-    const short = (ref) => (g.remote && ref.startsWith(g.remote + '/') ? ref.slice(g.remote.length + 1) : ref);
-
-    // The branch and its upstream are on the summary line (renderChatRepo).
-    const facts = [];
-    if (g.base && (g.baseAhead || g.baseBehind)) {
-      facts.push(h('span', 'font-mono', h('span', 'text-zinc-400', g.base), ' ',
-        g.baseAhead ? h('span', 'text-emerald-300/70', '↑' + g.baseAhead + ' ') : '',
-        g.baseBehind ? h('span', 'text-amber-200/80', '↓' + g.baseBehind) : ''));
-    }
-    if (g.head) {
-      const c = h('span', 'min-w-0 truncate', h('span', 'font-mono text-zinc-400', g.head), ' ' + (g.headSubject || ''));
-      c.title = g.headSubject || '';
-      facts.push(c);
-      if (g.headTimeMs) facts.push(relTime(g.headTimeMs, '', 'font-mono tabular-nums text-zinc-600'));
-    }
-    if (g.fetchedAtMs) facts.push(relTime(g.fetchedAtMs, 'fetched ', 'font-mono tabular-nums text-zinc-600'));
-    if (g.detail) facts.push(h('span', 'text-amber-200/80', g.detail));
-    // The last action's outcome: toasts would sit under the modal session.
-    const note = ui.note ? h('div', 'whitespace-pre-wrap break-words font-mono text-[11px] ' + (ui.note.error ? 'text-rose-300' : 'text-emerald-300/80'),
-      (ui.note.error ? '✗ ' : '✓ ') + ui.note.text) : null;
-    if (note) note.setAttribute('role', 'status');
-    const info = h('div', 'flex min-w-0 flex-1 basis-full flex-col gap-0.5 sm:basis-0',
-      facts.length ? h('div', 'flex min-w-0 flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-zinc-500', ...facts) : null, note);
-    info.title = g.dir;
-
-    const btn = 'touch:min-h-11 rounded-md border px-2 py-1 text-xs font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 disabled:opacity-50';
-    const plain = btn + ' border-ink-600 bg-ink-850 text-zinc-300 hover:bg-ink-800';
-    const busy = !!ui.busy;
-    const button = (label, cls, title, disabled, onClick) => {
-      const b = h('button', cls, label);
-      b.type = 'button';
-      b.title = title;
-      b.disabled = busy || disabled;
-      b.addEventListener('click', onClick);
-      return b;
-    };
-    const acts = h('div', 'flex shrink-0 flex-wrap items-center gap-2 max-sm:ml-auto');
-    const noRemote = !g.remote;
-    acts.append(button(ui.busy === 'fetch' ? 'Fetching…' : 'Fetch', plain,
-      noRemote ? 'The repository has no remote' : `git fetch ${g.remote}`, noRemote, () => runGit('fetch')));
-
-    // Pull: from the upstream, or the base for a branch never pushed; and
-    // from the base too when it has new commits.
-    const working = a.state === 'working';
-    const why = working ? 'Waits until the agent is idle: a pull changes its files'
-      : !g.branch ? 'Check out a branch to pull into' : g.operation ? `A ${g.operation} is in progress` : '';
-    const sel = h('select', 'touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-1.5 py-1 text-xs text-zinc-300 focus-visible:outline-2 focus-visible:outline-emerald-400');
-    sel.setAttribute('aria-label', 'Pull mode');
-    for (const [v, label] of pullModes) {
-      const o = h('option', '', label);
-      o.value = v;
-      o.selected = v === pullMode();
-      sel.append(o);
-    }
-    sel.disabled = busy;
-    sel.addEventListener('change', () => {
-      try { localStorage.setItem(PULL_MODE, sel.value); } catch (e) { /* the choice lasts this page */ }
-    });
-    acts.append(sel);
-    const from = g.upstream || g.base;
-    if (from) {
-      const behind = g.upstream ? g.behind : g.baseBehind;
-      acts.append(button(ui.busy === 'pull' ? 'Pulling…' : 'Pull' + (g.upstream ? '' : ' ' + short(g.base)) + (behind ? ' ↓' + behind : ''), plain,
-        why || `Fetch, then bring ${from} into ${g.branch}`, !!why, () => runGit('pull', { mode: sel.value })));
-    }
-    if (g.upstream && g.base && g.baseBehind) {
-      acts.append(button(ui.busy === 'base' ? 'Pulling…' : `Pull ${short(g.base)} ↓${g.baseBehind}`, plain,
-        why || `Fetch, then bring ${g.base} into ${g.branch}`, !!why, () => runGit('pull', { mode: sel.value, fromBase: true }, 'base')));
-    }
-
-    // Push: a branch that diverged from its upstream needs force.
-    const up = gitUnpushed(g);
-    const force = !!(g.upstream && g.ahead && g.behind);
-    const armed = force && ui.armed && Date.now() - ui.armed < prArmFor;
-    const pushWhy = noRemote ? 'The repository has no remote' : !g.branch ? 'Check out a branch to push'
-      : g.upstream && !g.ahead ? `${g.upstream} has every commit` : '';
-    const pushCls = btn + (force
-      ? (armed ? ' border-rose-400 bg-rose-500 text-ink-950 hover:bg-rose-400' : ' border-rose-500/40 bg-rose-500/10 text-rose-200 hover:bg-rose-500/20')
-      : ' border-emerald-400/40 bg-emerald-400/10 text-emerald-200 hover:bg-emerald-400/20');
-    const pushLabel = ui.busy === 'push' ? 'Pushing…' : force ? (armed ? 'Confirm force push' : `Force push ↑${g.ahead}`) : 'Push' + (up ? ' ↑' + up : '');
-    acts.append(button(pushLabel, pushCls,
-      pushWhy || (force ? `${g.upstream} has ${g.behind} commit${g.behind === 1 ? '' : 's'} ${g.branch} lacks: overwrite them (--force-with-lease)`
-        : `Push ${g.branch} to ${g.remote}` + (g.upstream ? '' : ' and track it')), !!pushWhy, () => {
-      if (force && !(chat.gitUI.armed && Date.now() - chat.gitUI.armed < prArmFor)) {
-        chat.gitUI.armed = Date.now();
-        renderChatGit(chat.agent || {});
-        setTimeout(() => { if (chat.open) renderChatGit(chat.agent || {}); }, prArmFor + 50);
-        return;
-      }
-      runGit('push', { force });
-    }));
-
-    box.replaceChildren(h('div', 'flex flex-wrap items-center gap-x-3 gap-y-2', info, acts));
-    renderChatRepo(a);
-  }
-
-  // renderChatRepo draws the line the checkout and the pull requests fold
-  // into: the branch, what it has to push or pull and, while folded, a
-  // pill per pull request, open ones first. Whether it is unfolded is
-  // kept; at first it is folded on phones, where the chat needs the height.
-  const REPO_OPEN = 'fleet.repoOpen';
-  const repoOpen = () => {
-    const v = localStorage.getItem(REPO_OPEN);
-    return v ? v === '1' : matchMedia('(min-width: 40rem)').matches;
-  };
-
-  function renderChatRepo(a) {
-    const g = a.git;
-    const prs = a.pullRequests || [];
-    $('chat-repo').hidden = !g && !prs.length;
-    $('chat-prs').classList.toggle('border-t', !!g && prs.length > 0);
-
-    // Wordy parts show on phones only while it is unfolded.
-    const wordy = 'max-sm:hidden max-sm:group-open:inline';
-    const line = h('span', 'flex min-w-0 flex-1 items-center gap-x-2 overflow-hidden whitespace-nowrap');
-    if (g) {
-      line.append(h('span', 'min-w-0 truncate font-mono text-violet-300/90', '⎇ ' + (g.branch || 'detached HEAD')));
-      if (g.upstream) {
-        line.append(h('span', 'min-w-0 shrink-[4] truncate font-mono text-zinc-500 ' + wordy, '→ ' + g.upstream));
-        if (g.ahead) line.append(h('span', 'shrink-0 font-mono text-emerald-300/90', '↑' + g.ahead));
-        if (g.behind) line.append(h('span', 'shrink-0 font-mono text-amber-200', '↓' + g.behind));
-        if (!g.ahead && !g.behind) line.append(h('span', 'shrink-0 text-zinc-500 ' + wordy, 'up to date'));
-      } else if (g.branch) {
-        line.append(h('span', 'shrink-0 rounded border border-ink-600 bg-ink-800 px-1.5 py-px font-mono text-[11px] text-zinc-400', 'not pushed'));
-      }
-      if (g.operation) line.append(h('span', 'shrink-0 text-rose-300', g.operation + ' in progress'));
-      if (g.conflicts) line.append(h('span', 'shrink-0 text-rose-300', `${g.conflicts} conflicted`));
-      if (g.changed) line.append(h('span', 'shrink-0 text-amber-200/80', '● ' + g.changed, h('span', wordy, ' uncommitted')));
-    }
-
-    // Unfolded, the pull requests' rows say it.
-    const pills = h('span', 'flex shrink-0 items-center gap-1 group-open:hidden');
-    const listed = prs.filter(prOpen).reverse().concat(prs.filter((p) => !prOpen(p)).reverse());
-    if (listed.length) pills.append(h('span', 'mr-0.5 text-zinc-500', listed.length === 1 ? 'PR' : 'PRs'));
-    for (const p of listed.slice(0, 3)) {
-      const [word, color] = prStatus(p);
-      const pill = h('span', 'rounded border px-1.5 py-px font-mono text-[11px] ' + color, '#' + p.number,
-        h('span', prOpen(p) ? '' : 'sr-only', ' ' + word));
-      pill.title = prTitle(p);
-      pills.append(pill);
-    }
-    if (listed.length > 3) pills.append(h('span', 'font-mono text-[11px] text-zinc-500', '+' + (listed.length - 3)));
-
-    const sum = $('chat-repo-sum');
-    sum.title = g ? gitTitle(g) : '';
-    sum.replaceChildren(
-      h('span', 'inline-block shrink-0 text-zinc-500 transition-transform group-open:rotate-90 motion-reduce:transition-none', '▸'),
-      line, pills);
-  }
-
-  // setChatGit stores the git state an action returned on the agent.
-  function setChatGit(host, id, seq, git) {
-    const agents = host ? (S.remote.get(host) || {}).agents : S.agents;
-    const a = agents && agents.get(id);
-    if (!a || !git) return;
-    const next = { ...a, git };
-    agents.set(id, next);
-    if (chat.seq === seq) chat.agent = next;
-    invalidate('agents');
-  }
-
-  // runGit runs a git action on the open session's checkout; key names it
-  // in chat.gitUI.busy (default: the action).
-  async function runGit(action, body, key) {
-    const host = chat.host, id = chat.id, seq = chat.seq;
-    chat.gitUI = { busy: key || action };
-    renderChatGit(chat.agent || {});
-    let note;
-    try {
-      const r = await api('POST', chatAPI('git'), { action, ...body });
-      setChatGit(host, id, seq, r && r.git);
-      const g = (r && r.git) || {};
-      const said = r && r.output ? r.output.trim().split('\n').pop().trim() : '';
-      if (action === 'push') note = `pushed ${g.branch} to ${g.upstream || g.remote}`;
-      else if (action === 'pull') note = `pulled into ${g.branch}` + (said ? ': ' + said : '');
-      else note = `fetched ${g.remote}`;
-      note = { text: note };
-    } catch (e) {
-      note = { text: `git ${action}: ${e.message}`, error: true };
-    } finally {
-      if (chat.seq === seq) {
-        chat.gitUI = { note };
-        renderChatGit(chat.agent || {});
-      }
-    }
-  }
-
-  // refreshGit reads the open session's checkout when it opens, fetching
-  // first if the last fetch is older than gitFetchAge, so ahead and behind
-  // are current. Failures stay quiet: the bar shows what was last read.
-  const gitFetchAge = 5 * 60 * 1000;
-  async function refreshGit(seq) {
-    const a = chat.agent;
-    if (!a) return;
-    const g = a.git;
-    const action = g && g.remote && Date.now() - (g.fetchedAtMs || 0) > gitFetchAge ? 'fetch' : 'status';
-    const host = chat.host, id = chat.id;
-    try {
-      const r = await api('POST', chatAPI('git'), { action });
-      setChatGit(host, id, seq, r && r.git);
-      if (chat.seq === seq && !chat.gitUI.busy) renderChatGit(chat.agent || {});
-    } catch (e) {
-      // Not a repository, gone, or offline.
-    }
-  }
-
-  // limitDetail is the bar under the session's header while a usage limit
-  // stopped it: when it resets, when the daemon resumes it, and buttons to
-  // resume it now or switch auto-resume.
-  function limitDetail(l) {
-    const text = h('span', 'min-w-0', h('span', 'font-semibold', 'Usage limit reached'), l.window ? ` (${l.window})` : '');
-    if (l.resetsAtMs) text.append(' · resets ' + limitClock(l.resetsAtMs));
-    if (l.detail) text.append(' · ', h('span', 'text-orange-300', l.detail));
-    else if (l.resumeAtMs) text.append(h('span', 'text-amber-200/60', ` · fleet types “continue” at ${limitClock(l.resumeAtMs)}`));
-    else if (!l.autoResume) text.append(h('span', 'text-amber-200/60', ' · auto-resume is off'));
-    const btn = 'touch:min-h-11 rounded-md border border-amber-400/30 px-2 py-0.5 text-xs font-medium text-amber-200 hover:bg-amber-400/15 focus-visible:outline-2 focus-visible:outline-amber-400 disabled:opacity-50';
-    const now = h('button', btn, 'Resume now');
-    now.type = 'button';
-    now.title = 'Type “continue” into the session now';
-    now.addEventListener('click', () => limitAction(now, { now: true }, 'resumed'));
-    const auto = h('button', btn, l.autoResume ? 'Turn auto-resume off' : 'Turn auto-resume on');
-    auto.type = 'button';
-    auto.addEventListener('click', () => limitAction(auto, { auto: !l.autoResume }, l.autoResume ? 'auto-resume off' : 'auto-resume on'));
-    return [h('div', 'flex flex-wrap items-center gap-x-3 gap-y-1.5', text, h('span', 'flex gap-2', now, auto))];
-  }
-
-  // limitAction posts body to the session's resume route.
-  async function limitAction(btn, body, done) {
-    const host = chat.host, id = chat.id;
-    const base = host ? `/api/hosts/${encodeURIComponent(host)}/agents/` : '/api/agents/';
-    btn.disabled = true;
-    try {
-      const r = await api('POST', base + encodeURIComponent(id) + '/resume', body);
-      if (r && r.agent) {
-        const rem = host && S.remote.get(host);
-        if (rem) rem.agents.set(id, r.agent);
-        else if (!host) S.agents.set(id, r.agent);
-        if (chat.open && chat.host === host && chat.id === id) chat.agent = r.agent;
-        invalidate('agents');
-        renderChatHead();
-      }
-      toast(`${(r && r.agent && r.agent.name) || id}: ${done}`);
-    } catch (e) {
-      btn.disabled = false;
-      toast(`could not resume: ${e.message}`, 'error');
-    }
-  }
-
-  // renderChatStop draws Archive (a live session) or Delete (a finished
-  // one), and its confirmation in a bar under the header rather than in
-  // the button's place, where a double tap would land on it.
-  function renderChatStop() {
-    const box = $('chat-stop-box');
-    const bar = $('chat-confirm');
-    if (!chat.agent) {
-      box.replaceChildren();
-      bar.hidden = true;
-      return;
-    }
-    const act = endAction(chat.agent);
-    const b = h('button', 'touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-2 py-1 text-xs font-medium text-zinc-300 hover:border-rose-500/40 hover:bg-rose-500/10 hover:text-rose-200 aria-expanded:border-rose-500/40 aria-expanded:bg-rose-500/10 aria-expanded:text-rose-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400', act.label,
-      h('kbd', 'ml-1 rounded border border-ink-600 px-1 font-mono text-[10px] leading-4 text-zinc-500 touch:hidden', MAC ? '⌥A' : 'Alt+A'));
-    b.type = 'button';
-    b.title = `${act.label} this session (${MAC ? '⌥A' : 'Alt+A'})`;
-    b.setAttribute('aria-keyshortcuts', 'Alt+A');
-    b.setAttribute('aria-expanded', String(chat.confirmStop));
-    b.setAttribute('aria-controls', 'chat-confirm');
-    b.addEventListener('click', () => {
-      chat.confirmStop = !chat.confirmStop;
-      chat.dropWt = act.dropWt;
-      renderChatStop();
-      if (chat.confirmStop) bar.querySelector('[data-focus="chat-stop-yes"]').focus();
-    });
-    box.replaceChildren(b);
-    bar.hidden = !chat.confirmStop;
-    if (!chat.confirmStop) return;
-    const keep = h('button', 'touch:min-h-11 rounded-md border border-ink-600 bg-ink-850 px-3 py-1 text-xs font-medium text-zinc-300 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', 'Keep');
-    keep.type = 'button';
-    keep.addEventListener('click', () => {
-      chat.confirmStop = false;
-      renderChatStop();
-    });
-    const yes = h('button', 'touch:min-h-11 rounded-md border border-rose-500/40 bg-rose-500/15 px-3 py-1 text-xs font-medium text-rose-200 hover:bg-rose-500/25 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-rose-400', chat.stopping ? act.busy : act.label + ' session');
-    yes.type = 'button';
-    yes.disabled = chat.stopping;
-    yes.dataset.focus = 'chat-stop-yes';
-    yes.addEventListener('click', stopChat);
-    const text = h('div', 'min-w-48 flex-1 text-xs text-rose-100/90',
-      h('p', '', h('span', 'font-semibold', act.label + ' this session?'), ' ' + act.note));
-    if (act.wt) {
-      // The worktree or clone: keep it or remove it with the session.
-      const cb = h('input', 'accent-rose-400');
-      cb.type = 'checkbox';
-      cb.checked = chat.dropWt;
-      cb.disabled = chat.stopping;
-      cb.dataset.focus = 'chat-stop-wt';
-      cb.addEventListener('change', () => { chat.dropWt = cb.checked; });
-      const label = h('label', 'touch:min-h-11 mt-1.5 flex cursor-pointer select-none items-center gap-2 text-zinc-300', cb,
-        h('span', 'min-w-0', `Also delete its ${act.iso} `, h('span', 'font-mono text-zinc-400', shortPath(act.wt)),
-          act.iso === 'worktree' && chat.agent.branch ? h('span', 'text-zinc-500', ` (branch ${chat.agent.branch} stays)`) : '',
-          h('span', 'text-zinc-500', '; kept if it holds unsaved work')));
-      label.title = act.wt;
-      text.append(label);
-    }
-    // A re-render (the agent changed) keeps the focus where it was.
-    const had = bar.contains(document.activeElement) && document.activeElement.dataset.focus;
-    bar.replaceChildren(text, h('div', 'ml-auto flex items-center gap-2', keep, yes));
-    if (had) bar.querySelector(`[data-focus="${had}"]`)?.focus();
-  }
-
-  async function stopChat() {
-    const seq = chat.seq;
-    const { host, id } = chat;
-    chat.stopping = true;
-    renderChatStop();
-    // The choice is only shown, and so only taken, for a known worktree.
-    const done = await endAgent(host, id, chat.agent, endAction(chat.agent).wt ? chat.dropWt : undefined);
-    if (seq !== chat.seq) return;
-    chat.stopping = false;
-    chat.confirmStop = false;
-    if (done) return closeChat();
+    insp.open = true;
+    if (tab) insp.tab = tab;
+    renderInsp();
     renderChatHead();
-    renderChatInput();
   }
 
-  function renderChatStatus() {
-    const st = $('chat-status');
-    if (chat.feed.error) {
-      st.className = 'min-h-4 min-w-0 flex-1 truncate text-[11px] text-rose-300';
-      st.textContent = chat.feed.error;
-      return;
-    }
-    if (chat.held && chatLive()) {
-      st.className = 'min-h-4 min-w-0 flex-1 truncate text-[11px] text-amber-300';
-      st.textContent = 'The agent shows a dialog: your text was typed, but Enter was not pressed. Answer with the keys.';
-      return;
-    }
-    st.className = 'min-h-4 min-w-0 flex-1 truncate text-[11px] text-zinc-500';
-    const a = chat.agent;
-    st.textContent = !a ? '' : !chatLive() ? 'the session has ended'
-      : chat.switching ? 'switching the model…'
-      : askShown() ? 'a message sent now answers none of the questions: the agent reads it instead'
-      : chat.interrupting ? 'interrupting…'
-      : chatDialog() ? 'in a dialog, Send types your text without pressing Enter: Enter picks the highlighted option'
-      : a.state === 'working' ? 'working… new messages appear as the agent writes them' + (touch() ? '' : ' · Ctrl+C interrupts it') : '';
-  }
-
-  // ---------------------------------------------------------------- model
-  //
-  // The model and effort the session runs at (each chat reply has them),
-  // and a switch to others, for this session only (POST .../model).
-
-  function opt(value, label, disabled) {
-    const o = h('option', '', label);
-    o.value = value;
-    o.disabled = !!disabled;
-    return o;
-  }
-
-  // chatModel takes the model of a chat reply. Replies read while a
-  // switch went on, or just before it ended, would undo it on the page.
-  function chatModel(m) {
-    if (chat.switching || Date.now() - chat.switchedAt < 2000) return;
-    chat.model = m || null;
-    renderChatModel();
-  }
-
-  // renderChatModel shows the model and effort in two pickers; the efforts
-  // are those of the session's model. A value the page cannot pick (none
-  // known yet, a model not on the list) shows as a disabled option.
-  function renderChatModel() {
-    const m = chat.model;
-    $('chat-model').hidden = !m;
-    if (!m) return;
-    const msel = $('chat-model-sel');
-    const esel = $('chat-effort-sel');
-    const cur = m.models.find((x) => x.id === m.model);
-    const mopts = m.models.map((x) => opt(x.id, x.label));
-    if (!cur) mopts.unshift(opt('', m.name || 'default model', true));
-    msel.replaceChildren(...mopts);
-    msel.value = cur ? cur.id : '';
-    const efforts = cur ? m.efforts.filter((e) => cur.efforts.includes(e.id)) : m.efforts;
-    const ecur = efforts.find((e) => e.id === m.effort);
-    const eopts = efforts.map((e) => opt(e.id, e.label));
-    if (!ecur) eopts.unshift(opt('', cur && !efforts.length ? 'no effort' : m.effort || 'default effort', true));
-    esel.replaceChildren(...eopts);
-    esel.value = ecur ? ecur.id : '';
-    const live = chatLive();
-    const can = m.switch && live && !chat.switching;
-    msel.disabled = !can;
-    esel.disabled = !can || !efforts.length;
-    const why = !live ? 'the session has ended'
-      : !m.switch ? 'this agent cannot switch a running session: choose when starting one'
-      : 'a switch holds for this session only';
-    msel.title = `Model${m.name ? ': ' + m.name : ''} · ${why}`;
-    esel.title = `Effort${m.effort ? ': ' + m.effort : ''} · ${why}`;
-  }
-
-  // switchChatModel switches to what the pickers show. A new model keeps
-  // the effort shown if it runs at it.
-  async function switchChatModel() {
-    const m = chat.model;
-    if (!m || chat.switching || !chatLive()) return;
-    const model = $('chat-model-sel').value;
-    const effort = $('chat-effort-sel').value;
-    const body = { model: model && model !== m.model ? model : '', effort: '' };
-    const to = m.models.find((x) => x.id === (body.model || m.model));
-    if (body.model) body.effort = to && to.efforts.includes(effort) ? effort : '';
-    else if (effort && effort !== m.effort) body.effort = effort;
-    if (!body.model && !body.effort) return;
-    const label = [to ? to.label : m.name, (m.efforts.find((e) => e.id === (body.effort || m.effort)) || {}).label]
-      .filter(Boolean).join(' · ');
-    const seq = chat.seq;
-    chat.switching = true;
-    renderChatModel();
-    renderChatStatus();
-    try {
-      const r = await api('POST', chatAPI('model'), body);
-      if (seq !== chat.seq) return;
-      chat.model = (r && r.model) || m;
-      toast(`${label || 'switched'} for this session`);
-    } catch (e) {
-      if (seq !== chat.seq) return;
-      toast(`could not switch: ${e.message}`, 'error');
-    }
-    chat.switching = false;
-    chat.switchedAt = Date.now();
-    renderChatModel();
-    renderChatStatus();
-    if (chat.screenOpen) setTimeout(refreshScreen, 150);
-  }
-
-  // -------------------------------------------------------------- questions
-  //
-  // Questions the agent asks in a dialog of choices (Claude's
-  // AskUserQuestion), as a form above the message box: each chat reply
-  // lists those it waits on (asks), POST .../answer answers one. The dialog
-  // stays open in the terminal too; whichever answers first wins. A message
-  // sent while the form shows replies in place of answers ("Chat about
-  // this" in the terminal).
-
-  // askShown is the question the form shows: the agent shows its dialogs
-  // one at a time, in order.
-  const askShown = () => (chatLive() && chat.view === 'chat' && chat.asks[0]) || null;
-
-  // chatAsks takes the questions of a chat reply.
-  function chatAsks(asks) {
-    asks = (asks || []).filter((a) => !chat.answered.has(a.id));
-    if (asks.map((a) => a.id).join(',') === chat.asks.map((a) => a.id).join(',')) return;
-    const had = chat.asks.length > 0;
-    chat.asks = asks;
-    // The form answers the dialog: no need for the screen it opened for it.
-    if (asks.length && !had && chat.screenAutoOpened && chat.screenOpen) {
-      chat.screenOpen = false;
-      chat.screenAutoOpened = false;
-      renderChatScreen();
-    }
+  function closeInsp() {
+    insp.open = false;
+    renderInsp();
     renderChatHead();
-    renderChatAsk();
-    renderChatInput();
+    if (keyboard() && C.comp) C.comp.ta.focus({ preventScroll: true });
   }
 
-  function renderChatAsk() {
-    const box = $('chat-ask');
-    const a = askShown();
-    box.hidden = !a;
-    if (!a) {
-      if (chat.askForm) box.replaceChildren();
-      chat.askForm = null;
-      return;
-    }
-    // Built once per question: a reply must not undo the picks.
-    if (!chat.askForm || chat.askForm.id !== a.id) {
-      chat.askForm = askForm(a);
-      box.replaceChildren(chat.askForm.el);
-    }
-    paintAsk();
+  // toggleInsp opens the panel on tab (the terminal) or on its last other
+  // tab (the panel button), or closes it when that is what it shows.
+  function toggleInsp(tab) {
+    const showing = insp.open && (tab ? insp.tab === tab : insp.tab !== 'terminal');
+    if (showing) return closeInsp();
+    if (!tab && insp.tab === 'terminal') insp.tab = '';
+    openInsp(tab || insp.tab);
   }
 
-  const ASK_OPTION = 'touch:min-h-11 flex min-w-0 cursor-pointer items-start gap-2.5 rounded-md border border-ink-600 bg-ink-900 px-2.5 py-2 hover:border-zinc-500 has-checked:border-amber-400/50 has-checked:bg-amber-400/10 focus-within:outline-2 focus-within:outline-offset-1 focus-within:outline-amber-400';
-  const ASK_INPUT = 'mt-0.5 size-4 shrink-0 accent-amber-400 focus:outline-none';
-
-  // askForm builds the form of a question: per question its options, one
-  // to type, a preview of the option looked at, and a note.
-  function askForm(a) {
-    const form = { id: a.id, sending: false, qs: [] };
-    const fields = h('div', 'flex flex-col gap-4');
-    a.questions.forEach((q, i) => {
-      const name = `ask-${a.id}-${i}`;
-      const type = q.multiSelect ? 'checkbox' : 'radio';
-      const fq = { q, opts: [], other: null, note: null };
-      const opts = h('div', 'grid gap-1.5 sm:grid-cols-2');
-      // The preview of the option looked at, else of the one picked. Its
-      // box keeps its size: the form grows upwards, and options moving
-      // under the pointer would take the click meant for another.
-      const hasPreview = (q.options || []).some((o) => o.preview);
-      const preview = h('pre', 'mt-1.5 h-44 overflow-auto rounded-md border border-ink-700 bg-ink-950 px-3 py-2 font-mono text-[11.5px] leading-snug text-zinc-300');
-      preview.hidden = !hasPreview;
-      const showPreview = (o) => {
-        if (!hasPreview) return;
-        const p = (o && o.preview) || (fq.opts.find((x) => x.input.checked && x.preview) || {}).preview;
-        preview.textContent = p || 'Point at an option to see its preview.';
-        preview.classList.toggle('text-zinc-600', !p);
-      };
-      for (const o of q.options || []) {
-        const input = h('input', ASK_INPUT);
-        input.type = type;
-        input.name = name;
-        input.value = o.label;
-        const label = h('label', ASK_OPTION, input,
-          h('span', 'min-w-0',
-            h('span', 'block break-words text-[13px] font-medium text-zinc-100', o.label),
-            o.description ? h('span', 'mt-0.5 block break-words text-xs leading-snug text-zinc-400', o.description) : null));
-        if (o.preview) {
-          label.addEventListener('mouseenter', () => showPreview(o));
-          label.addEventListener('mouseleave', () => showPreview(null));
-          label.addEventListener('focusin', () => showPreview(o));
-        }
-        input.addEventListener('change', () => {
-          showPreview(o.preview ? o : null);
-          paintAsk();
-        });
-        fq.opts.push({ label: o.label, input, preview: o.preview || '' });
-        opts.append(label);
-      }
-      // One of their own, as in the terminal's "Type something".
-      const oin = h('input', ASK_INPUT);
-      oin.type = type;
-      oin.name = name;
-      oin.setAttribute('aria-label', 'Your own answer');
-      const otext = h('input', 'touch:min-h-9 min-w-0 flex-1 rounded border border-ink-600 bg-ink-950 px-2 py-1 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-amber-400/60 focus:outline-none');
-      otext.type = 'text';
-      otext.placeholder = 'Something else…';
-      otext.maxLength = 8000;
-      otext.setAttribute('aria-label', `Your own answer to: ${q.question}`);
-      otext.addEventListener('input', () => {
-        oin.checked = otext.value.trim() !== '' || (!q.multiSelect && oin.checked);
-        paintAsk();
-      });
-      otext.addEventListener('focus', () => {
-        if (!q.multiSelect && otext.value.trim()) oin.checked = true;
-        paintAsk();
-      });
-      otext.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter' && !ev.isComposing) {
-          ev.preventDefault();
-          submitAsk();
-        }
-      });
-      oin.addEventListener('change', () => {
-        if (oin.checked && !otext.value.trim()) otext.focus();
-        paintAsk();
-      });
-      fq.other = { input: oin, text: otext };
-      opts.append(h('label', ASK_OPTION + ' items-center sm:col-span-2', oin, otext));
-      // A note on the answer.
-      const note = h('textarea', 'touch:min-h-11 mt-1.5 min-h-9 w-full resize-y rounded-md border border-ink-600 bg-ink-950 px-2.5 py-1.5 text-[13px] max-sm:text-base pointer-coarse:text-base text-zinc-100 placeholder:text-zinc-600 focus:border-amber-400/60 focus:outline-none');
-      note.rows = 2;
-      note.maxLength = 8000;
-      note.placeholder = 'A note for the agent on this answer';
-      note.hidden = true;
-      note.setAttribute('aria-label', `Note on: ${q.question}`);
-      const addNote = h('button', 'touch:min-h-11 mt-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-zinc-500 hover:bg-ink-800 hover:text-zinc-200 focus-visible:outline-2 focus-visible:outline-amber-400', '+ note');
-      addNote.type = 'button';
-      addNote.addEventListener('click', () => {
-        note.hidden = false;
-        addNote.hidden = true;
-        note.focus();
-      });
-      fq.note = note;
-      const legend = h('legend', 'mb-2 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1',
-        q.header ? h('span', 'rounded bg-amber-400/15 px-1.5 py-px text-[10px] font-semibold uppercase tracking-wider text-amber-200', q.header) : null,
-        h('span', 'break-words text-[14px] font-medium leading-snug text-zinc-100', q.question),
-        q.multiSelect ? h('span', 'text-[11px] text-zinc-500', 'pick any') : null);
-      fields.append(h('fieldset', 'min-w-0', legend, opts, preview, addNote, note));
-      showPreview(null);
-      form.qs.push(fq);
-    });
-    form.progress = h('span', 'text-[11px] text-zinc-500');
-    form.send = h('button', 'touch:h-11 touch:px-4 h-8 shrink-0 rounded-md bg-amber-400 px-3 text-xs font-semibold text-ink-950 hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-amber-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400', 'Answer');
-    form.send.type = 'button';
-    form.send.addEventListener('click', submitAsk);
-    form.more = h('span', 'text-[11px] text-zinc-500');
-    const who = chat.agent && chat.agent.adapter === 'claude' ? 'Claude asks' : 'The agent asks';
-    form.el = h('div', 'mx-auto flex max-w-3xl flex-col gap-3',
-      h('div', 'flex items-center gap-2',
-        h('span', STATES.needs_input.dot),
-        h('span', 'text-[11px] font-semibold uppercase tracking-wider text-amber-300', who),
-        form.more),
-      fields,
-      // Stays in sight while the questions scroll (phones).
-      h('div', 'sticky -bottom-3 z-10 -mx-3 -mb-3 flex flex-wrap items-center justify-end gap-x-3 gap-y-1.5 border-t border-amber-400/15 bg-ink-900 px-3 py-2',
-        h('span', 'mr-auto text-[11px] text-zinc-500', 'Answer here or in the terminal · or reply below instead'),
-        form.progress, form.send));
-    return form;
+  // openRun shows the workflow tab with run id unfolded ('' none).
+  function openRun(id) {
+    if (id) wf.shown.add(id);
+    if (wf.sub) closeSub();
+    openInsp('workflow');
+    const card = id && insp.panes && insp.panes.workflow.list.querySelector(`[data-run="${CSS.escape(id)}"]`);
+    if (card) card.scrollIntoView({ block: 'start' });
   }
 
-  // askAnswer is what the form says: {answers, notes}, and how many
-  // questions are still unanswered.
-  function askAnswer(form) {
-    const answers = {};
-    const notes = {};
-    let open = 0;
-    for (const fq of form.qs) {
-      const picks = fq.opts.filter((o) => o.input.checked).map((o) => o.label);
-      const own = fq.other.text.value.trim();
-      if (fq.other.input.checked && own) picks.push(own);
-      if (!picks.length) open++;
-      else answers[fq.q.question] = picks;
-      const note = fq.note.value.trim();
-      if (note) notes[fq.q.question] = note;
-    }
-    return { answers, notes, open };
-  }
-
-  function paintAsk() {
-    const form = chat.askForm;
-    if (!form) return;
-    const { open } = askAnswer(form);
-    const n = form.qs.length;
-    form.progress.textContent = n > 1 ? `${n - open} of ${n} answered` : '';
-    form.send.disabled = open > 0 || form.sending || !chatLive();
-    form.send.textContent = form.sending ? 'Sending…' : 'Answer';
-    form.more.textContent = chat.asks.length > 1 ? `· ${chat.asks.length - 1} more after this` : '';
-  }
-
-  async function submitAsk() {
-    const form = chat.askForm;
-    if (!form) return;
-    const { answers, notes, open } = askAnswer(form);
-    if (open) return;
-    await sendAnswer(form, Object.keys(notes).length ? { answers, notes } : { answers });
-  }
-
-  // sendAnswer answers the form's question; it reports whether that worked.
-  async function sendAnswer(form, body) {
-    if (form.sending || !chatLive()) return false;
-    const seq = chat.seq;
-    form.sending = true;
-    paintAsk();
-    let ok = false;
-    try {
-      await api('POST', chatAPI('answer'), Object.assign({ ask: form.id }, body));
-      ok = true;
-    } catch (e) {
-      toast(e.status === 404 ? 'that question was answered already, or is gone' : `could not answer: ${e.message}`, 'error');
-      if (e.status !== 404) {
-        form.sending = false;
-        if (seq === chat.seq) paintAsk();
-        return false;
-      }
-    }
-    if (seq !== chat.seq) return ok;
-    chat.answered.add(form.id);
-    chat.asks = chat.asks.filter((x) => x.id !== form.id);
-    renderChatAsk();
-    renderChatInput();
-    return ok;
-  }
-
-  // Keys for the agent's own dialogs (permissions, trust, menus).
-  const CHAT_KEYS = [
-    ['escape', 'Esc'], ['up', '↑'], ['down', '↓'], ['left', '←'], ['right', '→'], ['tab', 'Tab'],
-    ['enter', 'Enter'], ['1', '1'], ['2', '2'], ['3', '3'], ['4', '4'], ['5', '5'], ['6', '6'], ['ctrl-c', 'Ctrl-C'],
-  ];
-
-  function renderChatInput() {
-    const live = chatLive();
-    const ta = $('chat-input');
-    ta.disabled = !live;
-    ta.placeholder = !live ? 'the session has ended'
-      : askShown() ? 'Or reply in your own words instead of answering'
-      : chatDialog() ? 'Type into the dialog (Enter is not pressed)'
-      : touch() ? 'Message the agent' : 'Message the agent · Enter sends, Shift+Enter for a new line';
-    $('chat-send').disabled = !live || chat.sending;
-    $('chat-interrupt').hidden = !chatBusy();
-    $('chat-interrupt').disabled = chat.interrupting;
-    $('chat-attach').disabled = !live || chat.sending || askShown();
-    renderChatModel();
-    const keys = $('chat-keys');
-    keys.hidden = !live;
-    if (live && !keys.childElementCount) {
-      keys.append(h('span', 'mr-1 shrink-0 text-[10px] font-medium uppercase tracking-wider text-zinc-600', 'keys'));
-      for (const [k, label] of CHAT_KEYS) {
-        const b = h('button', 'touch:min-h-11 touch:min-w-11 touch:rounded-md touch:px-2.5 touch:text-[13px] shrink-0 rounded border border-ink-600 bg-ink-900 px-1.5 py-0.5 font-mono text-[11px] text-zinc-300 hover:border-zinc-500 hover:bg-ink-800 hover:text-zinc-100 focus-visible:outline-2 focus-visible:outline-emerald-400', label);
-        b.type = 'button';
-        b.dataset.key = k;
-        b.title = `Press ${label} in the agent's terminal`;
-        keys.append(b);
-      }
-    }
-    renderChatStatus();
-  }
-
-  async function sendKey(key) {
-    if (!chatLive()) return;
-    chat.held = false;
-    renderChatStatus();
-    try {
-      await api('POST', chatAPI('input'), { keys: [key] });
-    } catch (e) {
-      toast(`could not send the key: ${e.message}`, 'error');
-      return;
-    }
-    if (chat.screenOpen) setTimeout(refreshScreen, 150);
-  }
-
-  // interruptChat interrupts the agent's turn as Esc in its terminal does
-  // (POST .../interrupt): the daemon waits for the transcript to record it
-  // and makes the agent idle. A daemon without that route gets Esc.
-  async function interruptChat() {
-    if (!chatBusy() || chat.interrupting) return;
-    const { host, id, seq } = chat;
-    chat.interrupting = true;
-    renderChatInput();
-    let r = null;
-    try {
-      r = await api('POST', chatAPI('interrupt'));
-    } catch (e) {
-      // A daemon from before that route (an unknown agent fails again).
-      if (e.status === 404 || e.status === 405) {
-        r = await api('POST', chatAPI('input'), { keys: ['escape'] }).then(() => ({ interrupted: true }), (e2) => ({ error: e2 }));
-      } else r = { error: e };
-    }
-    if (seq !== chat.seq) return;
-    chat.interrupting = false;
-    if (r.error) toast(`could not interrupt: ${r.error.message}`, 'error');
-    else if (!r.interrupted) toast('Esc was pressed, but the agent shows no interruption yet', 'warn');
-    if (r.agent) {
-      const rem = host && S.remote.get(host);
-      if (rem) rem.agents.set(id, r.agent);
-      else if (!host) S.agents.set(id, r.agent);
-      invalidate('agents');
-      chatAgent(host, r.agent);
-    }
-    renderChatInput();
-    if (chat.screenOpen) setTimeout(refreshScreen, 150);
-  }
-
-  async function sendMessage(ev) {
-    ev.preventDefault();
-    const ta = $('chat-input');
-    const text = ta.value;
-    const images = chat.images;
-    const videos = chat.videos.slice();
-    const { host, id } = chat;
-    if ((!text.trim() && !images.length && !videos.length) || chat.sending || !chatLive()) return;
-    if (askShown() && chat.askForm) {
-      if (images.length || videos.length) {
-        toast(`answer the questions first, then send the ${images.length ? 'images' : 'videos'}`, 'warn');
-        return;
-      }
-      // In place of answers: the agent gets the text instead.
-      if (await sendAnswer(chat.askForm, { decline: text }) && ta.value === text) {
-        ta.value = '';
-        autosize();
-        saveDraft(host, id, '');
-      }
-      return;
-    }
-    const problem = videosProblem(videos);
-    if (problem) {
-      toast(problem, 'warn');
-      return;
-    }
-    const seq = chat.seq;
-    chat.sending = true;
-    chat.held = false;
-    renderChatInput();
-    let held = false;
-    try {
-      // The daemon holds Enter back if the agent shows a dialog, where
-      // Enter picks the highlighted option whatever was typed.
-      const body = { text: withVideos(text, videos), submit: true };
-      if (images.length) body.images = images.map((im) => im.data);
-      const r = await api('POST', chatAPI('input'), body);
-      held = !!(r && r.held);
-      if (seq === chat.seq || loadDraft(host, id) === text) saveDraft(host, id, '');
-      if (seq === chat.seq) {
-        ta.value = '';
-        autosize();
-        chat.images = chat.images.filter((im) => !images.includes(im));
-        chat.videos = chat.videos.filter((v) => !videos.includes(v));
-        renderChatImages();
-      }
-    } catch (e) {
-      toast(`could not send: ${e.message}`, 'error');
-    }
-    if (seq !== chat.seq) return;
-    chat.sending = false;
-    chat.held = held;
-    renderChatInput();
-    if (held) {
-      if (!chat.screenOpen) {
-        chat.screenOpen = true;
-        renderChatScreen();
-      } else setTimeout(refreshScreen, 150);
-    }
-    if (!touch()) ta.focus();
-  }
-
-  // Images sent with a message: the daemon pastes each into the agent's
-  // prompt, where Claude and Codex show it as [Image #n]. Big photos are
-  // scaled down here (the models shrink them anyway) to keep requests small;
-  // formats the agents cannot read (HEIC, …) are re-encoded as JPEG.
-  const MAX_IMAGES = 10;
-  const IMAGE_SIDE = 2000; // longest side, px
-  const IMAGE_BYTES = 3.5 * 1024 * 1024; // the daemon's limit per image
-  const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
-
-  // addChatFiles adds the images and videos among files to the next
-  // message.
-  async function addChatFiles(files) {
-    if (!chatLive() || chat.sending || askShown()) return;
-    const seq = chat.seq;
-    addVideos(files, chat.videos, chatUploads(), () => {
-      if (seq === chat.seq) renderChatImages();
-    });
-    if (await readImages(files, chat.images, () => seq === chat.seq)) renderChatImages();
-  }
-
-  const chatUploads = () => (chat.host ? `/api/hosts/${encodeURIComponent(chat.host)}/uploads` : '/api/uploads');
-
-  // readImages adds the image files among files to images, ready to send,
-  // up to MAX_IMAGES in all. It stops, answering false, once alive() is
-  // false: the message they were for is gone.
-  async function readImages(files, images, alive) {
-    for (const f of [...files].filter(isImage)) {
-      if (images.length >= MAX_IMAGES) {
-        toast(`at most ${MAX_IMAGES} images per message`, 'warn');
-        break;
-      }
-      try {
-        const blob = await fitImage(f);
-        const url = await blobURL(blob);
-        if (!alive()) return false;
-        if (images.length < MAX_IMAGES) images.push({ data: url.slice(url.indexOf(',') + 1), url, name: f.name || 'pasted image' });
-      } catch (e) {
-        if (!alive()) return false;
-        toast(`${f.name || 'image'}: ${e.message}`, 'error');
-      }
-    }
-    return alive();
-  }
-
-  const isImage = (f) => f.type.startsWith('image/');
-  // mediaFiles is the image and video files pasted or dropped, if any.
-  const mediaFiles = (dt) => [...(dt ? dt.files : [])].filter((f) => isImage(f) || isVideo(f));
-
-  // fitImage returns f as is if the agents can read it and it is small
-  // enough, else scaled down and re-encoded (GIFs lose their animation).
-  async function fitImage(f) {
-    let bmp;
-    try {
-      bmp = await createImageBitmap(f);
-    } catch {
-      throw new Error('this browser cannot read the image');
-    }
-    try {
-      const scale = Math.min(1, IMAGE_SIDE / Math.max(bmp.width, bmp.height));
-      if (IMAGE_TYPES.includes(f.type) && scale === 1 && f.size <= IMAGE_BYTES) return f;
-      const c = document.createElement('canvas');
-      c.width = Math.max(1, Math.round(bmp.width * scale));
-      c.height = Math.max(1, Math.round(bmp.height * scale));
-      c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
-      // PNG keeps screenshots sharp; photos (and PNGs too big) go JPEG.
-      for (const [type, q] of [['image/png'], ['image/jpeg', 0.9], ['image/jpeg', 0.75]]) {
-        if (type === 'image/png' && f.type !== 'image/png') continue;
-        const b = await new Promise((res) => c.toBlob(res, type, q));
-        if (b && b.size <= IMAGE_BYTES) return b;
-      }
-      throw new Error('too large, even scaled down');
-    } finally {
-      bmp.close();
-    }
-  }
-
-  function blobURL(blob) {
-    return new Promise((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res(r.result);
-      r.onerror = () => rej(new Error('cannot read the image'));
-      r.readAsDataURL(blob);
-    });
-  }
-
-  // Videos sent with a message are too big to go with it: each is
-  // uploaded to the agent's machine as soon as it is picked (POST
-  // .../uploads, streamed), and the message gets a line with its path
-  // there, for the agent to open with its own tools.
-  const MAX_VIDEOS = 5;
-  const VIDEO_BYTES = 4 * 1024 ** 3; // the daemon's limit per file
-  const VIDEO_EXT = /\.(?:mp4|m4v|mov|webm|mkv|avi|3gp|mpe?g|ogv|wmv|flv)$/i;
-  // Some browsers give no type for some videos (MKV): the name tells.
-  const isVideo = (f) => f.type.startsWith('video/') || (!f.type && VIDEO_EXT.test(f.name || ''));
-
-  // addVideos starts uploading the videos among files to url, the uploads
-  // route of the agent's machine, adding each to videos as {name, size,
-  // sent, path, error, xhr}; changed() runs when one is added, done or
-  // failed.
-  function addVideos(files, videos, url, changed) {
-    let added = false;
-    for (const f of [...files].filter(isVideo)) {
-      if (videos.length >= MAX_VIDEOS) {
-        toast(`at most ${MAX_VIDEOS} videos per message`, 'warn');
-        break;
-      }
-      if (f.size > VIDEO_BYTES) {
-        toast(`${f.name || 'video'}: too large (at most 4 GB)`, 'error');
-        continue;
-      }
-      const v = { name: f.name || 'video', size: f.size, sent: 0, path: '', error: '', xhr: null };
-      v.xhr = uploadFile(url, f, (sent) => {
-        v.sent = sent;
-        paintVideo(v);
-      }, (err, r) => {
-        v.xhr = null;
-        if (err) v.error = err;
-        else v.path = r.path;
-        changed();
-      });
-      videos.push(v);
-      added = true;
-    }
-    if (added) changed();
-  }
-
-  // uploadFile posts file to url (XHR, for its progress), named after it.
-  // done gets an error message, or '' and the decoded reply.
-  function uploadFile(url, file, progress, done) {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', url + '?' + new URLSearchParams({ name: file.name || 'video' }));
-    const token = getToken();
-    if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
-    xhr.upload.onprogress = (ev) => progress(ev.loaded);
-    xhr.onload = () => {
-      let data = null;
-      try {
-        data = JSON.parse(xhr.responseText);
-      } catch {
-        // not JSON
-      }
-      if (xhr.status === 401) lostAdmin();
-      if (xhr.status >= 200 && xhr.status < 300 && data && data.path) done('', data);
-      else done((data && data.error) || `upload failed (${xhr.status})`);
-    };
-    xhr.onerror = () => done('cannot reach the daemon');
-    xhr.send(file);
-    return xhr;
-  }
-
-  // dropVideos stops the uploads of videos still on their way and returns
-  // an empty list. What has arrived stays on the machine until pruned.
-  function dropVideos(videos) {
-    for (const v of videos) if (v.xhr) v.xhr.abort();
-    return [];
-  }
-
-  // videosProblem says why videos cannot be sent yet.
-  function videosProblem(videos) {
-    if (videos.some((v) => v.error)) return 'A video could not be uploaded: remove it.';
-    if (videos.some((v) => !v.path)) return 'Wait for the videos to finish uploading.';
-    return '';
-  }
-
-  // withVideos is text with a line for each video's path appended.
-  function withVideos(text, videos) {
-    if (!videos.length) return text;
-    const lines = videos.map((v) => `Video: ${v.path}`).join('\n');
-    return text.trim() ? text.trimEnd() + '\n\n' + lines : lines;
-  }
-
-  function renderChatImages() {
-    renderThumbs($('chat-images'), chat.images, chat.videos);
-  }
-
-  // renderThumbs shows images and videos to send in list ul, each with a
-  // button to remove it (data-image or data-video is its index).
-  function renderThumbs(ul, images, videos = []) {
-    ul.hidden = !images.length && !videos.length;
-    ul.replaceChildren(...images.map((im, i) => {
-      const img = h('img', 'h-16 w-16 rounded-md border border-ink-600 bg-ink-950 object-cover touch:h-20 touch:w-20');
-      img.src = im.url;
-      img.alt = im.name;
-      img.title = im.name;
-      return h('li', 'relative', img, removeButton('image', i, im.name));
-    }), ...videos.map((v, i) => {
-      v.statusEl = h('span', 'truncate text-[11px]');
-      v.barEl = h('span', 'block h-full rounded-full bg-emerald-400');
-      const box = h('div', 'flex h-16 w-44 flex-col justify-center gap-1 rounded-md border border-ink-600 bg-ink-950 px-2 touch:h-20',
-        h('span', 'truncate font-mono text-[11px] text-zinc-200', '▶ ' + v.name), v.statusEl,
-        h('span', 'block h-1 overflow-hidden rounded-full bg-ink-700', v.barEl));
-      box.title = v.path || v.name;
-      paintVideo(v);
-      return h('li', 'relative', box, removeButton('video', i, v.name));
-    }));
-  }
-
-  function removeButton(kind, i, name) {
-    const x = h('button', 'touch:h-8 touch:w-8 absolute -right-1.5 -top-1.5 grid h-5 w-5 place-items-center rounded-full border border-ink-600 bg-ink-900 text-[11px] leading-none text-zinc-300 hover:border-rose-400/60 hover:text-rose-300 focus-visible:outline-2 focus-visible:outline-emerald-400', '✕');
-    x.type = 'button';
-    x.dataset[kind] = String(i);
-    x.setAttribute('aria-label', `Remove ${name}`);
-    return x;
-  }
-
-  // paintVideo shows how far video v's upload is.
-  function paintVideo(v) {
-    if (!v.statusEl) return;
-    const pct = v.path ? 100 : v.size ? Math.min(99, Math.floor((v.sent / v.size) * 100)) : 0;
-    v.statusEl.textContent = v.error ? v.error : v.path ? `${fmtSize(v.size)} · uploaded` : `uploading ${pct}% of ${fmtSize(v.size)}`;
-    v.statusEl.className = 'truncate text-[11px] ' + (v.error ? 'text-rose-300' : 'text-zinc-500');
-    v.barEl.style.width = (v.error ? 0 : pct) + '%';
-  }
-
-  // autosize grows the message box with its text, up to its max height.
-  function autosize() {
-    fitHeight($('chat-input'));
-  }
-
-  function renderChatScreen() {
-    // Without a chat (a shell, or before the first message) the screen
-    // takes the room of the empty log. It shows with the chat only.
-    const shown = chat.screenOpen && chat.view === 'chat';
-    const big = chat.screenOpen && !chat.feed.file;
-    $('chat-screen').hidden = !shown;
-    $('chat-screen').classList.toggle('max-h-[45%]', !big);
-    $('chat-screen').classList.toggle('flex-1', big);
-    $('chat-scroll').classList.toggle('flex-1', !big);
-    $('chat-scroll').classList.toggle('flex-none', big);
-    $('chat-screen-toggle').setAttribute('aria-pressed', String(shown));
-    if (shown) refreshScreen();
-    else clearTimeout(chat.screenTimer);
-  }
-
-  const SCREEN_POLL_MS = 1500;
-
-  async function refreshScreen() {
-    clearTimeout(chat.screenTimer);
-    if (!chat.open || !chat.screenOpen || chat.view !== 'chat') return;
-    const seq = chat.seq;
-    const pre = $('chat-screen-pre');
-    if (chatLive()) {
-      try {
-        const r = await api('GET', chatAPI('screen'));
-        if (seq === chat.seq) {
-          // Dialogs and the prompt are at the bottom: stay there, unless
-          // scrolled up to read.
-          const box = $('chat-screen');
-          const atBottom = !pre.textContent || box.scrollHeight - box.scrollTop - box.clientHeight < 24;
-          pre.textContent = (r && r.screen) || '';
-          if (atBottom) box.scrollTop = box.scrollHeight;
-        }
-      } catch (e) {
-        if (seq === chat.seq) pre.textContent = '// ' + e.message;
-      }
-    } else if (chat.agent) {
-      pre.textContent = '// the session has ended';
-    }
-    if (seq === chat.seq && chat.screenOpen) chat.screenTimer = setTimeout(refreshScreen, SCREEN_POLL_MS);
-  }
-
-  // setView switches the dialog to the chat, the workflow runs ('wf';
-  // unfolding and showing run, if given), a workflow agent ('sub', see
-  // openSub), the images ('media') or the files ('files'). Leaving 'sub'
-  // stops following that agent.
-  function setView(view, run) {
-    if (view === 'sub' && !wf.sub) view = 'wf';
-    if (view !== 'sub' && wf.sub) {
-      stopFeed(wf.feed);
-      wf.sub = null;
-    }
-    chat.view = view;
-    if (run) wf.shown.add(run);
-    renderChatView();
-    if (view === 'wf') {
-      renderWorkflows();
-      const card = run && $('wf-list').querySelector(`[data-run="${CSS.escape(run)}"]`);
-      if (card) card.scrollIntoView({ block: 'start' });
-    } else if (view === 'media') {
-      renderMedia();
-    } else if (view === 'files') {
-      renderFiles();
-      loadFiles();
-    } else if (view === 'chat') {
-      // Hidden, the log kept growing but lost its scroll position.
-      const sc = $('chat-scroll');
-      sc.scrollTop = sc.scrollHeight;
-    }
-  }
-
-  // renderChatView shows the parts of the dialog the view has.
-  function renderChatView() {
-    const v = chat.view;
-    renderChatAsk();
-    $('chat-scroll').hidden = v !== 'chat';
-    $('chat-foot').hidden = v !== 'chat';
-    $('wf-view').hidden = v !== 'wf';
-    $('sub-view').hidden = v !== 'sub';
-    $('media-view').hidden = v !== 'media';
-    $('files-view').hidden = v !== 'files';
-    renderChatScreen();
-    renderTabs();
-  }
-
-  function wireChat() {
-    const dlg = $('chat');
-    wireImageView();
-    $('chat-close').addEventListener('click', closeChat);
-    $('chat-form').addEventListener('submit', sendMessage);
-    // Kept only once folded or unfolded by hand: until then it follows
-    // the screen's width.
-    const repo = $('chat-repo');
-    repo.addEventListener('toggle', () => {
-      if (repo.open === repoOpen()) return;
-      try { localStorage.setItem(REPO_OPEN, repo.open ? '1' : '0'); } catch (e) { /* the choice lasts this page */ }
-    });
-    const ta = $('chat-input');
-    ta.addEventListener('input', () => {
-      autosize();
-      if (chat.open) saveDraft(chat.host, chat.id, ta.value);
-    });
-    ta.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing && !touch()) {
-        ev.preventDefault();
-        $('chat-form').requestSubmit();
-      }
-    });
-    ta.addEventListener('paste', (ev) => {
-      const files = mediaFiles(ev.clipboardData);
-      if (!files.length) return;
-      ev.preventDefault();
-      addChatFiles(files);
-    });
-    $('chat-attach').addEventListener('click', () => $('chat-file').click());
-    $('chat-file').addEventListener('change', (ev) => {
-      addChatFiles(ev.target.files);
-      ev.target.value = '';
-    });
-    $('chat-images').addEventListener('click', (ev) => {
-      const b = ev.target.closest('button[data-image], button[data-video]');
-      if (!b) return;
-      if (b.dataset.video) dropVideos(chat.videos.splice(Number(b.dataset.video), 1));
-      else chat.images.splice(Number(b.dataset.image), 1);
-      renderChatImages();
-      if (!touch()) ta.focus();
-    });
-    dlg.addEventListener('dragover', (ev) => {
-      if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files') && chatLive()) ev.preventDefault();
-    });
-    dlg.addEventListener('drop', (ev) => {
-      if (!ev.dataTransfer || !ev.dataTransfer.files.length) return;
-      ev.preventDefault();
-      addChatFiles(ev.dataTransfer.files);
-    });
-    $('chat-keys').addEventListener('click', (ev) => {
-      const b = ev.target.closest('button[data-key]');
-      if (b) sendKey(b.dataset.key);
-    });
-    $('chat-interrupt').addEventListener('click', interruptChat);
-    $('chat-model-sel').addEventListener('change', switchChatModel);
-    $('chat-effort-sel').addEventListener('change', switchChatModel);
-    $('chat-screen-toggle').addEventListener('click', () => {
-      chat.screenAuto = false;
-      chat.screenAutoOpened = false;
-      if (chat.view !== 'chat') {
-        chat.screenOpen = true;
-        setView('chat');
-        return;
-      }
-      chat.screenOpen = !chat.screenOpen;
-      renderChatScreen();
-    });
-    $('chat-tab-chat').addEventListener('click', () => setView('chat'));
-    $('chat-tab-wf').addEventListener('click', () => setView('wf'));
-    $('chat-tab-media').addEventListener('click', () => setView('media'));
-    $('chat-tab-files').addEventListener('click', () => setView('files'));
-    $('files-q').addEventListener('input', () => filesSoon(250));
-    $('files-q').addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') {
-        ev.preventDefault();
-        loadFiles();
-      } else if (ev.key === 'Escape' && ev.target.value) {
-        ev.preventDefault(); // clear the search instead of closing the dialog
-        ev.target.value = '';
-        loadFiles();
-      }
-    });
-    $('files-reload').addEventListener('click', () => loadFiles());
-    $('file-back').addEventListener('click', closeFile);
-    $('file-download').addEventListener('click', downloadFile);
-    $('file-send').addEventListener('click', toggleFileSend);
-    document.addEventListener('click', (ev) => {
-      if (!$('file-send-menu').hidden && !ev.target.closest('#file-send, #file-send-menu')) closeFileSend();
-    });
-    document.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Escape' && !$('file-send-menu').hidden) closeFileSend();
-    });
-    $('chat-tabs').addEventListener('keydown', (ev) => {
-      if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
-      const tabs = [...$('chat-tabs').querySelectorAll('[role="tab"]')].filter((t) => !t.hidden);
-      const at = tabs.findIndex((t) => t.getAttribute('aria-selected') === 'true');
-      const to = tabs[(at + (ev.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length];
-      if (!to) return;
-      to.click();
-      to.focus();
-    });
-    $('sub-back').addEventListener('click', () => setView('wf'));
-    // Alt+A (⌥A), also from the message box, asks to archive the session
-    // (or delete a finished one) with the confirmation focused: Enter does
-    // it, Esc or Alt+A again keeps it.
-    dlg.addEventListener('keydown', (ev) => {
-      if (ev.isComposing || ev.code !== 'KeyA' || !ev.altKey || ev.ctrlKey || ev.metaKey || ev.shiftKey) return;
-      if (!chat.agent || chat.stopping) return;
-      ev.preventDefault();
-      $('chat-stop-box').querySelector('button').click();
-      if (!chat.confirmStop && !touch()) ta.focus();
-    });
-    // Ctrl+C with no text selected, while the agent works or waits on a
-    // dialog, interrupts its turn as in its terminal. Esc keeps closing the
-    // session.
-    dlg.addEventListener('keydown', (ev) => {
-      if (ev.isComposing || ev.altKey || ev.metaKey || ev.shiftKey) return;
-      if (!ev.ctrlKey || ev.key.toLowerCase() !== 'c' || chat.view !== 'chat' || chat.confirmStop || !chatBusy()) return;
-      const t = ev.target;
-      if ((t.selectionStart ?? 0) !== (t.selectionEnd ?? 0) || String(getSelection())) return;
-      ev.preventDefault();
-      interruptChat();
-    });
-    // Esc closes the archive confirmation, then steps back from a
-    // workflow agent or a file, before it closes the dialog.
-    dlg.addEventListener('cancel', (ev) => {
-      if (chat.confirmStop && !chat.stopping) {
-        ev.preventDefault();
-        chat.confirmStop = false;
-        renderChatStop();
-        if (!touch()) ta.focus();
-        return;
-      }
-      if (chat.view === 'sub') {
-        ev.preventDefault();
-        setView('wf');
-      } else if (chat.view === 'files' && files.open) {
-        ev.preventDefault();
-        closeFile();
-      }
-    });
-    dlg.addEventListener('close', () => {
-      chat.open = false;
-      chat.seq++;
-      chat.videos = dropVideos(chat.videos);
-      clearTimeout(chat.screenTimer);
-      clearTimeout(files.timer);
-      revokeFileURL();
-      stopFeed(chat.feed);
-      stopFeed(wf.feed);
-      wf.sub = null;
-      wf.cards.clear();
-    });
-    wireBackdrop(dlg, closeChat);
-    chat.feed = newFeed({
-      scroller: $('chat-scroll'),
-      log: $('chat-log'),
-      url: (q) => chatAPI('chat?' + q),
-      imageURL: (q) => chatAPI('image?' + q),
-      live: chatLive,
-      working: () => !!chat.agent && chat.agent.state === 'working',
-      empty: chatEmpty,
-      query: (q) => q.set('asks', chat.asks.map((a) => a.id).join(',')),
-      onReply: (r) => {
-        if (r.agent) chatAgent(chat.host, r.agent);
-        chatModel(r.model);
-        chatAsks(r.asks);
-        // The Media tab follows: in full at first, then with each image.
-        if (r.reset || (r.entries || []).some((e) => e.images && e.images.length)) loadMedia();
-        // So do the Files tab and its count, a moment after files written.
-        if (r.reset) loadFiles();
-        else if ((r.entries || []).some((e) => e.files && e.files.length)) filesSoon(1500);
-      },
-      onStatus: renderChatStatus,
-      onFile: renderChatScreen,
-    });
+  function buildPanes() {
+    if (insp.panes) return insp.panes;
+    const p = {};
+    // workflow: the runs, or one agent's conversation
+    const list = h('div', 'insp-body');
+    const subHead = h('div', 'insp-sub-h');
+    const subLog = h('div', 'col');
+    const subScroll = h('div', 'sub-log', subLog);
+    stickToBottom(subScroll);
+    const sub = h('div', { class: 'insp-pane', hidden: true }, subHead, h('p', 'ro-note', 'Read-only: workflow agents take no input'), subScroll);
+    p.workflow = { el: h('div', 'insp-pane', list, sub), list, sub, subHead, subLog, subScroll };
     wf.feed = newFeed({
-      scroller: $('sub-scroll'),
-      log: $('sub-log'),
+      scroller: subScroll,
+      log: subLog,
       url: (q) => chatAPI(`workflows/${encodeURIComponent(wf.sub.run)}/agents/${encodeURIComponent(wf.sub.id)}/chat?` + q),
       imageURL: (q) => chatAPI(`workflows/${encodeURIComponent(wf.sub.run)}/agents/${encodeURIComponent(wf.sub.id)}/image?` + q),
       live: subLive,
@@ -6921,206 +4172,141 @@
       },
       onStatus: renderSubHead,
     });
+    // files: the list and a search, or one file
+    const q = h('input', { type: 'search', placeholder: 'Search files', 'aria-label': 'Search files in the session’s folder', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
+    q.addEventListener('input', () => filesSoon(250));
+    q.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        loadFiles();
+      } else if (ev.key === 'Escape' && q.value) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        q.value = '';
+        loadFiles();
+      }
+    });
+    const reload = iconBtn('refresh', 'Look again', () => loadFiles());
+    const flist = h('div', { class: 'insp-body flush', 'aria-live': 'polite' });
+    const browse = h('div', 'insp-pane', h('div', 'files-search', h('div', 'pop-row', h('label', 'search grow', icon('search', 'i-sm'), q), reload)), flist);
+    const fview = h('div', { class: 'insp-pane', hidden: true });
+    p.files = { el: h('div', 'insp-pane', browse, fview), q, reload, list: flist, browse, view: fview };
+    // media
+    const grid = h('div', 'media-grid');
+    p.media = { el: h('div', 'insp-pane', h('div', 'insp-body', grid)), grid };
+    // terminal
+    const pre = h('pre', { class: 'term', 'aria-label': 'Terminal screen', tabindex: '0' });
+    const termNote = h('span', 'grow', 'Live');
+    p.terminal = { el: h('div', 'insp-pane', h('div', 'term-pane',
+      h('div', 'term-bar', h('span', 'dot'), termNote, h('button', { type: 'button', class: 'btn ghost sm', onclick: () => refreshScreen() }, icon('refresh'), 'Refresh')),
+      pre, h('div', 'term-keys'))), pre, note: termNote };
+    insp.panes = p;
+    return p;
   }
 
-  // -------------------------------------------------------------- workflows
+  function renderInsp() {
+    const el = $('insp');
+    const tabs = inspTabs();
+    const show = insp.open && chat.open && U.view === 'chat' && admin && tabs.length > 0;
+    el.hidden = !show;
+    el.classList.toggle('shown', show);
+    if (!show) {
+      el.replaceChildren();
+      screenNeeded();
+      return;
+    }
+    if (!tabs.some((t) => t.id === insp.tab)) insp.tab = tabs[0].id;
+    const p = buildPanes();
+    if (!el.querySelector('.insp-h')) {
+      el.replaceChildren(h('div', 'insp-h'), p.workflow.el, p.files.el, p.media.el, p.terminal.el);
+    }
+    renderInspTabs();
+    for (const id of ['workflow', 'files', 'media', 'terminal']) p[id].el.hidden = id !== insp.tab;
+    if (insp.tab === 'workflow') renderWorkflows();
+    else if (insp.tab === 'files') {
+      renderFiles();
+      if (!files.loaded) loadFiles();
+    } else if (insp.tab === 'media') renderMedia();
+    else if (insp.tab === 'terminal') {
+      fill(p.terminal.el.querySelector('.term-keys'), chat.agent && chat.agent.adapter !== 'shell' ? keysStrip() : null);
+      const pre = p.terminal.pre;
+      const text = screen.text || 'Reading the terminal…';
+      if (pre.textContent !== text) {
+        pre.textContent = text;
+        pre.scrollTop = pre.scrollHeight;
+      }
+    }
+    screenNeeded();
+  }
+
+  // renderInspTabs draws the panel's tab bar.
+  function renderInspTabs() {
+    const el = $('insp');
+    const head = el.querySelector('.insp-h');
+    if (!head) return;
+    const tabs = inspTabs();
+    if (!tabs.some((t) => t.id === insp.tab)) return renderInsp();
+    const bar = h('div', { class: 'tabs', role: 'tablist', 'aria-label': 'Session details' }, tabs.map((t) =>
+      h('button', {
+        type: 'button', class: 'tab', role: 'tab', 'aria-selected': String(insp.tab === t.id), tabindex: insp.tab === t.id ? '0' : '-1',
+        onclick: () => {
+          insp.tab = t.id;
+          renderInsp();
+          renderChatHead();
+        },
+      }, icon(t.icon), t.text, t.extra)));
+    bar.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'ArrowRight' && ev.key !== 'ArrowLeft') return;
+      const i = tabs.findIndex((t) => t.id === insp.tab);
+      const j = (i + (ev.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length;
+      insp.tab = tabs[j].id;
+      renderInsp();
+      renderChatHead();
+      el.querySelectorAll('.tab')[j]?.focus();
+    });
+    fill(head, small() ? iconBtn('chevron-left', 'Back to the chat', closeInsp, { cls: 'back-btn' }) : null, bar, small() ? null : iconBtn('x', 'Close the panel', closeInsp));
+  }
+
+  // ---- workflows
   //
   // A workflow is a script a Claude Code session runs in the background: it
-  // starts many subagents, in phases, and returns a result. The agent list
-  // shows the runs going on (GET /api/workflows, here and on every joined
-  // fleet); a session's Workflows tab shows all of its runs, long-polled,
+  // starts many subagents, in phases, and returns a result. The session
+  // list shows the runs going on (GET /api/workflows, here and on every
+  // joined fleet); the panel shows all of the session's runs, long-polled,
   // and each of their agents' conversations.
 
   const wf = {
     runs: [], // the open session's runs, oldest first
     v: '', // their version, for the next long poll
     loaded: false,
-    hint: 0, // runs the agent list knew of when the dialog opened
+    hint: 0, // runs the session list knew of when the session opened
     shown: new Set(), // run ids unfolded
     known: new Set(), // run ids seen: a new one unfolds by itself
     cards: new Map(), // run id -> {sig, el}: cards only change with their run
-    sub: null, // {run, id}: the workflow agent in the 'sub' view
+    sub: null, // {run, id}: the workflow agent shown
     feed: null, // its conversation
   };
 
-  const WF = {
-    running: {
-      label: 'running',
-      badge: 'inline-flex items-center gap-1.5 rounded-full bg-sky-400/10 px-2 py-0.5 text-[11px] font-semibold text-sky-300 ring-1 ring-inset ring-sky-400/30',
-      dot: 'size-2.5 shrink-0 rounded-full border-[1.5px] border-sky-400 border-t-transparent animate-spin motion-reduce:animate-none',
-      bar: 'bg-sky-400 animate-pulse motion-reduce:animate-none',
-    },
-    completed: {
-      label: 'completed',
-      badge: 'inline-flex items-center gap-1.5 rounded-full bg-emerald-400/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-300/90 ring-1 ring-inset ring-emerald-400/25',
-      dot: 'size-1.5 shrink-0 rounded-full bg-emerald-400',
-      bar: 'bg-emerald-400/80',
-    },
-    done: {
-      label: 'done',
-      badge: 'inline-flex items-center gap-1.5 rounded-full bg-emerald-400/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-300/90 ring-1 ring-inset ring-emerald-400/25',
-      dot: 'size-1.5 shrink-0 rounded-full bg-emerald-400',
-      bar: 'bg-emerald-400/80',
-    },
-    failed: {
-      label: 'failed',
-      badge: 'inline-flex items-center gap-1.5 rounded-full bg-rose-500/10 px-2 py-0.5 text-[11px] font-semibold text-rose-300 ring-1 ring-inset ring-rose-500/40',
-      dot: 'size-1.5 shrink-0 rounded-full bg-rose-500',
-      bar: 'bg-rose-500',
-    },
-    stopped: {
-      label: 'stopped',
-      badge: 'inline-flex items-center gap-1.5 rounded-full bg-zinc-400/5 px-2 py-0.5 text-[11px] font-semibold text-zinc-400 ring-1 ring-inset ring-zinc-500/25',
-      dot: 'size-1.5 shrink-0 rounded-full bg-zinc-500',
-      bar: 'bg-zinc-600',
-    },
+  function resetWorkflows(host, id) {
+    Object.assign(wf, { runs: [], v: '', loaded: false, sub: null, hint: (S.workflows.get(agentKey(host, id)) || []).length });
+    wf.shown.clear();
+    wf.known.clear();
+    wf.cards.clear();
+  }
+
+  const subRun = () => wf.sub && wf.runs.find((r) => r.id === wf.sub.run);
+  const subAgent = () => {
+    const run = subRun();
+    return run && run.agents.find((a) => a.id === wf.sub.id);
   };
-  const wfStatus = (s) => WF[s] || WF.stopped;
+  // subLive: the agent may write more (also while not known yet).
+  const subLive = () => {
+    const a = subAgent();
+    return !a || a.status === 'running';
+  };
 
-  function wfBadge(status) {
-    const st = wfStatus(status);
-    return h('span', st.badge, h('span', st.dot), st.label);
-  }
-
-  // fmtTokens shortens a token count: 812, 9.4k, 748k, 1.2M.
-  function fmtTokens(n) {
-    n = n || 0;
-    if (n < 1000) return String(n);
-    if (n < 1e6) return (n / 1000).toFixed(n < 1e4 ? 1 : 0) + 'k';
-    return (n / 1e6).toFixed(1) + 'M';
-  }
-
-  // elapsed shows how long from start to end; without end it keeps
-  // counting (the 1s ticker updates [data-since]).
-  function elapsed(start, end, cls) {
-    const el = h('span', cls || '', start ? dur((end || Date.now()) - start) : '–');
-    if (start && !end) el.dataset.since = String(start);
-    return el;
-  }
-
-  // Up to this many agents get a bar each; more would not fit the row.
-  const BARS_MAX = 16;
-
-  // agentBars draws one bar per agent status. Many agents become one bar
-  // per stretch of agents with the same status, as wide as their share.
-  function agentBars(statuses, cls) {
-    const row = h('span', 'flex h-1.5 min-w-0 gap-0.5 overflow-hidden ' + (cls || ''));
-    if (!statuses.length) row.append(h('span', 'flex-1 rounded-full bg-ink-700'));
-    const runs = [];
-    for (const s of statuses) {
-      const last = runs[runs.length - 1];
-      if (statuses.length > BARS_MAX && last && last.s === s) last.n++;
-      else runs.push({ s, n: 1 });
-    }
-    for (const { s, n } of runs) {
-      const bar = h('span', 'min-w-px flex-1 rounded-full ' + wfStatus(s).bar);
-      bar.style.flexGrow = String(n);
-      row.append(bar);
-    }
-    return row;
-  }
-
-  // phaseGroups puts a run's agents under its phases, in order; agents of
-  // no phase go last.
-  function phaseGroups(run) {
-    const groups = run.phases.map((p) => ({ title: p.title, detail: p.detail || '', agents: [] }));
-    for (const a of run.agents) {
-      let g = groups.find((x) => x.title === (a.phase || ''));
-      if (!g) {
-        g = { title: a.phase || '', detail: '', agents: [] };
-        groups.push(g);
-      }
-      g.agents.push(a);
-    }
-    return groups;
-  }
-
-  // ---- the agent list
-
-  const WF_POLL_MS = 3000;
-  let wfTimer = 0;
-  let wfBusy = false;
-
-  function scheduleWorkflows(delay) {
-    clearTimeout(wfTimer);
-    if (admin) wfTimer = setTimeout(pollWorkflows, delay);
-  }
-
-  // pollWorkflows asks this fleet and every joined one for the runs going
-  // on. The list keeps what it needs to draw them, so runs only redraw it
-  // when that changed.
-  async function pollWorkflows() {
-    if (!admin || wfBusy) return;
-    if (document.hidden) {
-      scheduleWorkflows(WF_POLL_MS);
-      return;
-    }
-    wfBusy = true;
-    const next = new Map();
-    const keep = (host) => {
-      for (const [k, v] of S.workflows) if (k.startsWith(host + '/') || (!host && !k.includes('/'))) next.set(k, v);
-    };
-    const hosts = ['', ...pickerHosts().filter((x) => x.id && picker.hosts.get(x.id) === 'joined').map((x) => x.id)];
-    await Promise.all(hosts.map(async (host) => {
-      let r;
-      try {
-        r = await api('GET', host ? `/api/hosts/${encodeURIComponent(host)}/workflows` : '/api/workflows');
-      } catch (e) {
-        if (e.status !== 404) keep(host); // 404: a fleet without workflows
-        return;
-      }
-      for (const { agent, run } of (r && r.workflows) || []) {
-        const k = agentKey(host, agent);
-        if (!next.has(k)) next.set(k, []);
-        next.get(k).push({
-          id: run.id, name: run.name, status: run.status, phase: run.phase,
-          phases: run.phases.map((p) => p.title), counts: run.counts,
-          bars: run.agents.map((a) => a.status), startedMs: run.startedMs, endedMs: run.endedMs,
-        });
-      }
-    }));
-    wfBusy = false;
-    if (!admin) return;
-    if (!same([...S.workflows], [...next])) {
-      S.workflows = next;
-      invalidate('agents');
-    }
-    scheduleWorkflows(WF_POLL_MS);
-  }
-
-  document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) scheduleWorkflows(0);
-  });
-
-  // workflowLine sums up a run in its agent's row; it opens the run in the
-  // session's Workflows tab.
-  function workflowLine(host, a, run) {
-    const st = wfStatus(run.status);
-    const n = run.bars.length;
-    const done = run.counts.done + run.counts.failed + run.counts.stopped;
-    const b = h('button', 'touch:min-h-11 mt-2 flex w-full min-w-0 flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-fuchsia-400/15 bg-fuchsia-400/5 px-2.5 py-1.5 text-left text-xs hover:border-fuchsia-400/30 hover:bg-fuchsia-400/10 focus-visible:outline-2 focus-visible:outline-fuchsia-400');
-    b.type = 'button';
-    b.addEventListener('click', () => openChat(host, a.id, a, { view: 'wf', run: run.id }));
-    const at = run.phases.indexOf(run.phase);
-    b.append(
-      h('span', 'flex min-w-0 items-center gap-2',
-        h('span', st.dot),
-        h('span', 'font-mono text-fuchsia-400/70', '⧉'),
-        h('span', 'truncate font-mono font-medium text-fuchsia-100', run.name)),
-      run.phase ? h('span', 'shrink-0 text-zinc-400', run.phase,
-        at >= 0 && run.phases.length > 1 ? h('span', 'text-zinc-600', ` ${at + 1}/${run.phases.length}`) : null) : '',
-      h('span', 'ml-auto flex min-w-0 items-center gap-3',
-        agentBars(run.bars, 'w-20 sm:w-32'),
-        h('span', 'shrink-0 font-mono tabular-nums text-zinc-500',
-          `${done}/${n} agents · `, elapsed(run.startedMs, run.status === 'running' ? 0 : run.endedMs))));
-    b.setAttribute('aria-label', `Workflow ${run.name}, ${st.label}${run.phase ? ', phase ' + run.phase : ''}, ${done} of ${n} agents finished. Open it`);
-    return b;
-  }
-
-  // ---- the Workflows tab
-
-  // wfLoop follows the session's runs while the dialog shows it; a
-  // finished session's runs no longer change.
+  // wfLoop follows the session's runs while it shows; a finished session's
+  // runs no longer change.
   async function wfLoop(seq) {
     let failures = 0;
     while (chat.open && seq === chat.seq) {
@@ -7153,61 +4339,35 @@
     const was = subAgent();
     wf.runs = runs;
     for (const r of runs) {
-      // At first the runs going on and the latest unfold; later every new one.
+      // At first the runs going on unfold; later every new one.
       if (!wf.known.has(r.id) && (!first || r.status === 'running')) wf.shown.add(r.id);
       wf.known.add(r.id);
     }
     if (first && runs.length) wf.shown.add(runs[runs.length - 1].id);
-    renderTabs();
-    for (const f of [chat.feed, wf.feed]) for (const paint of f.watch) paint();
-    if (chat.view === 'wf') renderWorkflows();
-    if (chat.view === 'sub') {
+    for (const f of [chat.feed, wf.feed]) if (f) for (const paint of f.watch) paint();
+    renderChatHead();
+    if (insp.open) {
+      if (insp.tab === 'workflow' && !wf.sub) renderWorkflows();
+      else renderInspTabs();
+    }
+    if (wf.sub) {
       const now = subAgent();
       if (was && now && was.status !== now.status) paintPending(wf.feed);
       renderSubHead();
     }
   }
 
-  function renderTabs() {
-    const v = chat.view;
-    const tabs = { chat: v === 'chat', wf: v === 'wf' || v === 'sub', media: v === 'media', files: v === 'files' };
-    const runs = !!(wf.runs.length || wf.hint) || tabs.wf;
-    const images = !!media.items.length || tabs.media;
-    const folder = (!files.missing && !!(files.dir || files.total)) || tabs.files;
-    $('chat-tabs').hidden = !runs && !images && !folder;
-    $('chat-tab-wf').hidden = !runs;
-    $('chat-tab-media').hidden = !images;
-    $('chat-tab-files').hidden = !folder;
-    for (const [k, on] of Object.entries(tabs)) {
-      const t = $('chat-tab-' + k);
-      t.setAttribute('aria-selected', String(on));
-      t.tabIndex = on ? 0 : -1;
-    }
-    const mn = $('chat-tab-media-n');
-    mn.textContent = String(media.items.length);
-    mn.hidden = !media.items.length;
-    const fn = $('chat-tab-files-n');
-    fn.textContent = String(files.total);
-    fn.hidden = !files.total;
-    const count = $('chat-tab-wf-n');
-    count.replaceChildren(String(wf.runs.length));
-    if (wf.runs.some((r) => r.status === 'running')) count.prepend(h('span', WF.running.dot));
-    count.hidden = !wf.runs.length;
-  }
-
-  // renderWorkflows draws the run cards, newest first. A card is drawn
-  // anew only when its run changed, so reading a finished run's result is
-  // not disturbed by a run going on.
   function renderWorkflows() {
-    const box = $('wf-list');
-    if (!chat.open) return;
+    const p = insp.panes && insp.panes.workflow;
+    if (!p) return;
+    p.list.hidden = !!wf.sub;
+    p.sub.hidden = !wf.sub;
+    if (wf.sub) return renderSubHead();
     if (!wf.loaded || !wf.runs.length) {
       wf.cards.clear();
-      box.replaceChildren(h('div', 'py-10 text-center font-mono text-xs text-zinc-600',
-        !wf.loaded ? '// loading…' : '// This session has started no subagents.'));
+      fill(p.list, h('p', 'empty-note', !wf.loaded ? 'Loading…' : 'This session has started no workflow.'));
       return;
     }
-    const focus = box.contains(document.activeElement) ? document.activeElement.dataset.key : '';
     const cards = [];
     for (const run of [...wf.runs].reverse()) {
       const sig = JSON.stringify(run) + wf.shown.has(run.id);
@@ -7219,264 +4379,2413 @@
       cards.push(c.el);
     }
     for (const id of wf.cards.keys()) if (!wf.runs.some((r) => r.id === id)) wf.cards.delete(id);
-    // Drop what is not shown anymore, then put new cards in place: the
-    // others stay where they are (a moved element loses its scroll
-    // position).
-    for (const el of [...box.children]) if (!cards.includes(el)) el.remove();
+    // Cards already in place stay (a moved element loses its scroll position).
+    for (const el of [...p.list.children]) if (!cards.includes(el)) el.remove();
     cards.forEach((el, i) => {
-      if (box.children[i] !== el) box.insertBefore(el, box.children[i] || null);
+      if (p.list.children[i] !== el) p.list.insertBefore(el, p.list.children[i] || null);
     });
-    if (focus && !box.contains(document.activeElement)) box.querySelector(`[data-key="${CSS.escape(focus)}"]`)?.focus();
   }
 
   function runCard(run) {
     const open = wf.shown.has(run.id);
-    const card = h('section', 'min-w-0 rounded-lg border border-ink-700 bg-ink-850/40');
-    card.dataset.run = run.id;
-    const head = h('button', 'touch:min-h-11 flex w-full min-w-0 items-start gap-2.5 rounded-t-lg px-3.5 pb-2.5 pt-3 text-left hover:bg-ink-800/40 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-fuchsia-400');
-    head.type = 'button';
-    head.dataset.key = 'run:' + run.id;
-    head.setAttribute('aria-expanded', String(open));
-    head.addEventListener('click', () => {
+    const fin = run.agents.filter((a) => a.status !== 'running').length;
+    const head = h('button', { type: 'button', class: 'run-h', 'aria-expanded': String(open), onclick: () => {
       if (open) wf.shown.delete(run.id);
       else wf.shown.add(run.id);
       renderWorkflows();
-    });
-    const n = run.agents.length;
-    const stats = [`${n} agent${n === 1 ? '' : 's'}`, `${run.toolUses} tool calls`, `${fmtTokens(run.tokens)} tokens`];
-    if (run.startedMs) stats.push('started ' + new Date(run.startedMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-    head.append(
-      h('span', open ? 'mt-0.5 inline-block rotate-90 text-zinc-500 transition-transform motion-reduce:transition-none' : 'mt-0.5 inline-block text-zinc-500 transition-transform motion-reduce:transition-none', '▸'),
-      h('div', 'min-w-0 flex-1',
-        h('div', 'flex flex-wrap items-center gap-x-2 gap-y-1',
-          h('span', 'font-mono text-fuchsia-400/70', '⧉'),
-          h('span', 'min-w-0 truncate font-mono text-[13px] font-semibold text-zinc-100', run.name),
-          wfBadge(run.status)),
-        run.description ? h('p', open ? 'mt-1 text-xs leading-relaxed text-zinc-400' : 'mt-1 truncate text-xs text-zinc-500', run.description) : null,
-        h('div', 'mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[11px] tabular-nums text-zinc-500', ...stats.map((s) => h('span', '', s)))),
-      elapsed(run.startedMs, run.status === 'running' ? 0 : run.endedMs || run.updatedMs, 'shrink-0 pt-0.5 font-mono text-xs tabular-nums text-zinc-300'));
-    card.append(head, phaseStrip(run));
-    if (open) card.append(runBody(run));
-    return card;
+    } },
+    icon('chevron-right', 'chev'),
+    h('div', 'grow',
+      h('div', 'chead-row', h('span', 'wf-name', run.name), wfPill(run.status)),
+      h('div', 'run-stats', h('span', null, `${fin}/${run.agents.length} agents`), h('span', null, `${run.toolUses} tool calls`),
+        h('span', null, `${fmtTokens(run.tokens)} tokens`), elapsed(run.startedMs, run.status === 'running' ? 0 : run.endedMs || run.updatedMs))));
+    return h('section', { class: 'run', 'data-run': run.id }, head, phaseStrip(run), open ? runBody(run) : null);
+  }
+
+  // phaseGroups puts a run's agents under its phases, in order; agents of
+  // no phase go last.
+  function phaseGroups(run) {
+    const groups = run.phases.map((p) => ({ title: p.title, detail: p.detail || '', agents: [] }));
+    for (const a of run.agents) {
+      let g = groups.find((x) => x.title === (a.phase || ''));
+      if (!g) {
+        g = { title: a.phase || '', detail: '', agents: [] };
+        groups.push(g);
+      }
+      g.agents.push(a);
+    }
+    return groups;
   }
 
   // phaseStrip is a run at a glance: its phases side by side, an agent a
-  // bar.
+  // bar (many agents: a bar per stretch of the same status).
   function phaseStrip(run) {
-    const strip = h('div', 'flex min-w-0 gap-3 px-3.5 pb-3');
-    for (const g of phaseGroups(run)) {
-      const done = g.agents.filter((a) => a.status !== 'running').length;
+    return h('div', 'phases', phaseGroups(run).map((g) => {
+      const fin = g.agents.filter((a) => a.status !== 'running').length;
       const now = run.status === 'running' && g.title === run.phase;
-      strip.append(h('div', 'min-w-0 flex-1',
-        h('div', now
-          ? 'mb-1 flex items-baseline justify-between gap-2 text-[10px] font-semibold uppercase tracking-wider text-sky-200'
-          : 'mb-1 flex items-baseline justify-between gap-2 text-[10px] font-medium uppercase tracking-wider text-zinc-500',
-        h('span', 'truncate', g.title || 'agents'),
-        g.agents.length ? h('span', 'shrink-0 font-mono normal-case tabular-nums tracking-normal text-zinc-500', `${done}/${g.agents.length}`) : null),
-        agentBars(g.agents.map((a) => a.status))));
+      return h('div', 'phase' + (now ? ' now' : ''),
+        h('div', 'phase-h', h('span', 'trunc', g.title || 'Agents'), h('span', 'num', g.agents.length ? `${fin}/${g.agents.length}` : '–')),
+        h('div', { class: 'bars', role: 'img', 'aria-label': `${g.title || 'Agents'}: ${fin} of ${g.agents.length} agents done` }, bars(g.agents.map((a) => a.status))));
+    }));
+  }
+
+  const BARS_MAX = 16;
+  function bars(statuses) {
+    if (!statuses.length) return h('span', null);
+    const runs = [];
+    for (const s of statuses) {
+      const last = runs[runs.length - 1];
+      if (statuses.length > BARS_MAX && last && last.s === s) last.n++;
+      else runs.push({ s, n: 1 });
     }
-    return strip;
+    return runs.map(({ s, n }) => {
+      const b = h('span', s === 'running' ? 'running' : s === 'failed' ? 'failed' : 'done');
+      b.style.flexGrow = String(n);
+      return b;
+    });
   }
 
   function runBody(run) {
-    const body = h('div', 'flex min-w-0 flex-col gap-4 border-t border-ink-700 px-3.5 py-3');
-    if (run.status === 'failed' || (run.status === 'stopped' && run.summary)) {
-      body.append(h('div', 'rounded-md border border-rose-500/30 bg-rose-500/5 px-3 py-2',
-        h('div', 'mb-1 text-[10px] font-semibold uppercase tracking-wider text-rose-300/80', run.status === 'failed' ? 'Failed' : 'Stopped'),
-        h('pre', 'max-h-60 overflow-auto whitespace-pre-wrap break-words font-mono text-[11.5px] leading-snug text-rose-100/90', run.summary || 'no reason given')));
-    } else if (run.status === 'stopped') {
-      body.append(h('div', 'font-mono text-[11px] text-zinc-500', '// stopped: the session ended before the run did'));
+    const out = [];
+    if (run.description) out.push(h('p', 'wf-desc', run.description));
+    if (run.status === 'failed' || (run.status === 'stopped' && run.summary)) out.push(h('pre', 'result-err', run.summary || 'No reason given.'));
+    else if (run.status === 'stopped') out.push(h('p', 'note-line', 'Stopped: the session ended before the run did.'));
+    for (const g of phaseGroups(run)) {
+      const busy = g.agents.some((a) => a.status === 'running');
+      out.push(h('div', null,
+        h('div', 'ph-sec-h', busy ? h('span', 'spin') : null, g.title || 'Agents', g.detail ? h('span', 'muted', g.detail) : null),
+        g.agents.length ? h('ul', 'wf-agents', g.agents.map((a) => h('li', null, wfAgentBtn(run, a))))
+          : h('p', 'menu-note', run.status === 'running' ? 'Not started yet' : 'Not reached')));
     }
-    for (const g of phaseGroups(run)) body.append(phaseSection(run, g));
-    if (run.logs && run.logs.length) {
-      body.append(h('div', 'min-w-0',
-        h('div', 'mb-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-500', 'Log'),
-        h('pre', 'max-h-48 overflow-auto whitespace-pre-wrap break-words rounded border border-ink-700 bg-ink-950 px-2.5 py-1.5 font-mono text-[11.5px] leading-snug text-zinc-400', run.logs.join('\n'))));
-    }
-    if (run.result) body.append(resultBox(run.result));
-    return body;
+    if (run.logs && run.logs.length) out.push(h('div', 'run-log', h('div', 'out-l', 'Log'), h('pre', 'out', run.logs.join('\n'))));
+    if (run.result) out.push(h('div', 'result', resultNode(run.result)));
+    return h('div', 'run-body', out);
   }
 
-  function phaseSection(run, g) {
-    const c = { running: 0, done: 0, failed: 0, stopped: 0 };
-    let from = 0;
-    let to = 0;
-    for (const a of g.agents) {
-      c[a.status in c ? a.status : 'stopped']++;
-      if (a.startedMs && (!from || a.startedMs < from)) from = a.startedMs;
-      to = Math.max(to, a.updatedMs || 0);
-    }
-    const status = !g.agents.length ? '' : c.running ? 'running' : c.failed ? 'failed' : c.stopped ? 'stopped' : 'done';
-    const icon = status ? h('span', wfStatus(status).dot) : h('span', 'size-1.5 shrink-0 rounded-full ring-1 ring-inset ring-zinc-600');
-    const counts = [];
-    if (g.agents.length) counts.push(`${c.done}/${g.agents.length} done`);
-    if (c.failed) counts.push(`${c.failed} failed`);
-    const head = h('div', 'flex min-w-0 items-center gap-2',
-      h('span', 'flex w-4 shrink-0 justify-center', icon),
-      h('span', status === 'running'
-        ? 'shrink-0 text-[11px] font-semibold uppercase tracking-wider text-sky-200'
-        : 'shrink-0 text-[11px] font-semibold uppercase tracking-wider text-zinc-300', g.title || 'Agents'),
-      g.detail ? h('span', 'min-w-0 truncate text-xs text-zinc-500', g.detail) : null,
-      h('span', 'ml-auto flex shrink-0 items-center gap-2 font-mono text-[11px] tabular-nums text-zinc-500',
-        counts.join(' · '), from ? elapsed(from, status === 'running' ? 0 : to, 'text-zinc-400') : null));
-    if (g.detail) head.title = g.detail;
-    const list = h('ul', 'mt-1 flex flex-col');
-    for (const a of g.agents) list.append(h('li', '', wfAgentRow(run, a)));
-    if (!g.agents.length) {
-      list.append(h('li', 'py-1 pl-6 font-mono text-[11px] text-zinc-600',
-        run.status === 'running' ? '// not started yet' : '// not reached'));
-    }
-    return h('div', 'min-w-0', head, list);
+  function wfAgentBtn(run, a) {
+    return h('button', { type: 'button', class: 'wf-agent', onclick: () => openSub(run.id, a.id), 'aria-label': `${a.label || a.id}, ${a.status}. Open its conversation` },
+      a.status === 'running' ? h('span', 'spin') : a.status === 'failed' ? icon('alert', 'bad-ic') : icon('check', 'ok-ic'),
+      h('span', 'name', a.label || a.id),
+      h('span', 'what', a.status === 'running' ? [a.tool ? h('b', null, a.tool + ' ') : null, a.activity || 'starting…'] : `${a.toolUses} tool calls · ${fmtTokens(a.tokens)} tokens`),
+      elapsed(a.startedMs, a.status === 'running' ? 0 : a.updatedMs, 'muted num'),
+      icon('chevron-right', 'chev'));
   }
 
-  function wfAgentRow(run, a) {
-    const st = wfStatus(a.status);
-    const b = h('button', 'touch:min-h-11 group flex w-full min-w-0 items-start gap-2 rounded-md px-1 py-1.5 text-left hover:bg-ink-800/70 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-fuchsia-400');
-    b.type = 'button';
-    b.dataset.key = `agent:${run.id}/${a.id}`;
-    b.addEventListener('click', () => openSub(run.id, a.id));
-    const act = h('div', 'mt-0.5 truncate text-xs text-zinc-500');
-    if (a.tool) act.append(h('span', 'font-mono font-medium text-sky-300/80', a.tool), ' ');
-    act.append(a.activity || (a.status === 'running' ? 'starting…' : ''));
-    if (a.activity) act.title = a.activity;
-    b.append(
-      h('span', 'flex h-5 w-4 shrink-0 items-center justify-center', h('span', st.dot)),
-      h('div', 'min-w-0 flex-1',
-        h('div', 'flex min-w-0 items-baseline gap-2',
-          h('span', 'min-w-0 truncate font-mono text-[12.5px] text-zinc-100', a.label || a.id),
-          h('span', 'ml-auto flex shrink-0 items-baseline gap-2.5 font-mono text-[11px] tabular-nums text-zinc-500',
-            h('span', 'max-sm:hidden', `${a.toolUses} tool${a.toolUses === 1 ? '' : 's'}`),
-            h('span', 'max-sm:hidden', fmtTokens(a.tokens) + ' tok'),
-            elapsed(a.startedMs, a.status === 'running' ? 0 : a.updatedMs, 'text-zinc-400'))),
-        act),
-      h('span', 'self-center pl-1 text-zinc-600 group-hover:text-zinc-300', '›'));
-    b.setAttribute('aria-label', `${a.label || a.id}, ${st.label}. Open its conversation`);
-    return b;
-  }
-
-  // resultBox shows what a run returned.
-  function resultBox(result) {
-    return h('div', 'min-w-0 rounded-md border border-emerald-400/20 bg-emerald-400/[0.03]',
-      h('div', 'border-b border-emerald-400/15 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-300/80', 'Result'),
-      h('div', 'max-h-[32rem] min-w-0 overflow-y-auto px-3 py-2.5', resultNode(result)));
-  }
-
-  // resultNode draws a run's result: JSON (mostly objects and lists of
-  // them, with markdown text) as labelled parts, text as markdown, and
-  // JSON cut short as JSON.
-  function resultNode(text) {
-    try {
-      return resultValue(JSON.parse(text), 0);
-    } catch {
-      return looksJSON(text) ? codeView({ text, lang: 'json', tag: 'json', wrap: true }) : md(text);
-    }
-  }
-
-  // resultValue draws a JSON value: text as markdown, objects and lists as
-  // labelled parts (a list item by its title, name, id or number), deeper
-  // ones as JSON.
-  function resultValue(x, depth) {
-    if (typeof x === 'string') return md(x);
-    if (x === null || typeof x !== 'object') return h('div', 'font-mono text-[12px] text-zinc-300', String(x));
-    if (depth > 2) return codeView({ text: JSON.stringify(x, null, 2), lang: 'json', tag: 'json', wrap: true });
-    const box = h('div', depth ? 'flex min-w-0 flex-col gap-2.5 border-l border-ink-700 pl-3' : 'flex min-w-0 flex-col gap-3');
-    const label = (v, i) => {
-      const t = v && typeof v === 'object' && !Array.isArray(v) && [v.title, v.name, v.id, v.page, v.key].find((s) => typeof s === 'string' && s);
-      return t || String(i + 1);
-    };
-    const parts = Array.isArray(x) ? x.map((v, i) => [label(v, i), v]) : Object.entries(x);
-    if (!parts.length) box.append(h('div', 'font-mono text-[11px] text-zinc-600', Array.isArray(x) ? '// empty list' : '// empty'));
-    for (const [k, v] of parts) {
-      box.append(h('div', 'min-w-0',
-        h('div', 'mb-1 font-mono text-[11px] font-semibold text-emerald-300/70', k),
-        resultValue(v, depth + 1)));
-    }
-    return box;
-  }
-
-  // ---- one workflow agent
-
-  function subRun() {
-    return wf.sub && wf.runs.find((r) => r.id === wf.sub.run);
-  }
-
-  function subAgent() {
-    const run = subRun();
-    return run && run.agents.find((a) => a.id === wf.sub.id);
-  }
-
-  // subLive: the agent may write more (also while not known yet).
-  function subLive() {
-    const a = subAgent();
-    return !a || a.status === 'running';
-  }
-
+  // openSub shows one workflow agent's conversation in the panel.
   function openSub(run, id) {
+    openInsp('workflow');
     wf.sub = { run, id };
-    chat.view = 'sub';
-    renderChatView();
-    renderSubHead();
+    renderWorkflows();
     startFeed(wf.feed);
-    $('sub-back').focus();
+  }
+
+  function closeSub() {
+    stopFeed(wf.feed);
+    wf.sub = null;
+    renderWorkflows();
   }
 
   function renderSubHead() {
-    if (!wf.sub) return;
+    const p = insp.panes && insp.panes.workflow;
+    if (!wf.sub || !p) return;
     const run = subRun();
     const a = subAgent() || { id: wf.sub.id, status: 'running' };
-    $('sub-back-name').textContent = run ? run.name : 'workflow';
-    $('sub-title').textContent = a.label || a.id;
-    const badges = [wfBadge(a.status)];
-    if (a.phase) badges.push(chip(a.phase));
-    if (a.model) badges.push(chip(a.model.replace(/^claude-/, '')));
-    $('sub-badges').replaceChildren(...badges);
-    const meta = $('sub-meta');
-    if (wf.feed.error) {
-      meta.className = 'mt-0.5 truncate text-[11px] text-rose-300';
-      meta.textContent = wf.feed.error;
+    fill(p.subHead,
+      iconBtn('chevron-left', 'Back to ' + (run ? run.name : 'the workflow'), closeSub),
+      h('div', 'grow',
+        h('div', 'chead-row', h('span', 'insp-sub-title', a.label || a.id), wfPill(a.status)),
+        h('div', 'insp-sub-meta', wf.feed.error || [a.phase ? a.phase + ' · ' : '', a.model ? a.model.replace(/^claude-/, '') + ' · ' : '',
+          `${a.toolUses || 0} tool calls · ${fmtTokens(a.tokens)} tokens · `, elapsed(a.startedMs, a.status === 'running' ? 0 : a.updatedMs)])));
+  }
+
+  // ---- media: every image of the session's conversation
+  //
+  // GET .../media lists them (offsets into the transcript, like the chat);
+  // the page asks again for newer ones whenever the chat shows an image,
+  // and loads each as it scrolls into view.
+
+  const media = {
+    items: [], // {line, n, type, ts, from, tool, text}, oldest first
+    file: '',
+    end: 0,
+    loaded: false,
+    error: '',
+    busy: false,
+    again: false, // ask once more after the request in flight
+    els: new Map(), // file:line:n -> grid cell, kept across renders
+  };
+
+  // viewer is what the full-size view steps through: the media, newest
+  // first; null for a single image of the chat.
+  const viewer = { list: null, i: 0, seq: 0 };
+
+  const mediaKey = (m) => `${media.file}:${m.line}:${m.n}`;
+  const mediaURL = (m) => chatAPI('image?' + new URLSearchParams({ file: media.file, line: String(m.line), n: String(m.n) }));
+
+  function mediaLabel(m) {
+    if (m.from === 'user') return 'sent by you';
+    const t = m.text || m.tool || 'tool output';
+    return /^\S+$/.test(t) ? t.split('/').pop() : t; // a path: its file name
+  }
+
+  function resetMedia() {
+    Object.assign(media, { items: [], file: '', end: 0, loaded: false, error: '', busy: false, again: false });
+    media.els.clear();
+  }
+
+  async function loadMedia() {
+    if (media.busy) {
+      media.again = true;
       return;
     }
-    meta.className = 'mt-0.5 flex flex-wrap gap-x-3 font-mono text-[11px] tabular-nums text-zinc-500';
-    meta.replaceChildren(
-      h('span', '', `${a.toolUses || 0} tool calls`),
-      h('span', '', `${fmtTokens(a.tokens)} tokens`),
-      elapsed(a.startedMs, a.status === 'running' ? 0 : a.updatedMs),
-      h('span', 'text-zinc-600', 'read-only: subagents take no input here'));
-  }
-
-  // -------------------------------------------------------------- websocket
-
-  function setConn(state) {
-    const dot = $('conn-dot');
-    const text = $('conn-text');
-    if (state === 'live') {
-      dot.className = 'size-2 rounded-full bg-emerald-400 shadow-[0_0_8px] shadow-emerald-400/70';
-      text.className = 'text-emerald-300';
-      text.textContent = 'live';
-    } else if (state === 'reconnecting') {
-      dot.className = 'size-2 rounded-full bg-amber-400 animate-pulse motion-reduce:animate-none';
-      text.className = 'text-amber-300';
-      text.textContent = 'reconnecting';
-    } else {
-      dot.className = 'size-2 rounded-full bg-zinc-500 animate-pulse motion-reduce:animate-none';
-      text.className = 'text-zinc-400';
-      text.textContent = 'connecting';
+    const seq = chat.seq;
+    media.busy = true;
+    try {
+      for (;;) {
+        media.again = false;
+        const q = new URLSearchParams();
+        if (media.file) {
+          q.set('file', media.file);
+          q.set('after', String(media.end));
+        }
+        const r = await api('GET', chatAPI('media?' + q));
+        if (seq !== chat.seq) return;
+        if (r.reset) {
+          media.items = [];
+          media.els.clear();
+        }
+        const had = media.items.length;
+        media.items.push(...(r.media || []));
+        Object.assign(media, { file: r.file || '', end: r.end || 0, loaded: true, error: '' });
+        if (!had && media.items.length) renderChatHead();
+        if (insp.open) {
+          if (insp.tab === 'media') renderMedia();
+          renderInspTabs();
+        }
+        if (!r.more && !media.again) break;
+      }
+    } catch (e) {
+      if (seq !== chat.seq) return;
+      Object.assign(media, { loaded: true, error: e.status === 404 ? '' : e.message });
+    } finally {
+      if (seq === chat.seq) media.busy = false;
     }
   }
 
-  function setMainDim(dim) {
-    $('main').classList.toggle('opacity-50', dim);
+  function renderMedia() {
+    const p = insp.panes && insp.panes.media;
+    if (!p) return;
+    if (!media.items.length) {
+      fill(p.grid, h('p', 'empty-note', !media.loaded ? 'Loading…' : media.error || 'No images in this conversation yet.'));
+      return;
+    }
+    const list = [...media.items].reverse();
+    fill(p.grid, list.map((m, i) => {
+      const key = mediaKey(m);
+      let b = media.els.get(key);
+      if (!b) {
+        b = mediaThumb(m);
+        media.els.set(key, b);
+      }
+      b.dataset.i = String(i);
+      return b;
+    }));
   }
+
+  function mediaThumb(m) {
+    const text = mediaLabel(m);
+    const when = m.ts ? new Date(m.ts).toLocaleString() : '';
+    const ph = h('span', 'ph', 'image…');
+    const b = h('button', { type: 'button', class: 'media-cell', title: [m.from === 'user' ? 'sent by you' : [m.tool, m.text].filter(Boolean).join(': '), when].filter(Boolean).join('\n'), 'aria-label': `${text}${when ? ', ' + when : ''}. Open full size` },
+      ph, h('span', 'cap', text));
+    b.loadImage = () => loadImage(mediaURL(m)).then((src) => {
+      ph.replaceWith(h('img', { src, alt: '' }));
+    }, (e) => {
+      ph.textContent = e.message;
+    });
+    b.addEventListener('click', () => openMedia(Number(b.dataset.i)));
+    if (imgSeen) imgSeen.observe(b);
+    else b.loadImage();
+    return b;
+  }
+
+  function openImage(src) {
+    viewer.list = null;
+    viewer.seq++;
+    $('viewer-prev').hidden = $('viewer-next').hidden = true;
+    $('viewer-cap').textContent = '';
+    showImage(src);
+  }
+
+  function showImage(src) {
+    const img = $('viewer-img');
+    img.src = src;
+    const d = $('viewer');
+    if (d.open) return;
+    d.showModal();
+    d.focus(); // not its first button: the arrow keys step from anywhere
+  }
+
+  // openMedia shows image i of the media (newest first) full size.
+  function openMedia(i) {
+    const list = viewer.list && $('viewer').open ? viewer.list : [...media.items].reverse();
+    const m = list[i];
+    if (!m) return;
+    Object.assign(viewer, { list, i });
+    const seq = ++viewer.seq;
+    $('viewer-prev').hidden = $('viewer-next').hidden = list.length < 2;
+    $('viewer-cap').textContent = `${i + 1}/${list.length} · ${mediaLabel(m)}${m.ts ? ' · ' + new Date(m.ts).toLocaleString() : ''}`;
+    $('viewer-prev').disabled = i === 0;
+    $('viewer-next').disabled = i === list.length - 1;
+    $('viewer-img').alt = mediaLabel(m);
+    loadImage(mediaURL(m)).then((src) => {
+      if (seq === viewer.seq) showImage(src);
+    }, (e) => {
+      if (seq === viewer.seq) toast(`Could not load the image: ${e.message}`, 'error');
+    });
+  }
+
+  function wireViewer() {
+    const d = $('viewer');
+    $('viewer-prev').addEventListener('click', () => openMedia(viewer.i - 1));
+    $('viewer-next').addEventListener('click', () => openMedia(viewer.i + 1));
+    $('viewer-close').addEventListener('click', () => d.close());
+    d.addEventListener('click', (ev) => {
+      if (ev.target === d || ev.target.id === 'viewer-img') d.close();
+    });
+    d.addEventListener('keydown', (ev) => {
+      if (!viewer.list || (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight')) return;
+      ev.preventDefault();
+      openMedia(viewer.i + (ev.key === 'ArrowLeft' ? -1 : 1));
+    });
+    // Swiping sideways steps through the images too.
+    let x0 = null;
+    d.addEventListener('touchstart', (ev) => {
+      x0 = viewer.list && ev.touches.length === 1 ? ev.touches[0] : null;
+    }, { passive: true });
+    d.addEventListener('touchend', (ev) => {
+      const t = ev.changedTouches[0];
+      if (!x0 || !t) return;
+      const dx = t.clientX - x0.clientX;
+      const dy = t.clientY - x0.clientY;
+      x0 = null;
+      if (Math.abs(dx) < 50 || Math.abs(dx) < 2 * Math.abs(dy)) return;
+      ev.preventDefault(); // no click: it would close the view
+      openMedia(viewer.i + (dx > 0 ? -1 : 1));
+    });
+  }
+
+  // ---- files: what the agent wrote and changed, and a search through its
+  // folder
+  //
+  // GET .../files lists them, newest first: the files its tool calls wrote,
+  // wherever they are, and those of its folder changed since the session
+  // started; with q, those whose path holds every word of it, and in found
+  // the folder's other files that do. GET .../file reads one, in base64.
+
+  const files = {
+    list: [], // {path, rel, size, mtimeMs, written, gone}, newest first
+    found: [], // with a search: the folder's other files that match
+    q: '',
+    dir: '', // the agent's folder, '' if it has none
+    total: 0, // files written and changed, without a search
+    partial: false,
+    loaded: false,
+    error: '',
+    missing: false, // the fleet has no files route
+    busy: false,
+    again: false,
+    timer: 0, // a search typed or files written: waits for a pause
+    open: null, // the file shown
+    shown: null, // its content: {path, rel, size, mtimeMs, type, text, data, big}
+    seq: 0, // file reads: only the latest is shown
+    url: '', // object URL of the video or audio shown
+    sendNote: null, // {text, kind} of the last send
+  };
+
+  // Images shown from a data: URL (in an <img> an SVG runs no script).
+  const IMG_TYPE = /^image\/(?:png|jpeg|gif|webp|avif|bmp|svg\+xml|x-icon|vnd\.microsoft\.icon)$/;
+  const FILE_TEXT_MAX = 512 << 10;
+  const FILE_KINDS = [
+    [/^(?:png|jpe?g|gif|webp|avif|svg|bmp|ico|heic)$/, 'img'],
+    [/^(?:mp4|webm|mov|m4v|mkv|mp3|wav|ogg|m4a|flac)$/, 'av'],
+    [/^(?:md|mdx|markdown|txt|pdf|docx?|rtf|csv|tsv|xlsx?|pptx?|html?)$/, 'doc'],
+  ];
+
+  function b64bytes(s) {
+    const bin = atob(s || '');
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  function resetFiles() {
+    clearTimeout(files.timer);
+    revokeFileURL();
+    Object.assign(files, { list: [], found: [], q: '', dir: '', total: 0, partial: false, loaded: false, error: '', missing: false, busy: false, again: false, open: null, shown: null, sendNote: null });
+    files.seq++;
+  }
+
+  function filesSoon(ms) {
+    clearTimeout(files.timer);
+    files.timer = setTimeout(loadFiles, ms);
+  }
+
+  async function loadFiles() {
+    clearTimeout(files.timer);
+    if (files.busy) {
+      files.again = true;
+      return;
+    }
+    const seq = chat.seq;
+    files.busy = true;
+    const p = insp.panes && insp.panes.files;
+    if (p) p.reload.disabled = true;
+    try {
+      do {
+        files.again = false;
+        const q = p ? p.q.value.trim() : files.q;
+        const r = await api('GET', chatAPI('files' + (q ? '?' + new URLSearchParams({ q }) : '')));
+        if (seq !== chat.seq) return;
+        Object.assign(files, { list: r.files || [], found: r.found || [], q, dir: r.dir || '', partial: !!r.partial, loaded: true, error: '', missing: false });
+        if (!q) files.total = files.list.length;
+      } while (files.again);
+    } catch (e) {
+      if (seq !== chat.seq) return;
+      Object.assign(files, { loaded: true, error: e.message, missing: e.status === 404 && !files.dir });
+    } finally {
+      if (seq === chat.seq) {
+        files.busy = false;
+        if (p) p.reload.disabled = false;
+      }
+    }
+    renderChatHead();
+    if (insp.open) {
+      renderInspTabs();
+      if (insp.tab === 'files') renderFiles();
+    }
+  }
+
+  function renderFiles() {
+    const p = insp.panes && insp.panes.files;
+    if (!p) return;
+    p.browse.hidden = !!files.open;
+    p.view.hidden = !files.open;
+    if (files.open) return;
+    p.q.placeholder = files.dir ? `Search files in ${baseName(files.dir) || '/'}` : 'Search the files written';
+    const sec = (text, n) => h('div', 'files-sec', text, n != null ? h('span', 'muted num', ` · ${n}`) : null);
+    if (!files.loaded) return fill(p.list, h('p', 'empty-note', 'Loading…'));
+    if (files.error) return fill(p.list, h('p', 'empty-note', files.missing ? 'This fleet cannot list files: update it.' : files.error));
+    const out = [];
+    if (files.q) {
+      if (files.list.length) out.push(sec('Written or changed by the agent', files.list.length), fileRows(files.list));
+      if (files.found.length) out.push(sec('Elsewhere in the folder', files.found.length), fileRows(files.found));
+      if (!files.list.length && !files.found.length) out.push(h('p', 'empty-note', `No file matches “${files.q}”.`));
+    } else if (files.list.length) {
+      out.push(sec('Written or changed since the session started', files.list.length), fileRows(files.list));
+    } else {
+      out.push(h('p', 'empty-note', h('strong', null, 'No file written or changed yet'), files.dir ? ['Search to find any file in ', h('span', 'mono', shortPath(files.dir)), '.'] : null));
+    }
+    if (files.partial) out.push(h('p', 'note-line', 'Not everything is listed: the folder is large.'));
+    fill(p.list, out);
+  }
+
+  function fileBadge(name) {
+    const dot = name.lastIndexOf('.');
+    const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+    const kind = FILE_KINDS.find(([re]) => re.test(ext));
+    return h('span', 'file-badge' + (kind ? ' ' + kind[1] : ''), ext.slice(0, 4) || '—');
+  }
+
+  function fileRows(list) {
+    return list.map((f) => {
+      const name = baseName(f.path);
+      const where = f.rel ? './' + f.rel.slice(0, -name.length) : f.path.slice(0, -name.length);
+      return h('button', { type: 'button', class: 'file-row' + (f.gone ? ' gone' : ''), disabled: !!f.gone, title: f.path + (f.written ? '\nwritten by the agent' : ''), onclick: () => openFile(f) },
+        fileBadge(name),
+        h('div', 'grow', h('div', 'file-name', name), h('div', 'file-dir', shortPath(where) || './')),
+        h('div', 'file-meta', f.gone ? 'deleted' : fmtSize(f.size), f.mtimeMs ? h('div', null, relTime(f.mtimeMs)) : null));
+    });
+  }
+
+  async function openFile(f) {
+    const p = insp.panes && insp.panes.files;
+    if (!p) return;
+    const seq = ++files.seq;
+    revokeFileURL();
+    Object.assign(files, { open: f, shown: null, sendNote: null });
+    renderFiles();
+    renderFileView();
+    try {
+      const r = await api('GET', chatAPI('file?' + new URLSearchParams({ path: f.path })));
+      if (seq !== files.seq) return;
+      files.shown = r;
+    } catch (e) {
+      if (seq !== files.seq) return;
+      files.shown = { error: e.message };
+    }
+    renderFileView();
+  }
+
+  function closeFile() {
+    files.seq++;
+    revokeFileURL();
+    Object.assign(files, { open: null, shown: null, sendNote: null });
+    renderFiles();
+  }
+
+  function revokeFileURL() {
+    if (files.url) URL.revokeObjectURL(files.url);
+    files.url = '';
+  }
+
+  function renderFileView() {
+    const p = insp.panes && insp.panes.files;
+    const f = files.open;
+    if (!p || !f) return;
+    const r = files.shown;
+    const when = r && r.mtimeMs ? new Date(r.mtimeMs).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }) : '';
+    const sendBtn = h('button', { type: 'button', class: 'btn sm', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => sendMenu(ev.currentTarget) }, icon('send'), 'Send to');
+    const dl = iconBtn('download', 'Download', downloadFile, { attrs: { disabled: !r || r.error || r.big ? true : null } });
+    fill(p.view,
+      h('div', 'file-view-h', iconBtn('chevron-left', 'Back to the files', closeFile),
+        h('div', 'grow', h('div', 'insp-sub-title', baseName(f.path)), h('div', 'insp-sub-meta mono trunc', [r && !r.error ? fmtSize(r.size) : '', when, f.rel || shortPath(f.path)].filter(Boolean).join(' · '))),
+        sendBtn, dl),
+      files.sendNote ? h('p', { class: 'send-note', role: 'status' }, files.sendNote.text) : null,
+      h('div', 'file-body', !r ? h('p', 'empty-note', 'Loading…') : r.error ? h('p', 'empty-note', r.error) : filePreview(r, baseName(r.path))));
+  }
+
+  // filePreview shows a file's content: an image, text (markdown rendered,
+  // code highlighted with line numbers), a video or a sound.
+  function filePreview(r, name) {
+    const type = (r.type || '').split(';')[0].trim().toLowerCase();
+    if (r.big) return h('p', 'empty-note', `${fmtSize(r.size)}: too large to open here.`);
+    if (IMG_TYPE.test(type) && (!r.text || type === 'image/svg+xml')) {
+      const src = `data:${type};base64,${r.data}`;
+      return h('div', 'file-img', h('img', { src, alt: name, onclick: () => openImage(src) }));
+    }
+    if (r.text) {
+      let text = new TextDecoder().decode(b64bytes(r.data));
+      if (!text) return h('p', 'empty-note', 'The file is empty.');
+      const cut = text.length > FILE_TEXT_MAX;
+      if (cut) text = text.slice(0, FILE_TEXT_MAX);
+      const more = cut ? h('p', 'note-line', 'The rest is not shown: download the file.') : null;
+      if (/\.(?:md|mdx|markdown)$/i.test(name)) return [md(text), more];
+      const lang = extLang(name);
+      const numbered = text.replace(/\n$/, '').split('\n').map((l, i) => `${i + 1}\t${l}`).join('\n');
+      return [codeView({ text: numbered, read: true, lang, tag: lang || 'text' }), more];
+    }
+    if (/^(?:video|audio)\//.test(type)) {
+      files.url = URL.createObjectURL(new Blob([b64bytes(r.data)], { type }));
+      return h(type.startsWith('video/') ? 'video' : 'audio', { controls: true, playsinline: true, preload: 'metadata', src: files.url });
+    }
+    return h('p', 'empty-note', `${type || 'A binary file'}: no preview here, download it to open it.`);
+  }
+
+  // sendMenu offers the fleet's other machines to send the file shown to
+  // (POST .../send): it lands in the uploads folder there.
+  function sendMenu(anchor) {
+    const f = files.open;
+    if (!f) return;
+    const targets = S.peers.filter((p) => !p.self && p.id && p.id !== chat.host);
+    openMenu(anchor, (el, close) => {
+      el.append(h('div', 'menu-l', 'Send to another machine'));
+      if (!targets.length) el.append(h('p', 'menu-note', S.peers.length ? 'No other machine is on the network.' : 'No other machine found yet.'));
+      for (const p of targets) {
+        const st = hostState(p.id);
+        el.append(mi({ custom: h('span', MACHINE_STATE[st] ? MACHINE_STATE[st][0] : 'dot off'), label: p.name || p.host || p.id, sub: 'lands in its uploads folder', onSelect: () => {
+          close();
+          sendFileTo(p);
+        } }));
+      }
+    }, { label: 'Send to', alignRight: true });
+  }
+
+  async function sendFileTo(p) {
+    const f = files.open;
+    if (!f) return;
+    const seq = files.seq;
+    const name = p.name || p.host || p.id;
+    files.sendNote = { text: `Sending ${baseName(f.path)} to ${name}…` };
+    renderFileView();
+    try {
+      const r = await api('POST', chatAPI('send'), { path: f.path, host: p.id });
+      if (seq === files.seq) files.sendNote = { text: `Sent to ${r.name || name}: ${r.path}` };
+    } catch (e) {
+      if (seq === files.seq) files.sendNote = { text: `Sending to ${name} failed: ${e.message}`, kind: 'error' };
+    }
+    if (seq === files.seq) renderFileView();
+  }
+
+  function downloadFile() {
+    const r = files.shown;
+    if (!r || r.big || r.error) return;
+    const url = URL.createObjectURL(new Blob([b64bytes(r.data)], { type: 'application/octet-stream' }));
+    const a = h('a', { href: url, download: baseName(r.path), hidden: true });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  }
+
+  // ---- the terminal: its screen, polled while the panel's terminal tab
+  // or the chat's dialog card shows it
+
+  const SCREEN_POLL_MS = 1500;
+  const screen = { timer: 0, text: '', busy: false };
+
+  // screenNeeded starts or stops the polling as the screen shows or not.
+  function screenNeeded() {
+    const needed = chat.open && chatLive() && (!!C.dlgPre || (insp.open && insp.tab === 'terminal' && !$('insp').hidden));
+    if (needed && !screen.timer && !screen.busy) refreshScreen();
+    if (!needed) stopScreen();
+  }
+
+  function stopScreen() {
+    clearTimeout(screen.timer);
+    screen.timer = 0;
+  }
+
+  async function refreshScreen() {
+    stopScreen();
+    if (!chat.open || !chatLive() || screen.busy) return;
+    const seq = chat.seq;
+    screen.busy = true;
+    let text;
+    try {
+      const r = await api('GET', chatAPI('screen'));
+      text = (r && r.screen) || '';
+    } catch (e) {
+      text = e.message;
+    }
+    screen.busy = false;
+    if (seq !== chat.seq) return;
+    screen.text = text;
+    for (const pre of [C.dlgPre, insp.panes && insp.tab === 'terminal' ? insp.panes.terminal.pre : null]) {
+      if (!pre || !pre.isConnected) continue;
+      // Dialogs and the prompt are at the bottom: stay there, unless
+      // scrolled up to read.
+      const atBottom = !pre.textContent || pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
+      pre.textContent = text;
+      if (atBottom) pre.scrollTop = pre.scrollHeight;
+    }
+    const needed = chatLive() && (!!C.dlgPre || (insp.open && insp.tab === 'terminal' && !$('insp').hidden));
+    if (needed) screen.timer = setTimeout(refreshScreen, SCREEN_POLL_MS);
+  }
+
+  // ----------------------------------------------------------- new session
+  //
+  // Start a session: a folder on a machine, the agent CLI with its model
+  // and effort, and a prompt, with images and videos. The machine, folder,
+  // checkout and options sit above the prompt, the agent's pickers under
+  // it. Other machines are reached through /api/hosts/.
+  //
+  // A folder starts in the most specific root around it, however it was
+  // found (a recent session, a root, inside another root), so it always
+  // gets the same agents and trust.
+
+  const launch = {
+    host: '', // server id; '' = this daemon
+    loaded: null, // the host whose adapters and roots were loaded (null: none yet)
+    adapters: null, // [{id, name, available, images, models, efforts}] of the machine
+    roots: null, // roots of another machine (this one's are S.roots)
+    path: '', // chosen folder, absolute; '' = none yet
+    want: null, // {path} or {root, sub} asked for before the machine's roots are known
+    home: '', // the machine's home folder, as its listings say
+    look: '', // folder the picker looks into; '' = recent folders and roots
+    q: '', // the folder search
+    dirs: new Map(), // path -> {path, entries, truncated, error}, entries null while listed
+    adapter: '',
+    adapterRoot: '', // host/root whose provider was restored
+    gen: 0, // bumped for another machine: stale replies are dropped
+    busy: false, // a start is in flight
+    making: false, // a new folder is being made
+    error: '',
+    then: '', // what to show once started, if a shortcut says so
+    iso: '', // checkout: '' auto, worktree, pinned (kept, see LAUNCH_OPTS)
+    sandbox: '', // '' the server's default, docker, none (kept)
+    thenPref: 'chat', // chat, screen, stay (kept)
+    name: '',
+    branch: '',
+    images: [], // {data, url, name} to send with the prompt
+    videos: [], // uploaded to the machine for the prompt
+  };
+
+  const launchAPI = (path) => (launch.host ? `/api/hosts/${encodeURIComponent(launch.host)}/${path}` : '/api/' + path);
+  const launchRoots = () => (launch.host ? launch.roots || [] : S.roots);
+  const inRoot = (r, sub) => (sub ? joinPath(r.path, sub) : r.path);
+  const within = (path, dir) => path === dir || path.startsWith(joinPath(dir, ''));
+  const parentOf = (p) => (p.lastIndexOf('/') > 0 ? p.slice(0, p.lastIndexOf('/')) : p.length > 1 ? '/' : '');
+
+  // placeOf is where a session in path starts: {root, sub} of the most
+  // specific root around it, or null outside every root.
+  function placeOf(path) {
+    let best = null;
+    for (const r of launchRoots()) {
+      if (path && within(path, r.path) && (!best || r.path.length > best.path.length)) best = r;
+    }
+    return best && { root: best, sub: path === best.path ? '' : path.slice(joinPath(best.path, '').length) };
+  }
+
+  const launchPlace = () => placeOf(launch.path);
+  const launchRoot = () => (launchPlace() || {}).root;
+
+  // tilde writes path from the machine's home as ~, for a path typed on.
+  const tilde = (p) => (launch.home && within(p, launch.home) ? '~' + p.slice(launch.home.replace(/\/$/, '').length) : p);
+
+  // launchFor sets up a new session in folder of machine host.
+  function launchFor(host, folder) {
+    if (launch.host !== host) {
+      dropLaunchVideos('the videos went to the other machine: attach them again');
+      launch.host = host;
+      launch.loaded = null;
+    }
+    launch.want = folder ? { path: folder } : null;
+    launch.path = folder && placeOf(folder) ? folder : launch.path;
+    launch.look = '';
+    launch.q = '';
+  }
+
+  // Checkout, sandbox and what to show once started, kept for the next
+  // session.
+  const LAUNCH_OPTS = 'fleet.launch.options';
+  (() => {
+    const o = load(LAUNCH_OPTS, {});
+    if (['', 'worktree', 'pinned'].includes(o.iso)) launch.iso = o.iso;
+    if (['', 'docker', 'none'].includes(o.sandbox)) launch.sandbox = o.sandbox;
+    if (['chat', 'screen', 'stay'].includes(o.then)) launch.thenPref = o.then;
+  })();
+  const saveLaunchOptions = () => save(LAUNCH_OPTS, { iso: launch.iso, sandbox: launch.sandbox, then: launch.thenPref });
+
+  // closeLaunch resets the composer after a start.
+  function closeLaunch() {
+    launch.images = [];
+    launch.videos = dropVideos(launch.videos);
+    launch.name = '';
+    launch.branch = '';
+    if (N.ta) N.ta.value = '';
+    save('fleet.launch.prompt', null);
+  }
+
+  function dropLaunchVideos(why) {
+    if (!launch.videos.length) return;
+    toast(why, 'warn');
+    launch.videos = dropVideos(launch.videos);
+  }
+
+  // loadLaunchHost loads the adapters and roots of the chosen machine.
+  async function loadLaunchHost() {
+    const host = launch.host;
+    const gen = ++launch.gen;
+    launch.loaded = host;
+    launch.adapters = null;
+    launch.adapterRoot = '';
+    launch.roots = null;
+    launch.home = '';
+    launch.dirs = new Map();
+    launch.look = '';
+    launch.error = '';
+    renderLaunch();
+    let err = '';
+    const fail = (e) => {
+      err = err || e.message;
+      if (host && e.notJoined) setHostState(host, 'not_joined');
+      return null;
+    };
+    const [ads, roots] = await Promise.all([
+      api('GET', launchAPI('adapters')).then((r) => (r && r.adapters) || []).catch(fail),
+      host ? api('GET', launchAPI('roots')).then((r) => (r && r.roots) || []).catch(fail) : null,
+    ]);
+    if (gen !== launch.gen) return;
+    if (host && ads) setHostState(host, 'joined');
+    launch.adapters = ads || [];
+    launch.roots = roots;
+    launch.error = err;
+    launchRootsChanged();
+  }
+
+  // launchRootsChanged lists the roots for the search, and chooses the
+  // last folder a session started in if the chosen one is outside them.
+  function launchRootsChanged() {
+    if (launch.want && (!launch.host || launch.roots)) {
+      const w = launch.want;
+      if (w.path && placeOf(w.path)) launch.path = w.path;
+      else if (w.root) {
+        const r = launchRoots().find((x) => x.name === w.root);
+        if (r) launch.path = inRoot(r, w.sub);
+      }
+      launch.want = null;
+    }
+    if (!launch.want && !launchPlace()) launch.path = launchRecent(1)[0] || '';
+    if (launch.look && !placeOf(launch.look)) launch.look = '';
+    for (const r of launchRoots()) listDir(r.path);
+    renderLaunch();
+  }
+
+  // listDir lists the subfolders of a folder into launch.dirs, once per
+  // machine: the search looks through every listing.
+  async function listDir(path) {
+    if (!path || launch.dirs.has(path)) return;
+    const gen = launch.gen;
+    const d = { path, entries: null, truncated: false, error: '' };
+    launch.dirs.set(path, d);
+    try {
+      const dir = await api('GET', launchAPI('fs?' + new URLSearchParams({ path })));
+      d.entries = dir.entries || [];
+      d.truncated = !!dir.truncated;
+      if (dir.home && gen === launch.gen) launch.home = dir.home;
+    } catch (e) {
+      d.entries = [];
+      d.error = e.message;
+    }
+    if (gen === launch.gen) renderLaunch();
+  }
+
+  // launchRecent is the folders sessions started in on the chosen machine,
+  // newest first: the daemon keeps its last 200 sessions, so every browser
+  // and phone sees the same ones.
+  const LAUNCH_RECENT = 5;
+
+  function launchRecent(max) {
+    const agents = agentsOf(launch.host);
+    const out = [];
+    for (const a of [...agents.values()].sort((x, y) => y.createdAtMs - x.createdAtMs)) {
+      if (a.isolation === 'clone' || !a.path || out.includes(a.path) || !placeOf(a.path)) continue; // a clone runs outside the root
+      out.push(a.path);
+      if (out.length === max) break;
+    }
+    return out;
+  }
+
+  function selectLaunchHost(id) {
+    if (launch.host === id) return;
+    dropLaunchVideos('the videos went to the other machine: attach them again');
+    launch.host = id;
+    launch.path = '';
+    launch.want = null;
+    launch.q = '';
+    loadLaunchHost();
+  }
+
+  // Model and effort picks, per agent CLI, kept for the next session.
+  const LAUNCH_PICKS = 'fleet.launch.models';
+  const launchPicks = () => load(LAUNCH_PICKS, {}) || {};
+
+  // launchPick returns the model and effort chosen for the chosen agent
+  // CLI, as far as it still offers them: {ad, model, effort, efforts}.
+  function launchPick() {
+    const ad = (launch.adapters || []).find((a) => a.id === launch.adapter);
+    // Daemons older than model choices send none.
+    if (!ad || (!(ad.models || []).length && !(ad.efforts || []).length)) return null;
+    const pick = launchPicks()[ad.id] || {};
+    const model = (ad.models || []).find((m) => m.id === pick.model);
+    const efforts = model ? (ad.efforts || []).filter((e) => model.efforts.includes(e.id)) : ad.efforts || [];
+    const effort = efforts.find((e) => e.id === pick.effort);
+    return { ad, model, effort, efforts };
+  }
+
+  function saveLaunchPick(model, effort) {
+    const picks = launchPicks();
+    picks[launch.adapter] = { model, effort };
+    save(LAUNCH_PICKS, picks);
+    renderLaunch();
+  }
+
+  // launchImages reports whether the chosen agent CLI takes images with its
+  // first prompt (daemons older than that say nothing).
+  function launchImages() {
+    const ad = (launch.adapters || []).find((a) => a.id === launch.adapter);
+    return !!(ad && ad.images);
+  }
+
+  // launchImagesProblem says why the images or videos cannot go with the
+  // session.
+  function launchImagesProblem() {
+    const vp = videosProblem(launch.videos);
+    if (vp) return vp;
+    if (!launch.images.length) return '';
+    if (!launchImages()) return `${launch.adapter || 'This agent'} takes no images at start: remove them, or choose another agent.`;
+    if (!N.ta || (!N.ta.value.trim() && !launch.videos.length)) return 'Images go with a prompt: write one.';
+    return '';
+  }
+
+  async function addLaunchFiles(files) {
+    if (launch.busy) return;
+    const gen = launch.gen;
+    const alive = () => gen === launch.gen && U.view !== 'chat';
+    addVideos(files, launch.videos, launchAPI('uploads'), () => {
+      if (alive()) renderLaunch();
+    });
+    if (![...files].some(isImage)) return;
+    if (!launchImages()) {
+      toast(`${launch.adapter || 'This agent'} takes no images at start`, 'warn');
+      return;
+    }
+    if (await readImages(files, launch.images, alive)) renderLaunch();
+  }
+
+  // Last successfully used provider, per machine and root folder. Session
+  // history supplies it on other browsers; local storage survives pruning.
+  const LAUNCH_PROVIDERS = 'fleet.launch.providers';
+  let launchProviders = {};
+  try {
+    const saved = JSON.parse(localStorage.getItem(LAUNCH_PROVIDERS));
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) launchProviders = saved;
+  } catch {
+    // Storage can be disabled; keep the choices for this page instead.
+  }
+
+  const providerRootKey = (host, root) => JSON.stringify([host || (S.server && S.server.id) || '', root.path]);
+
+  function lastRootProvider(host, root) {
+    const saved = launchProviders[providerRootKey(host, root)];
+    const agents = host ? (S.remote.get(host) || { agents: new Map() }).agents : S.agents;
+    let latest = saved && typeof saved.adapter === 'string'
+      ? { adapter: saved.adapter, usedAtMs: Number(saved.usedAtMs) || 0 } : null;
+    for (const a of agents.values()) {
+      if (a.root !== root.name || !a.adapter) continue;
+      if (!latest || a.createdAtMs > latest.usedAtMs) latest = { adapter: a.adapter, usedAtMs: a.createdAtMs || 0 };
+    }
+    return latest ? latest.adapter : '';
+  }
+
+  function rememberRootProvider(host, root, adapter) {
+    launchProviders[providerRootKey(host, root)] = { adapter, usedAtMs: Date.now() };
+    try {
+      localStorage.setItem(LAUNCH_PROVIDERS, JSON.stringify(launchProviders));
+    } catch {
+      // The in-memory choice still lasts for this page.
+    }
+  }
+
+  // Restore when the root changes, then keep explicit choices while folder
+  // listings render. Unavailable or disallowed providers fall back to
+  // Claude Code, Codex or the first installed CLI.
+  function pickAdapter(list) {
+    if (!launch.adapters) return;
+    const root = launchRoot();
+    const key = root ? providerRootKey(launch.host, root) : '';
+    if (key !== launch.adapterRoot) {
+      launch.adapterRoot = key;
+      launch.adapter = root ? lastRootProvider(launch.host, root) : '';
+    }
+    const ok = (id) => list.some((a) => a.id === id && a.available);
+    if (ok(launch.adapter)) return;
+    launch.adapter = ['claude', 'codex'].find(ok) || (list.find((a) => a.available) || {}).id || '';
+  }
+
+  function renderLaunch() {
+    if (!N.root || !N.root.isConnected) return;
+    const root = launchRoot();
+    const notJoined = launch.host && hostState(launch.host) === 'not_joined';
+    const allowed = (launch.adapters || []).filter((a) => !root || !root.adapters.length || root.adapters.includes(a.id));
+    pickAdapter(allowed);
+    paintContext(root);
+    // agent, model, effort
+    const ad = (launch.adapters || []).find((a) => a.id === launch.adapter);
+    fill(N.agentBtn, launch.adapter ? logo(launch.adapter) : icon('bot'), h('span', 'lbl', ad ? ad.name || ad.id : !launch.adapters ? 'Loading…' : 'No agent'), icon('chevron-down', 'chev'));
+    N.agentBtn.setAttribute('aria-label', 'Agent: ' + (ad ? ad.name || ad.id : 'none'));
+    N.agentBtn.disabled = !launch.adapters;
+    const p = launchPick();
+    N.modelBtn.hidden = !p || !(p.ad.models || []).length;
+    N.effortBtn.hidden = !p || !p.efforts.length;
+    if (p) {
+      fill(N.modelBtn, h('span', 'lbl', p.model ? p.model.label : 'Default model'), icon('chevron-down', 'chev'));
+      N.modelBtn.setAttribute('aria-label', 'Model: ' + (p.model ? p.model.label : 'the CLI’s default'));
+      fill(N.effortBtn, effortBars(p.effort ? effortLevel(p.effort.id, p.ad.efforts) : 0), h('span', 'lbl', p.effort ? p.effort.label : 'Default effort'), icon('chevron-down', 'chev'));
+      N.effortBtn.setAttribute('aria-label', 'Effort: ' + (p.effort ? p.effort.label : 'the CLI’s default'));
+    }
+    // A shell takes no prompt and no images: its terminal takes the typing.
+    const shell = launch.adapter === 'shell';
+    N.ta.disabled = shell;
+    N.ta.placeholder = shell ? 'A shell takes no prompt: type into its terminal once it starts'
+      : keyboard() ? `What should the agent do? · ${MOD}+Enter starts` : 'What should the agent do?';
+    N.attach.disabled = launch.busy || shell;
+    N.attach.title = launchImages() || !launch.adapter ? 'Attach images or videos (or paste, or drop them)' : `Attach videos (${launch.adapter} takes no images at start)`;
+    renderThumbs(N.thumbs, launch.images, launch.videos);
+    // what is in the way, or the keys
+    const problem = launchImagesProblem();
+    let say = '';
+    let warn = true;
+    if (notJoined) say = `${hostName(launch.host)} does not have this fleet’s key yet: see Devices to add it.`;
+    else if (launch.error) say = launch.error;
+    else if (problem) say = problem;
+    else if (launch.adapters && !launchRoots().length) say = `No folders on ${hostName(launch.host)} yet: make one from the folder button.`;
+    else if (launch.adapters && !allowed.some((a) => a.available)) say = allowed.length ? 'No agent CLI here is installed.' : 'No agent CLI is allowed in this folder.';
+    else {
+      warn = false;
+      say = keyboard() ? `${MOD}+Enter starts · ${MOD}+Shift+Enter starts and shows the terminal · ${MOD}+K folder · ${MAC ? '⌥' : 'Alt+'}1–9 agent` : '';
+    }
+    N.status.className = 'newv-hint' + (warn ? ' warn' : '');
+    fill(N.status, say ? h('span', null, say) : null,
+      !warn ? h('span', null, shell ? 'Start opens the shell’s terminal.' : 'Without a prompt the agent starts and waits for your first message.') : null);
+    N.start.disabled = !root || !launch.adapter || launch.busy || notJoined || !!problem;
+    fill(N.start, launch.busy ? 'Starting…' : 'Start', keyboard() ? h('kbd', { 'aria-hidden': 'true' }, MOD + '↵') : null);
+    // recent folders
+    const recent = launchRecent(LAUNCH_RECENT);
+    fill(N.recent, recent.length ? [h('span', 'recent-l', 'Recent'), recent.map((p2) => h('button', {
+      type: 'button', class: 'recent-chip', 'aria-pressed': String(p2 === launch.path), title: shortPath(p2),
+      onclick: () => {
+        launch.path = p2;
+        renderLaunch();
+        if (keyboard()) N.ta.focus();
+      },
+    }, icon('folder'), (launchRoots().find((r) => r.path === p2) || {}).name || baseName(p2)))] : null);
+    if (MENU && MENU.repaint && MENU.o.label === 'Folder') MENU.repaint();
+  }
+
+  // paintContext draws the chips above the prompt: machine, folder,
+  // checkout, options.
+  function paintContext(root) {
+    const items = [];
+    const hosts = pickerHosts();
+    if (hosts.length > 1 || launch.host) {
+      const st = hostState(launch.host);
+      items.push(h('button', { type: 'button', class: 'ctx-chip', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-label': 'Machine: ' + hostName(launch.host), onclick: (ev) => launchMachineMenu(ev.currentTarget) },
+        h('span', MACHINE_STATE[st][0]), hostName(launch.host), icon('chevron-down', 'chev')));
+    }
+    const row = launch.path ? folderRow(launch.path) : null;
+    items.push(h('button', {
+      type: 'button', id: 'ns-folder', class: 'ctx-chip' + (launch.path ? '' : ' empty'), 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+      'aria-label': 'Folder: ' + (launch.path ? shortPath(launch.path) : 'none'), title: root ? `${launch.path} · root ${root.name}` : `Choose the folder to start in (${MOD}+K)`,
+      onclick: (ev) => folderPicker(ev.currentTarget),
+    }, icon('folder'), h('span', 'path', launch.path ? shortPath(launch.path) : !launch.adapters ? 'Loading…' : 'Choose a folder'),
+    row && row.git ? h('span', 'tag', 'git') : null, icon('chevron-down', 'chev')));
+    const iso = { '': 'Auto checkout', worktree: 'Own worktree', pinned: 'In the folder' }[launch.iso];
+    items.push(h('button', { type: 'button', class: 'ctx-chip', 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'aria-label': 'Checkout: ' + iso, onclick: (ev) => isoMenu(ev.currentTarget) }, icon('branch'), iso, icon('chevron-down', 'chev')));
+    const set = [];
+    if (launch.sandbox === 'docker') set.push('Docker');
+    if (launch.sandbox === 'none') set.push('No sandbox');
+    if (launch.thenPref === 'screen') set.push('then terminal');
+    if (launch.thenPref === 'stay') set.push('then stay');
+    if (launch.name) set.push(launch.name);
+    if (launch.branch) set.push('⎇ ' + launch.branch);
+    items.push(h('button', { type: 'button', class: 'ctx-chip' + (set.length ? ' set' : ''), 'aria-haspopup': 'dialog', 'aria-expanded': 'false', 'aria-label': 'Options' + (set.length ? ': ' + set.join(', ') : ''), onclick: (ev) => optionsPop(ev.currentTarget) },
+      icon('sliders'), set.length ? set.join(' · ') : 'Options'));
+    fill(N.ctx, items);
+  }
+
+  // folderRow describes the row of path: its name (a root's own name, or
+  // the folder's), where it is, and whether it is a git repo (if not given,
+  // as its parent's listing says).
+  function folderRow(path, git) {
+    const root = launchRoots().find((r) => r.path === path);
+    const name = root ? root.name : baseName(path) || '/';
+    if (git == null) {
+      const d = launch.dirs.get(parentOf(path));
+      git = d && d.entries && (d.entries.find((e) => e.name === baseName(path)) || {}).git;
+    }
+    return { path, name, git: !!git, where: shortPath(path) };
+  }
+
+  const LAUNCH_FOUND_MAX = 50;
+
+  // launchRows is what the folder list shows, as plain data.
+  function launchRows(notJoined) {
+    const note = (text) => ({ note: text });
+    if (notJoined) return [note('Not in this fleet yet')];
+    if (!launch.adapters) return [note('Loading…')];
+    const roots = launchRoots();
+    const q = launch.q.trim().toLowerCase();
+    if (!roots.length && !q) return [note('No folders on this machine yet: make one below.')];
+    if (q) return searchRows(q);
+    const l = launch.look;
+    if (l) {
+      const d = launch.dirs.get(l);
+      const rows = [{ ...folderRow(l), where: 'this folder', here: true }];
+      if (!d || !d.entries) rows.push(note('Loading…'));
+      else if (d.error) rows.push(note(d.error));
+      else {
+        for (const e of d.entries) rows.push({ ...folderRow(joinPath(l, e.name), e.git), where: '' });
+        if (!d.entries.length) rows.push(note('No folders inside'));
+        if (d.truncated) rows.push(note(`Only the first ${d.entries.length} folders are listed: search to find others`));
+      }
+      return rows;
+    }
+    // A folder is listed once: recent, else as a root.
+    const recent = launchRecent(LAUNCH_RECENT);
+    const rows = [];
+    if (recent.length) rows.push({ head: 'Recent' }, ...recent.map((p) => folderRow(p)));
+    const others = roots.filter((r) => !recent.includes(r.path)).map((r) => folderRow(r.path));
+    others.sort((a, b) => a.name.localeCompare(b.name));
+    if (others.length) rows.push({ head: `Folders on ${hostName(launch.host)}` }, ...others);
+    return rows;
+  }
+
+  // searchRows finds folders whose name or path has every word of q:
+  // folders of past sessions, roots, the folders in them and in every
+  // folder looked into. A name that is nowhere can be made.
+  function searchRows(q) {
+    const words = q.split(/\s+/);
+    const last = words[words.length - 1];
+    const found = new Map();
+    const addRow = (path, git, rank) => {
+      if (found.has(path) || !placeOf(path)) return;
+      const row = folderRow(path, git);
+      const name = row.name.toLowerCase();
+      if (!words.every((w) => (name + ' ' + row.where.toLowerCase()).includes(w))) return;
+      const score = name === last ? 0 : name.startsWith(last) ? 1 : name.includes(last) ? 2 : 3;
+      found.set(path, { row, score, rank, depth: path.split('/').length });
+    };
+    const recent = launchRecent();
+    recent.forEach((p, i) => addRow(p, null, i));
+    for (const r of launchRoots()) addRow(r.path, null, recent.length);
+    let listing = false;
+    for (const d of launch.dirs.values()) {
+      if (!d.entries) listing = true;
+      else for (const e of d.entries) addRow(joinPath(d.path, e.name), e.git, recent.length);
+    }
+    const hits = [...found.values()].sort((a, b) => a.score - b.score || a.rank - b.rank || a.depth - b.depth || a.row.name.localeCompare(b.row.name));
+    const rows = hits.slice(0, LAUNCH_FOUND_MAX).map((x) => x.row);
+    if (hits.length > LAUNCH_FOUND_MAX) rows.push({ note: `${hits.length - LAUNCH_FOUND_MAX} more: type more to narrow them down` });
+    if (listing) rows.push({ note: 'Still listing folders…' });
+    else if (!hits.length) rows.push({ note: `No folder matches “${q}”: look inside one (›) to search its folders too` });
+    const typed = launch.q.trim();
+    if (words.length === 1 && !hits.some((x) => x.score === 0)) rows.push({ make: /^[~/]/.test(typed) ? typed : joinPath('~', typed) });
+    return rows;
+  }
+
+  // The folder picker: recent folders and roots, the search, or the folders
+  // in one folder. A click on a row chooses it, › looks inside; New folder
+  // makes one, as a root.
+  function folderPicker(anchor) {
+    let making = null; // the new folder's path while its form shows
+    let note = null; // {text, err} under the form
+    openMenu(anchor, (el, close, menu) => {
+      const input = h('input', { type: 'search', placeholder: keyboard() ? 'Search folders · ↓ to move · → to look inside' : 'Search folders', 'aria-label': 'Search folders', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', value: launch.q });
+      const crumbs = h('nav', { class: 'crumbs', 'aria-label': 'Folder you look into' });
+      const list = h('div', { role: 'listbox', 'aria-label': 'Folders' });
+      const foot = h('div', 'folders-foot');
+      const choose = (path) => {
+        launch.path = path;
+        launch.q = '';
+        launch.look = '';
+        close(false);
+        renderLaunch();
+        if (keyboard()) N.ta.focus();
+      };
+      const lookInto = (path) => {
+        launch.look = path;
+        launch.q = '';
+        input.value = '';
+        if (path) listDir(path);
+        paint();
+        input.focus();
+      };
+      const paint = () => {
+        const notJoined = launch.host && hostState(launch.host) === 'not_joined';
+        const focusedKey = list.contains(document.activeElement) ? document.activeElement.dataset.key : '';
+        crumbs.hidden = !launch.look || !!launch.q.trim();
+        if (!crumbs.hidden) {
+          const chain = [];
+          for (let p = launch.look; p && placeOf(p); p = parentOf(p)) {
+            chain.unshift(p);
+            if (p === '/') break;
+          }
+          fill(crumbs, h('button', { type: 'button', onclick: () => lookInto('') }, 'All'),
+            chain.map((p, i) => [' / ', p === launch.look ? h('span', { 'aria-current': 'location' }, i ? baseName(p) : shortPath(p)) : h('button', { type: 'button', onclick: () => lookInto(p) }, i ? baseName(p) : shortPath(p))]));
+        }
+        fill(list, launchRows(notJoined).map((row) => {
+          if (row.head) return h('div', 'menu-l', row.head);
+          if (row.note) return h('p', 'menu-note', row.note);
+          if (row.make) {
+            return mi({ icon: 'folder-plus', cls: 'make', label: `New folder ${row.make}`, sub: 'becomes a root, ready to start in', onSelect: () => {
+              making = row.make;
+              note = null;
+              paint();
+            } });
+          }
+          const chosen = row.path === launch.path;
+          const b = h('button', { type: 'button', class: 'mi', role: 'option', 'aria-selected': String(chosen), 'data-key': row.path, title: shortPath(row.path), onclick: () => choose(row.path) },
+            icon('folder'), h('span', 'grow', h('span', null, row.name), h('span', 'path', row.where)), row.git ? h('span', 'tag', 'git') : null, chosen ? icon('check', 'check') : null);
+          return h('div', 'frow', b, row.here ? null : iconBtn('chevron-right', 'Look inside ' + row.name, () => lookInto(row.path), { cls: 'look', attrs: { tabindex: '-1' } }));
+        }));
+        if (focusedKey) [...list.querySelectorAll('[data-key]')].find((x) => x.dataset.key === focusedKey)?.focus();
+        if (making != null) {
+          const p = h('input', { class: 'input mono', value: making, placeholder: '~/new-project', 'aria-label': 'New folder', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
+          const trust = h('input', { type: 'checkbox', checked: true });
+          const create = async () => {
+            const path = p.value.trim();
+            if (launch.making || !path || /^~?\/*$/.test(path)) return p.focus();
+            note = { text: 'Creating…' };
+            making = path;
+            paint();
+            const root = await createFolder(path, trust.checked, (text) => {
+              note = { text, err: true };
+            });
+            if (root) choose(root.path);
+            else if (MENU === menu) paint();
+          };
+          p.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter') {
+              ev.preventDefault();
+              create();
+            } else if (ev.key === 'Escape') {
+              ev.preventDefault();
+              ev.stopPropagation();
+              making = null;
+              paint();
+            }
+          });
+          fill(foot, h('div', 'newfolder',
+            h('div', 'row2', p, h('button', { type: 'button', class: 'btn primary sm', disabled: launch.making, onclick: create }, launch.making ? 'Creating…' : 'Create'),
+              iconBtn('x', 'Cancel the new folder', () => { making = null; paint(); })),
+            h('label', 'check-row', trust, h('span', null, h('strong', null, 'Trust it: '), 'agents skip the “Do you trust this folder?” prompt. Safe for a new, empty folder.')),
+            note ? h('p', 'menu-note' + (note.err ? ' err' : ''), note.text) : h('p', 'menu-note', `Made on ${hostName(launch.host)}, added as a root, and chosen to start in.`)));
+          if (!launch.making) setTimeout(() => p.focus());
+        } else {
+          fill(foot, mi({ icon: 'folder-plus', label: 'New folder', sub: 'becomes a root, ready to start in', onSelect: () => {
+            making = joinPath(launch.look ? tilde(launch.look) : '~', '');
+            note = null;
+            paint();
+          } }));
+        }
+      };
+      input.addEventListener('input', () => {
+        launch.q = input.value;
+        paint();
+      });
+      input.addEventListener('keydown', (ev) => {
+        const first = list.querySelector('[data-key], .mi');
+        if (ev.key === 'ArrowDown' && first) {
+          ev.preventDefault();
+          first.focus();
+        } else if (ev.key === 'Enter') {
+          ev.preventDefault(); // with a search, choose the first match
+          if (launch.q.trim() && first) first.click();
+        } else if (ev.key === 'Backspace' && !input.value && launch.look) {
+          ev.preventDefault();
+          const up = parentOf(launch.look);
+          lookInto(up && placeOf(up) ? up : '');
+        }
+      });
+      list.addEventListener('keydown', (ev) => {
+        const b = ev.target.closest('[data-key]');
+        if (!b) return;
+        if (ev.key === 'ArrowRight') {
+          const look = b.parentElement.querySelector('.look');
+          if (look) {
+            ev.preventDefault();
+            look.click();
+          }
+        } else if ((ev.key === 'ArrowLeft' || ev.key === 'Backspace') && launch.look) {
+          ev.preventDefault();
+          const up = parentOf(launch.look);
+          lookInto(up && placeOf(up) ? up : '');
+        }
+      });
+      el.append(h('div', 'folders', h('label', 'search', icon('search', 'i-sm'), input), crumbs, list, foot));
+      menu.repaint = paint;
+      paint();
+      // The chosen folder in view.
+      setTimeout(() => list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'center' }));
+    }, { label: 'Folder', role: 'dialog', wide: true, focus: touch() ? null : 'input' });
+  }
+
+  // createFolder makes path on the chosen machine and adds it as a root
+  // (its own root, so its agents and trust are its own). It returns the
+  // root, or null after telling fail why.
+  async function createFolder(path, trust, fail) {
+    const host = launch.host;
+    const gen = launch.gen;
+    launch.making = true;
+    let made = null;
+    let root = null;
+    try {
+      made = await api('POST', launchAPI('fs'), { path });
+      root = (await api('POST', launchAPI('roots'), { path: made.path, adapters: [], trust })).root;
+    } catch (e) {
+      fail(made ? `Made ${shortPath(made.path)}, but could not add it as a root: ${e.message}`
+        : e.status === 405 ? `${hostName(host)} runs an older fleet: update it to make folders from here.` : e.message);
+    }
+    launch.making = false;
+    if (gen !== launch.gen || !root) return null;
+    // Known before the roots are sent again.
+    const roots = host ? launch.roots : S.roots;
+    if (roots && !roots.some((r) => r.name === root.name)) {
+      roots.push(root);
+      if (!host) invalidate('roots');
+    }
+    const parent = parentOf(root.path);
+    if (launch.dirs.has(parent)) {
+      launch.dirs.delete(parent);
+      listDir(parent);
+    }
+    listDir(root.path);
+    toast(`Made ${shortPath(root.path)}${host ? ' on ' + hostName(host) : ''}, a new root`);
+    return root;
+  }
+
+  function launchMachineMenu(anchor) {
+    openMenu(anchor, (el, close) => {
+      el.append(h('div', 'menu-l', 'Machine'));
+      for (const x of pickerHosts()) {
+        const st = hostState(x.id);
+        el.append(mi({
+          custom: h('span', MACHINE_STATE[st][0]), label: x.name, sub: x.id ? MACHINE_STATE[st][1] : 'this machine',
+          checked: launch.host === x.id, disabled: st === 'unreachable',
+          onSelect: () => {
+            close();
+            selectLaunchHost(x.id);
+          },
+        }));
+      }
+    }, { label: 'Machine' });
+  }
+
+  function agentMenu(anchor) {
+    const root = launchRoot();
+    const list = launch.adapters || [];
+    const usage = S.usage.get(launch.host || (S.server && S.server.id)) || [];
+    openMenu(anchor, (el, close) => {
+      el.append(h('div', 'menu-l', 'Agent on ' + hostName(launch.host)));
+      let n = 0;
+      for (const a of list) {
+        const allowed = !root || !root.adapters.length || root.adapters.includes(a.id);
+        const u = usage.find((x) => x.id === a.id);
+        const lim = u && u.limits && (u.limits.find((l) => /week/i.test(l.label)) || u.limits[0]);
+        const full = u && u.limits && u.limits.find((l) => l.percent >= 100);
+        const ok = a.available && allowed;
+        if (ok) n++;
+        el.append(mi({
+          logo: a.id, label: a.name || a.id,
+          sub: !a.available ? 'not installed' : !allowed ? `not allowed in ${root.name}` : full ? `${full.label} limit reached${full.resetsAtMs ? ' · resets ' + clock(full.resetsAtMs) : ''}` : u && u.plan ? u.plan : '',
+          right: ok && lim ? usageMini(lim) : null,
+          kbd: ok && keyboard() && n <= 9 ? (MAC ? '⌥' : 'Alt+') + n : null,
+          checked: launch.adapter === a.id, disabled: !ok,
+          onSelect: () => {
+            close();
+            launch.adapter = a.id;
+            renderLaunch();
+          },
+        }));
+      }
+      if (!list.length) el.append(h('p', 'menu-note', launch.adapters ? 'No agent CLI on this machine.' : 'Loading…'));
+    }, { label: 'Agent' });
+  }
+
+  function usageMini(l) {
+    const pct = Math.max(0, Math.min(100, l.percent));
+    const fillEl = h('span', 'meter-fill' + (pct >= 90 ? ' full' : pct >= 70 ? ' warn' : ''));
+    fillEl.style.width = pct + '%';
+    return h('span', { class: 'usage-mini', title: `${l.label}: ${Math.round(pct)}% used` }, h('span', 'meter-bar', fillEl), `${Math.round(pct)}%`);
+  }
+
+  function launchModelMenu(anchor) {
+    const p = launchPick();
+    if (!p) return;
+    openMenu(anchor, (el, close) => {
+      el.append(h('div', 'menu-l', (p.ad.name || p.ad.id) + ' model'));
+      el.append(mi({ label: 'Default', sub: 'the CLI’s own setting', checked: !p.model, onSelect: () => { close(); saveLaunchPick('', p.effort ? p.effort.id : ''); } }));
+      for (const m of p.ad.models || []) {
+        el.append(mi({ label: m.label, checked: !!p.model && p.model.id === m.id, onSelect: () => {
+          close();
+          saveLaunchPick(m.id, p.effort && m.efforts.includes(p.effort.id) ? p.effort.id : '');
+        } }));
+      }
+      el.append(h('div', 'menu-sep'), h('p', 'menu-note', 'Kept for this agent’s next sessions.'));
+    }, { label: 'Model' });
+  }
+
+  function launchEffortMenu(anchor) {
+    const p = launchPick();
+    if (!p) return;
+    openMenu(anchor, (el, close) => {
+      el.append(h('div', 'menu-l', 'Effort'));
+      el.append(mi({ label: 'Default', sub: 'the CLI’s own setting', checked: !p.effort, onSelect: () => { close(); saveLaunchPick(p.model ? p.model.id : '', ''); } }));
+      for (const e of p.efforts) {
+        el.append(mi({ custom: effortBars(effortLevel(e.id, p.ad.efforts)), label: e.label, checked: !!p.effort && p.effort.id === e.id, onSelect: () => {
+          close();
+          saveLaunchPick(p.model ? p.model.id : '', e.id);
+        } }));
+      }
+    }, { label: 'Effort' });
+  }
+
+  function isoMenu(anchor) {
+    openMenu(anchor, (el, close) => {
+      el.append(h('div', 'menu-l', 'Checkout'));
+      for (const [v, text, sub] of [['', 'Auto', 'An own worktree in git repositories, else the folder itself'], ['worktree', 'Own worktree', 'A git worktree on a branch of its own'], ['pinned', 'The folder itself', 'Works in the folder, next to you and other agents']]) {
+        el.append(mi({ label: text, sub, checked: launch.iso === v, onSelect: () => {
+          launch.iso = v;
+          saveLaunchOptions();
+          close();
+          renderLaunch();
+        } }));
+      }
+    }, { label: 'Checkout' });
+  }
+
+  function optionsPop(anchor) {
+    openMenu(anchor, (el) => {
+      const radios = (key, choices) => h('div', { class: 'radio-chips', role: 'radiogroup', 'aria-label': key === 'sandbox' ? 'Sandbox' : 'Then' }, choices.map(([v, text, title]) =>
+        h('label', { title }, h('input', { type: 'radio', name: 'opt-' + key, value: v, checked: launch[key] === v, onchange: () => {
+          launch[key] = v;
+          saveLaunchOptions();
+          renderLaunch();
+        } }), text)));
+      const field = (key, placeholder, max) => h('input', { class: 'input mono', value: launch[key], placeholder, maxlength: max, spellcheck: 'false', autocomplete: 'off', 'aria-label': key === 'name' ? 'Name' : 'Branch', oninput: (ev) => {
+        launch[key] = ev.target.value.trim();
+        paintContext(launchRoot());
+      } });
+      el.append(h('div', 'pop-pad',
+        h('div', 'pop-title', 'Options'),
+        h('div', 'opt-grid',
+          h('span', 'field-l', 'Sandbox'), radios('sandbox', [['', 'Server default', 'the server’s [sandbox] setting'], ['docker', 'Docker', 'in a Docker container'], ['none', 'None', 'right on the machine']]),
+          h('span', 'field-l', 'Then'), radios('thenPref', [['chat', 'Show chat', 'open the conversation'], ['screen', 'Show terminal', 'open the conversation and its terminal'], ['stay', 'Stay here', 'stay on this page']]),
+          h('span', 'field-l', 'Name'), field('name', 'generated', 64),
+          h('span', 'field-l', 'Branch'), field('branch', 'fleet/<name>', 200)),
+        h('p', 'field-hint', 'Sandbox and Then are kept for the next session; name and branch only for this one.')));
+    }, { label: 'Options', role: 'dialog', wide: true, focus: touch() ? null : 'input' });
+  }
+
+  // ---- the view
+
+  const N = {}; // the new-session view's elements
+
+  function renderNew() {
+    if (!N.root || !N.root.isConnected) buildNew();
+    if (launch.loaded !== launch.host) loadLaunchHost();
+    else if (launch.want && (!launch.host || launch.roots)) launchRootsChanged();
+    else renderLaunch();
+  }
+
+  function buildNew() {
+    checkHosts();
+    const lead = leadBtn();
+    N.ta = h('textarea', { id: 'ns-prompt', rows: 4, spellcheck: 'true', 'aria-label': 'What should the agent do?', placeholder: keyboard() ? `What should the agent do? · ${MOD}+Enter starts` : 'What should the agent do?' });
+    N.ta.value = load('fleet.launch.prompt', '') || '';
+    N.ctx = h('div', 'ctx');
+    N.thumbs = h('div', 'attach-list');
+    N.file = h('input', { type: 'file', accept: 'image/*,video/*', multiple: true, hidden: true, tabindex: '-1', 'aria-hidden': 'true' });
+    N.attach = h('button', { type: 'button', class: 'cpick icon-only', 'aria-label': 'Attach images or videos', onclick: () => N.file.click() }, icon('clip'));
+    N.agentBtn = h('button', { type: 'button', class: 'cpick agent', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => agentMenu(ev.currentTarget) });
+    N.modelBtn = h('button', { type: 'button', class: 'cpick model', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => launchModelMenu(ev.currentTarget) });
+    N.effortBtn = h('button', { type: 'button', class: 'cpick effort', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => launchEffortMenu(ev.currentTarget) });
+    N.start = h('button', { type: 'submit', class: 'start-btn' }, 'Start');
+    N.status = h('div', { class: 'newv-hint', role: 'status', 'aria-live': 'polite' });
+    N.recent = h('div', 'recent');
+    const form = h('form', { class: 'composer', novalidate: true, onsubmit: (ev) => startSession(ev) },
+      N.ctx, N.thumbs, N.ta, h('div', 'ctoolbar', N.attach, N.agentBtn, N.modelBtn, N.effortBtn, h('span', 'grow'), N.start), N.file);
+    N.root = h('div', 'view',
+      lead || small() ? h('div', 'topbar', lead, h('h1', null, 'New session')) : null,
+      h('div', 'newv', h('div', 'newv-in',
+        h('h1', { class: small() ? 'sr-only' : null }, 'Start a session'),
+        h('p', { class: 'newv-sub' + (small() ? ' sr-only' : '') }, 'Pick where and with which agent, then say what to do.'),
+        form, N.status, N.recent)));
+    fill($('main'), N.root);
+    const fit = () => {
+      N.ta.style.height = 'auto';
+      N.ta.style.height = Math.min(N.ta.scrollHeight + 2, innerHeight * 0.4) + 'px';
+    };
+    N.ta.addEventListener('input', () => {
+      fit();
+      save('fleet.launch.prompt', N.ta.value || null);
+      if (launch.images.length) renderLaunch(); // images need a prompt
+    });
+    N.ta.addEventListener('paste', (ev) => {
+      const files = mediaFiles(ev.clipboardData);
+      if (!files.length) return;
+      ev.preventDefault();
+      addLaunchFiles(files);
+    });
+    N.file.addEventListener('change', () => {
+      addLaunchFiles(N.file.files);
+      N.file.value = '';
+    });
+    N.thumbs.addEventListener('click', (ev) => {
+      const b = ev.target.closest('button[data-image], button[data-video]');
+      if (!b || launch.busy) return;
+      if (b.dataset.video) dropVideos(launch.videos.splice(Number(b.dataset.video), 1));
+      else launch.images.splice(Number(b.dataset.image), 1);
+      renderLaunch();
+      if (keyboard()) N.ta.focus();
+    });
+    form.addEventListener('dragover', (ev) => {
+      if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files')) {
+        ev.preventDefault();
+        form.classList.add('drag');
+      }
+    });
+    form.addEventListener('dragleave', () => form.classList.remove('drag'));
+    form.addEventListener('drop', (ev) => {
+      form.classList.remove('drag');
+      if (!ev.dataTransfer || !ev.dataTransfer.files.length) return;
+      ev.preventDefault();
+      addLaunchFiles(ev.dataTransfer.files);
+    });
+    requestAnimationFrame(fit);
+    if (keyboard()) setTimeout(() => N.ta.focus({ preventScroll: true }));
+  }
+
+  async function startSession(ev) {
+    if (ev) ev.preventDefault();
+    const place = launchPlace();
+    if (!place || !launch.adapter || launch.busy || launchImagesProblem()) return;
+    const host = launch.host;
+    const adapter = launch.adapter;
+    const then = launch.then || launch.thenPref || 'chat';
+    launch.then = '';
+    launch.busy = true;
+    launch.error = '';
+    renderLaunch();
+    const pick = launchPick();
+    try {
+      const r = await api('POST', launchAPI('agents'), {
+        model: (pick && pick.model && pick.model.id) || '',
+        effort: (pick && pick.effort && pick.effort.id) || '',
+        adapter,
+        root: place.root.name,
+        path: place.sub,
+        prompt: withVideos($('ns-prompt').value, launch.videos),
+        name: (launch.name || '').trim(),
+        branch: (launch.branch || '').trim(),
+        isolation: launch.iso || '',
+        sandbox: launch.sandbox || '',
+        images: launch.images.map((im) => im.data),
+      });
+      rememberRootProvider(host, place.root, adapter);
+      launch.busy = false;
+      closeLaunch();
+      toast(`Started ${r.agent.name}${host ? ' on ' + hostName(host) : ''}`);
+      if (host) {
+        const rem = S.remote.get(host) || { agents: new Map(), fails: 0 };
+        rem.agents.set(r.agent.id, r.agent);
+        S.remote.set(host, rem);
+        invalidate('agents');
+      }
+      if (then !== 'stay') openChat(host, r.agent.id, r.agent, { screen: then === 'screen' });
+      else renderLaunch();
+      return;
+    } catch (e) {
+      launch.error = e.message;
+    }
+    launch.busy = false;
+    renderLaunch();
+  }
+
+  // wireLaunch: anywhere in the new-session view, Ctrl/Cmd+Enter starts the
+  // session (with Shift it shows the terminal too), Ctrl/Cmd+K opens the
+  // folders, Alt+1–9 chooses the agent CLI.
+  function wireLaunch() {
+    document.addEventListener('keydown', (ev) => {
+      if (ev.isComposing || ev.defaultPrevented || !admin || !N.root || !N.root.isConnected) return;
+      if (document.querySelector('dialog[open]')) return;
+      if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) {
+        ev.preventDefault();
+        launch.then = ev.shiftKey ? 'screen' : '';
+        startSession();
+      } else if (ev.code === 'KeyK' && (ev.ctrlKey || ev.metaKey) && !ev.altKey && !ev.shiftKey) {
+        ev.preventDefault();
+        if (!(MENU && MENU.o.label === 'Folder')) folderPicker($('ns-folder'));
+      } else if (ev.altKey && !ev.ctrlKey && !ev.metaKey && /^Digit[1-9]$/.test(ev.code)) {
+        const root = launchRoot();
+        const ok = (launch.adapters || []).filter((a) => a.available && (!root || !root.adapters.length || root.adapters.includes(a.id)));
+        const a = ok[Number(ev.code.slice(5)) - 1];
+        if (!a) return;
+        ev.preventDefault();
+        launch.adapter = a.id;
+        renderLaunch();
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------- devices
+  //
+  // The fleet's machines (how each is doing, its agent CLIs and their plan
+  // usage, its folders) and the apps paired with this one. Everywhere else a
+  // machine is a dot with its name.
+
+  const rootsUI = { q: new Map(), all: new Set(), confirm: '' }; // per machine: filter, all shown; root awaiting removal
+  let joinCmd = '';
+  let joinTimer = 0;
+
+  function renderDevices() {
+    const main = $('main');
+    const page = main.querySelector('.page');
+    const top = page ? page.scrollTop : 0;
+    const focused = main.contains(document.activeElement) ? document.activeElement.dataset.focus : '';
+    const ms = machines();
+    const up = ms.filter((m) => hostUp(m.state)).length;
+    const lead = leadBtn();
+    const devs = [...S.devices].sort((x, y) => (y.connected ? 1 : 0) - (x.connected ? 1 : 0) || (x.name || '').localeCompare(y.name || ''));
+    const view = h('div', 'view',
+      lead ? h('div', 'topbar', lead, h('h1', null, 'Devices')) : null,
+      h('div', 'page', h('div', 'page-in',
+        h('div', 'page-h',
+          h('div', null, h('h1', { class: lead ? 'sr-only' : null }, 'Devices'),
+            h('p', 'page-sub', `${up} of ${plural(ms.length, 'machine')} online` + (devs.length ? ` · ${devs.filter((d) => d.connected).length} of ${plural(devs.length, 'paired app')} online` : ''))),
+          admin ? h('button', { type: 'button', class: 'btn', onclick: openJoin }, icon('plus'), 'Add a machine') : null),
+        ms.map(machineCard),
+        h('h2', 'sec-title', 'Paired apps', devs.length ? h('span', 'muted', String(devs.length)) : null),
+        devs.length ? h('div', 'list-card', devs.map((d) => h('div', 'app-row',
+          h('span', 'mach-ic', icon(/ios|android/.test(d.platform) ? 'phone' : d.platform === 'macos' ? 'laptop' : 'terminal'), h('span', 'dot' + (d.connected ? '' : ' off'))),
+          h('div', 'grow', h('div', 'app-name', d.name || d.id), h('div', 'app-sub', PLATFORM[d.platform] || d.platform || 'unknown')),
+          d.connected ? h('span', 'app-state on', 'online') : h('span', 'app-state', ['seen ', relTime(d.lastSeenAtMs, '', true)])))) : null,
+        h('p', 'hint-box', 'Native apps and the fleet CLI on other computers pair once with ', h('code', null, 'fleet pair'), '. This web app needs no pairing.'))));
+    fill(main, view);
+    const p2 = main.querySelector('.page');
+    if (p2) p2.scrollTop = top;
+    if (focused) {
+      const el = main.querySelector(`[data-focus="${CSS.escape(focused)}"]`);
+      if (el) {
+        el.focus();
+        if (el.setSelectionRange && el.value) el.setSelectionRange(el.value.length, el.value.length);
+      }
+    }
+    for (const m of ms) if (m.state === 'joined' && admin && !S.peerRoots.has(m.id)) loadPeerRoots(m.id);
+    if (admin && ms.some((m) => m.state === 'not_joined')) watchJoin();
+  }
+
+  const PLATFORM = { macos: 'macOS', ios: 'iOS', ipados: 'iPadOS', linux: 'Linux', windows: 'Windows', android: 'Android' };
+
+  // shortCPU drops trademarks, "CPU", core counts and the clock from a
+  // CPU's name: "Intel(R) Core(TM) i7-7700K CPU @ 4.20GHz" is "Intel Core
+  // i7-7700K".
+  const shortCPU = (m) => (m || '').replace(/\((?:R|TM|C)\)/gi, '').replace(/@.*$/, '')
+    .replace(/\b(?:CPU|Processor|\d+-Core)\b/gi, '').replace(/\s+/g, ' ').trim();
+
+  // meter is a reading as a bar: amber from warn percent, red from full.
+  // meter is a labelled bar; at, when its limit resets, goes under the
+  // value on phones.
+  function meter(text, pct, value, warn, full, title, at) {
+    const level = pct >= full ? 'full' : pct >= warn ? 'warn' : '';
+    const bar = h('span', 'meter-fill ' + level);
+    bar.style.width = Math.max(1.5, Math.min(100, pct)) + '%';
+    return h('div', { class: 'meter', title },
+      h('span', 'meter-l', text),
+      h('span', { class: 'meter-bar', role: 'img', 'aria-label': `${text}: ${value}` + (at ? `, resets ${at}` : '') }, bar),
+      h('span', 'meter-v' + (level === 'full' ? ' full' : ''), value, at ? h('span', 'meter-at', h('span', 'meter-sep', ' · '), at) : null));
+  }
+
+  // USAGE_STALE_MS: usage or stats older than this are marked with when
+  // they were read.
+  const USAGE_STALE_MS = 10 * 60000;
+
+  function machineCard(m) {
+    const p = m.peer || {};
+    const s = admin ? S.host.get(m.id === '' ? (S.server && S.server.id) : m.id) : null;
+    const usage = admin ? S.usage.get(m.id === '' ? (S.server && S.server.id) : m.id) : null;
+    const up = hostUp(m.state);
+    const mac = s ? /mac/i.test(s.osName || '') : (S.server && m.state === 'self' && S.server.os === 'darwin');
+    const addrs = (p.addrs || []).map((a) => hostPort(a, p.port));
+    const spec = [];
+    if (s) {
+      spec.push(s.osName, shortCPU(s.cpuModel), s.cpus ? `${s.cpus} CPUs` : '', s.memoryTotal ? fmtIEC(s.memoryTotal) : '', s.bootedAtMs ? 'up ' + upFor(Date.now() - s.bootedAtMs) : '');
+      if (s.readAtMs && Date.now() - s.readAtMs >= USAGE_STALE_MS) spec.push('as of ' + clock(s.readAtMs));
+    } else if (m.state === 'self' && S.server) spec.push(`${S.server.os || '?'}/${S.server.arch || '?'}`);
+    if (addrs.length) spec.push(addrs[0]);
+    const url = !m.peer || p.self ? '' : peerURL(p);
+    const live = allAgents().filter((x) => x.host === m.id && !isFinished(x.a)).length;
+    const head = h('div', 'mach-h',
+      h('span', 'mach-ic', icon(mac ? 'laptop' : 'server'), h('span', MACHINE_STATE[m.state][0])),
+      h('div', 'mach-id',
+        h('div', 'mach-name', m.name, m.state === 'self' ? h('span', 'chip ok', 'This machine') : null,
+          m.state === 'self' && S.server && S.server.version ? h('span', 'chip plain mono', S.server.version) : null,
+          !up && m.state !== 'self' ? h('span', 'mach-state ' + (m.state === 'not_joined' ? 'warn' : m.state === 'unreachable' ? 'bad' : ''), MACHINE_STATE[m.state][1]) : null),
+        h('div', 'mach-spec', spec.filter(Boolean).map((t) => h('span', null, t)))),
+      h('div', 'mach-acts',
+        admin && up ? h('button', { type: 'button', class: 'btn sm', onclick: () => newIn(m.id, '') }, icon('plus'), 'New session') : null,
+        url ? h('a', { class: 'btn ghost sm', href: url, target: '_blank', rel: 'noopener noreferrer', title: `Open the dashboard of ${m.name}` }, 'Its dashboard', icon('external', 'i-xs')) : null));
+    const out = [head];
+    if (m.state === 'not_joined' && admin) {
+      out.push(h('div', 'mach-note', h('div', 'join-box',
+        h('p', null, 'This machine does not have the fleet key yet. Run this on it once (it starts fleet there if needed):'),
+        codeBox(joinCmd || 'loading…', !joinCmd),
+        h('p', 'field-hint', 'This page notices by itself. Machines with the same key manage each other, so share it like a password.'))));
+      loadJoin();
+    } else if (m.state === 'unreachable') {
+      out.push(h('p', 'mach-note', 'Seen on the network, but its dashboard does not answer.'));
+    } else if (m.state === 'nodash') {
+      out.push(h('p', 'mach-note', 'It does not advertise a web dashboard (an older version, or web is off or loopback only), so it cannot be managed from here.'));
+    } else if (m.state === 'checking') {
+      out.push(h('p', 'mach-note', 'Checking whether it shares the fleet key…'));
+    }
+    if (up && admin && (s || usage)) out.push(h('div', 'mach-body', healthSec(s), agentsSec(usage)));
+    if (up) {
+      out.push(h('div', 'mach-foot',
+        h('span', null, plural(live, 'live session')),
+        live ? h('button', { type: 'button', class: 'link-btn', onclick: () => {
+          U.groupBy = 'machine';
+          save('fleet.groupBy', 'machine');
+          renderSideList();
+          if (small()) go('#/');
+          else toast('The sessions are grouped by machine now');
+        } }, 'Show them') : null));
+      if (admin) out.push(rootsSec(m));
+    }
+    return h('section', { class: 'mach' + (up ? '' : m.state === 'not_joined' ? ' warn' : ' off'), 'aria-label': m.name }, out);
+  }
+
+  function healthSec(s) {
+    if (!s) return h('div', 'mach-sec', h('h3', 'sec-h', 'Health'), h('p', 'ag-none', 'Not read yet.'));
+    const share = (part, whole) => (whole > 0 ? (100 * part) / whole : 0);
+    const busy = share(s.load[0], s.cpus);
+    const used = s.memoryTotal - s.memoryAvailable;
+    return h('div', 'mach-sec',
+      h('h3', 'sec-h', 'Health'),
+      meter('Load', busy, s.load[0].toFixed(2), 100, 150, `load ${s.load.map((l) => l.toFixed(2)).join(' · ')} over 1, 5 and 15 minutes, on ${s.cpus} CPUs (${Math.round(busy)}% busy)`),
+      s.memoryTotal ? meter('Memory', share(used, s.memoryTotal), Math.round(share(used, s.memoryTotal)) + '%', 80, 90, `${fmtIEC(used)} used of ${fmtIEC(s.memoryTotal)}, ${fmtIEC(s.memoryAvailable)} available`) : null,
+      s.swapTotal ? meter('Swap', share(s.swapUsed, s.swapTotal), Math.round(share(s.swapUsed, s.swapTotal)) + '%', 80, 90, `${fmtIEC(s.swapUsed)} used of ${fmtIEC(s.swapTotal)}`) : null,
+      (s.disks || []).map((d) => {
+        const pct = share(d.used, d.used + d.available); // as df counts it: of what users may fill
+        return meter('Disk ' + (d.mount === '/' ? '/' : baseName(d.mount)), pct, Math.round(pct) + '%', 80, 90, `${d.mount}: ${fmtIEC(d.used)} used of ${fmtIEC(d.total)}, ${fmtIEC(d.available)} free`);
+      }));
+  }
+
+  function agentsSec(list) {
+    if (!list) return h('div', 'mach-sec', h('h3', 'sec-h', 'Agents and plan usage'), h('p', 'ag-none', 'Not read yet.'));
+    return h('div', 'mach-sec',
+      h('h3', 'sec-h', 'Agents and plan usage'),
+      list.map((a) => h('div', 'ag',
+        h('div', 'ag-h', logo(a.id), a.name || a.id, a.version ? h('span', 'muted', a.version) : null, a.plan ? h('span', 'chip', a.plan) : null),
+        !a.available ? h('p', 'ag-none', a.reason || 'Not installed')
+          : a.limits && a.limits.length ? [a.limits.map((l) => meter(l.label, l.percent, `${Math.round(l.percent)}%`, 70, 90,
+            `${l.label}: ${Math.round(l.percent)}% used` + (l.resetsAtMs ? `, resets ${new Date(l.resetsAtMs).toLocaleString()}` : ''), l.resetsAtMs ? clock(l.resetsAtMs) : '')),
+          a.asOfMs && Date.now() - a.asOfMs >= USAGE_STALE_MS ? h('p', 'ag-none', 'as of ' + clock(a.asOfMs)) : null]
+            : h('p', 'ag-none', a.error ? 'Usage unknown: ' + a.error : 'No plan limits'))));
+  }
+
+  function rootsSec(m) {
+    const roots = m.id ? S.peerRoots.get(m.id) : S.roots;
+    const box = h('div', 'roots');
+    const add = h('button', { type: 'button', class: 'btn sm', onclick: () => openRootPicker(m.id) }, icon('folder-plus'), 'Add folder');
+    if (!roots) {
+      box.append(h('div', 'roots-h', h('h3', 'sec-h', 'Folders'), add), h('p', 'roots-loading', 'Loading…'));
+      return box;
+    }
+    const q = (rootsUI.q.get(m.id) || '').toLowerCase();
+    const words = q.split(/\s+/).filter(Boolean);
+    const many = roots.length > 6;
+    const found = roots.filter((r) => words.every((w) => (r.name + ' ' + shortPath(r.path)).toLowerCase().includes(w)));
+    const all = rootsUI.all.has(m.id);
+    const shown = q || all || !many ? found : found.slice(0, 6);
+    const filter = many ? h('label', 'search', icon('search', 'i-sm'), h('input', {
+      type: 'search', placeholder: 'Filter folders', 'aria-label': 'Filter folders on ' + m.name, value: rootsUI.q.get(m.id) || '', 'data-focus': 'roots-q-' + m.id,
+      oninput: (ev) => {
+        rootsUI.q.set(m.id, ev.target.value);
+        renderDevices();
+      },
+    })) : null;
+    box.append(h('div', 'roots-h', h('h3', 'sec-h', `Folders · ${roots.length}`), filter, add));
+    if (!roots.length) box.append(h('p', 'roots-loading', 'No folders yet: agents can only start inside one.'));
+    for (const r of shown) box.append(rootRow(m, r));
+    if (q && !found.length) box.append(h('p', 'roots-loading', `No folder matches “${q}”.`));
+    if (many && !q) box.append(h('button', { type: 'button', class: 'roots-more', 'aria-expanded': String(all), onclick: () => {
+      if (all) rootsUI.all.delete(m.id);
+      else rootsUI.all.add(m.id);
+      renderDevices();
+    } }, all ? 'Show fewer' : `Show all ${roots.length} folders`));
+    return box;
+  }
+
+  function rootRow(m, r) {
+    const key = m.id + '\0' + r.name;
+    const confirming = rootsUI.confirm === key;
+    return h('div', 'root-row',
+      h('div', 'root-main',
+        h('div', 'root-name', h('span', 'trunc', r.name),
+          r.trust ? h('span', { class: 'trust', title: 'Agents skip the “Do you trust this folder?” prompt' }, 'trusted') : null,
+          r.adapters && r.adapters.length ? h('span', 'muted mono', r.adapters.join(' · ')) : null),
+        h('div', { class: 'root-path', title: r.path }, shortPath(r.path))),
+      confirming
+        ? h('div', 'root-confirm', h('span', null, 'Remove? Running agents keep going.'),
+          h('button', { type: 'button', class: 'btn sm', 'data-focus': 'keep-' + key, onclick: () => { rootsUI.confirm = ''; renderDevices(); } }, 'Keep'),
+          h('button', { type: 'button', class: 'btn danger sm', 'data-focus': 'remove-' + key, onclick: () => removeRoot(m.id, r.name) }, 'Remove'))
+        : h('div', 'root-acts',
+          iconBtn('plus', `New session in ${r.name}`, () => newIn(m.id, r.path)),
+          iconBtn('pencil', `Edit ${r.name}`, () => openRootPicker(m.id, r)),
+          iconBtn('trash', `Remove ${r.name}`, () => {
+            rootsUI.confirm = key;
+            renderDevices();
+            setTimeout(() => $('main').querySelector(`[data-focus="${CSS.escape('remove-' + key)}"]`)?.focus());
+          })));
+  }
+
+  async function loadPeerRoots(id) {
+    if (!id) return;
+    S.peerRoots.set(id, null);
+    try {
+      const r = await api('GET', `/api/hosts/${encodeURIComponent(id)}/roots`);
+      S.peerRoots.set(id, (r && r.roots) || []);
+    } catch {
+      S.peerRoots.delete(id);
+      return;
+    }
+    if (U.view === 'devices') renderDevices();
+  }
+
+  async function removeRoot(host, name) {
+    rootsUI.confirm = '';
+    try {
+      await api('DELETE', (host ? `/api/hosts/${encodeURIComponent(host)}/` : '/api/') + 'roots/' + encodeURIComponent(name));
+      toast(`Removed the folder ${name}`);
+      if (host) loadPeerRoots(host);
+    } catch (e) {
+      toast(`Could not remove ${name}: ${e.message}`, 'error');
+    }
+    if (U.view === 'devices') renderDevices();
+  }
+
+  // codeBox is a command to copy.
+  function codeBox(text, disabled) {
+    const code = h('code', null, text);
+    return h('div', 'codebox', code, h('button', { type: 'button', class: 'btn ghost sm', disabled, onclick: (ev) => copyText(code.textContent, ev.currentTarget) }, 'Copy'));
+  }
+
+  async function loadJoin() {
+    if (joinCmd || !admin) return joinCmd;
+    try {
+      const r = await api('GET', '/api/join');
+      joinCmd = (r && r.command) || '';
+    } catch {
+      return '';
+    }
+    if (U.view === 'devices') renderDevices();
+    if (dialogShows('join')) openJoin();
+    return joinCmd;
+  }
+
+  // watchJoin asks the machines without the fleet key again every few
+  // seconds while Devices shows them, and loads one once it joined.
+  function watchJoin() {
+    if (joinTimer) return;
+    joinTimer = setTimeout(async () => {
+      joinTimer = 0;
+      if (U.view !== 'devices' || !admin) return;
+      for (const m of machines()) {
+        if (m.state !== 'not_joined') continue;
+        if (await checkHost(m.id) === 'joined') toast(`${m.name} joined the fleet`);
+      }
+      if (U.view === 'devices' && machines().some((m) => m.state === 'not_joined')) watchJoin();
+    }, 3000);
+  }
+
+  function openJoin() {
+    loadJoin();
+    let shown = false;
+    const masked = () => joinCmd.replace(/(--join\s+)(\S+)/, (all, a, k) => a + '•'.repeat(Math.min(24, k.length)));
+    const code = h('code', null, joinCmd ? masked() : 'loading…');
+    const install = 'curl -fsSL https://raw.githubusercontent.com/floscom/fleet/main/install.sh | sh';
+    openDialog({
+      id: 'join',
+      title: 'Add a machine',
+      sub: 'Machines with the same fleet key find each other on the network and over Tailscale, and show up here.',
+      body: h('ol', 'steps-list',
+        h('li', null, h('div', null, 'Install fleet on it:'), codeBox(install)),
+        h('li', null, h('div', null, 'Start it with this fleet’s key, and the folders agents may use:'),
+          h('div', 'codebox', code,
+            iconBtn('eye', 'Show the key', () => {
+              shown = !shown;
+              code.textContent = joinCmd ? (shown ? joinCmd : masked()) : 'loading…';
+            }),
+            h('button', { type: 'button', class: 'btn ghost sm', disabled: !joinCmd, onclick: (ev) => copyText(joinCmd + ' --root ~/code', ev.currentTarget) }, 'Copy'))),
+        h('li', null, 'It appears on this page within a few seconds. The key works like a password: share it only with your machines.')),
+      foot: [h('button', { type: 'button', class: 'btn primary', onclick: closeDialog }, 'Done')],
+    });
+  }
+
+  // ---- adding or editing a folder (a root): a folder browser over GET
+  // .../fs on the machine, then its name, the agents allowed and trust.
+
+  const picker = { host: '', dir: null, seq: 0, loading: false, error: '', busy: false, editing: null, making: false, adapters: null, roots: null, hidden: false, filter: '', newName: null, els: null };
+
+  const pickerAPI = (path) => (picker.host ? `/api/hosts/${encodeURIComponent(picker.host)}/${path}` : '/api/' + path);
+  const pickerRoots = () => (picker.host ? picker.roots || [] : S.roots);
+  const rootAt = (path) => pickerRoots().find((r) => r.path === path);
+
+  function rootAround(path) {
+    let best = null;
+    for (const r of pickerRoots()) {
+      const inside = path === r.path || path.startsWith(r.path.endsWith('/') ? r.path : r.path + '/');
+      if (inside && (!best || r.path.length > best.path.length)) best = r;
+    }
+    return best;
+  }
+
+  function openRootPicker(host, root) {
+    if (!admin) return;
+    Object.assign(picker, { host: host || '', dir: null, loading: false, error: '', busy: false, editing: root || null, making: false, adapters: null, roots: null, filter: '', newName: null });
+    picker.seq++;
+    const name = h('input', { class: 'input mono', value: root ? root.name : '', maxlength: 64, autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Name' });
+    const trust = h('input', { type: 'checkbox', checked: !!(root && root.trust) });
+    const path = h('input', { class: 'input mono', placeholder: '/path/to/folder', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Folder path' });
+    const filter = h('input', { type: 'search', placeholder: 'Filter folders', 'aria-label': 'Filter folders', autocomplete: 'off', spellcheck: 'false' });
+    const hidden = h('input', { type: 'checkbox', checked: picker.hidden });
+    const crumbs = h('nav', { class: 'crumbs', 'aria-label': 'Current folder' });
+    const list = h('div', { class: 'pick-list', role: 'listbox', 'aria-label': 'Folders' });
+    const newRow = h('div');
+    const agents = h('div', 'radio-chips');
+    const status = h('p', { class: 'dlg-status', role: 'status', 'aria-live': 'polite' });
+    const save2 = h('button', { type: 'button', class: 'btn primary', onclick: () => saveRoot() }, root ? 'Save' : 'Add as root');
+    picker.els = { name, trust, path, filter, hidden, crumbs, list, newRow, agents, status, save: save2 };
+    path.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        goToTyped();
+      }
+    });
+    filter.addEventListener('input', () => {
+      picker.filter = filter.value.trim().toLowerCase();
+      paintPickerList();
+    });
+    filter.addEventListener('keydown', (ev) => {
+      const first = list.querySelector('.mi');
+      if (ev.key === 'ArrowDown' && first) {
+        ev.preventDefault();
+        first.focus();
+      } else if (ev.key === 'Enter') {
+        ev.preventDefault();
+        if (filter.value.trim() && first) first.click();
+      } else if (ev.key === 'Backspace' && !filter.value && picker.dir && picker.dir.parent) {
+        ev.preventDefault();
+        browse(picker.dir.parent);
+      }
+    });
+    list.addEventListener('keydown', (ev) => {
+      const items = [...list.querySelectorAll('.mi')];
+      const i = items.indexOf(document.activeElement);
+      if (ev.key === 'ArrowDown' && i + 1 < items.length) {
+        ev.preventDefault();
+        items[i + 1].focus();
+      } else if (ev.key === 'ArrowUp') {
+        ev.preventDefault();
+        (i > 0 ? items[i - 1] : filter).focus();
+      }
+    });
+    hidden.addEventListener('change', () => {
+      picker.hidden = hidden.checked;
+      browse(picker.dir ? picker.dir.path : '');
+    });
+    openDialog({
+      id: 'root',
+      wide: true,
+      title: root ? `Edit ${root.name}` : 'Add a folder',
+      sub: `Agents can start anywhere inside it. A folder on ${hostName(picker.host)}.`,
+      body: [
+        h('div', 'pop-row', h('label', 'search grow', icon('folder', 'i-sm'), path), h('button', { type: 'button', class: 'btn sm', onclick: goToTyped }, 'Go')),
+        h('div', 'pop-row', crumbs, h('span', 'grow'),
+          h('button', { type: 'button', class: 'btn ghost sm', onclick: () => { picker.newName = ''; paintNewRow(); } }, icon('folder-plus'), 'New folder'),
+          h('button', { type: 'button', class: 'btn ghost sm', onclick: () => browse('') }, '~ home'),
+          h('label', 'pr-acts', hidden, 'hidden')),
+        newRow,
+        h('label', 'search', icon('search', 'i-sm'), filter),
+        list,
+        h('div', 'opt-grid',
+          h('span', 'field-l', 'Name'), name,
+          h('span', 'field-l', 'Agents'), h('div', null, agents, h('span', 'field-hint', 'None ticked: all of them'))),
+        h('label', 'check-row warn', trust, h('span', null, h('strong', null, 'Trust this folder. '), 'Agents started here skip Claude Code’s and Codex’s “Do you trust this folder?” prompt, so its own hooks, MCP servers and settings run. Only for code you trust.')),
+        status,
+      ],
+      foot: [h('button', { type: 'button', class: 'btn', onclick: closeDialog }, 'Cancel'), save2],
+      focus: touch() ? null : filter,
+      canClose: () => !picker.busy,
+      onClose: () => {
+        picker.seq++;
+        picker.els = null;
+      },
+    });
+    browse(root ? root.path : '');
+    loadPickerAdapters();
+    if (picker.host) loadPickerRoots();
+    paintPickerAgents();
+  }
+
+  async function browse(path) {
+    const seq = ++picker.seq;
+    picker.loading = true;
+    paintPicker();
+    const q = new URLSearchParams();
+    if (path) q.set('path', path);
+    if (picker.hidden) q.set('hidden', '1');
+    let dir = null;
+    let err = '';
+    try {
+      dir = await api('GET', pickerAPI('fs?' + q));
+    } catch (e) {
+      err = e.message;
+      if (picker.host && e.notJoined) setHostState(picker.host, 'not_joined');
+    }
+    if (seq !== picker.seq || !picker.els) return;
+    picker.loading = false;
+    picker.error = err;
+    if (dir) {
+      const moved = !picker.dir || picker.dir.path !== dir.path;
+      picker.dir = dir;
+      picker.els.path.value = dir.path;
+      if (moved) {
+        picker.filter = '';
+        picker.els.filter.value = '';
+        picker.els.list.scrollTop = 0;
+      }
+    }
+    paintPicker();
+  }
+
+  function goToTyped() {
+    let p = picker.els.path.value.trim();
+    if (!p) return;
+    if (p === '~' || p.startsWith('~/')) p = ((picker.dir && picker.dir.home) || '') + p.slice(1);
+    browse(p);
+  }
+
+  async function loadPickerAdapters() {
+    const host = picker.host;
+    let list = [];
+    try {
+      const r = await api('GET', pickerAPI('adapters'));
+      list = (r && r.adapters) || [];
+    } catch {
+      // not joined or unreachable: the folder list says so
+    }
+    if (host !== picker.host || !picker.els) return;
+    picker.adapters = list;
+    paintPickerAgents();
+  }
+
+  async function loadPickerRoots() {
+    const host = picker.host;
+    try {
+      const r = await api('GET', pickerAPI('roots'));
+      if (host !== picker.host) return;
+      picker.roots = (r && r.roots) || [];
+      paintPicker();
+    } catch {
+      // browse reports it
+    }
+  }
+
+  function paintPickerAgents() {
+    const els = picker.els;
+    if (!els) return;
+    const was = new Set([...els.agents.querySelectorAll('input:checked')].map((i) => i.value));
+    const chosen = was.size ? was : new Set((picker.editing && picker.editing.adapters) || []);
+    const list = [...(picker.adapters || [])];
+    for (const id of chosen) if (!list.some((a) => a.id === id)) list.push({ id, name: id, available: false });
+    fill(els.agents, !picker.adapters ? h('span', 'field-hint', 'Loading…') : list.map((a) =>
+      h('label', { title: a.available ? a.name : `${a.name}: not installed here` }, h('input', { type: 'checkbox', value: a.id, checked: chosen.has(a.id) }), a.name || a.id, a.available ? '' : ' · n/a')));
+  }
+
+  function paintPicker() {
+    const els = picker.els;
+    if (!els) return;
+    const dir = picker.dir;
+    // the crumbs
+    const parts = dir ? dir.path.split('/').filter(Boolean) : [];
+    fill(els.crumbs, dir ? [h('button', { type: 'button', onclick: () => browse('/') }, '/'),
+      parts.map((p, i) => [i ? ' / ' : '', i === parts.length - 1 ? h('span', { 'aria-current': 'location' }, p) : h('button', { type: 'button', onclick: () => browse('/' + parts.slice(0, i + 1).join('/')) }, p)])] : null);
+    paintPickerList();
+    paintNewRow();
+    // what Add does, or what is in the way
+    const existing = dir && rootAt(dir.path);
+    const conflict = existing && (!picker.editing || existing.name !== picker.editing.name);
+    const notJoined = picker.host && hostState(picker.host) === 'not_joined';
+    const st = els.status;
+    st.className = 'dlg-status';
+    if (notJoined) fill(st, `${hostName(picker.host)} does not have this fleet’s key yet.`);
+    else if (picker.error) {
+      st.className = 'dlg-status err';
+      fill(st, picker.error, dir ? ` · still in ${shortPath(dir.path)}` : '');
+    } else if (!dir) fill(st, 'Loading…');
+    else if (conflict) fill(st, `This folder is already the root “${existing.name}”.`);
+    else {
+      const around = rootAround(dir.path);
+      fill(st, picker.editing ? 'Saves ' : 'Adds ', h('span', 'mono', shortPath(dir.path)), around && around !== existing ? ` · inside the root “${around.name}”, where agents can already start` : '');
+    }
+    els.name.placeholder = picker.editing ? picker.editing.name : dir ? baseName(dir.path) || 'root' : '';
+    els.save.disabled = !dir || picker.loading || picker.busy || !!conflict || notJoined;
+    els.save.textContent = picker.editing ? (picker.busy ? 'Saving…' : 'Save') : picker.busy ? 'Adding…' : 'Add as root';
+  }
+
+  function paintPickerList() {
+    const els = picker.els;
+    const dir = picker.dir;
+    if (!els) return;
+    if (!dir) return fill(els.list, h('p', 'menu-note', picker.loading ? 'Loading…' : picker.error || 'Nothing to show.'));
+    const f = picker.filter;
+    const shown = f ? dir.entries.filter((e) => e.name.toLowerCase().includes(f)) : dir.entries;
+    const items = [];
+    if (dir.parent && !f) items.push(mi({ icon: 'chevron-left', label: '..', sub: 'the folder above', onSelect: () => browse(dir.parent) }));
+    for (const e of shown) {
+      const path = joinPath(dir.path, e.name);
+      const r = rootAt(path);
+      items.push(mi({ icon: 'folder', label: e.name, right: [e.git ? h('span', 'tag', 'git') : null, r ? h('span', 'trust', 'root: ' + r.name) : null], onSelect: () => browse(path) }));
+    }
+    if (!shown.length) items.push(h('p', 'menu-note', f ? `No folder matches “${f}”.` : 'No folders here.'));
+    if (dir.truncated) items.push(h('p', 'menu-note', `Only the first ${dir.entries.length} folders are listed: filter or type a path.`));
+    fill(els.list, items);
+  }
+
+  function paintNewRow() {
+    const els = picker.els;
+    if (!els) return;
+    if (picker.newName == null) return fill(els.newRow);
+    const input = h('input', { class: 'input mono', placeholder: 'name of the new folder', value: picker.newName, autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Name of the new folder' });
+    const make = async () => {
+      const n = input.value.trim();
+      const dir = picker.dir;
+      if (picker.making || !dir || !n || n.startsWith('/')) return input.focus();
+      const host = picker.host;
+      picker.making = true;
+      try {
+        const made = await api('POST', pickerAPI('fs'), { path: joinPath(dir.path, n) });
+        if (host === picker.host && picker.els) {
+          picker.newName = null;
+          picker.els.trust.checked = true;
+          browse(made.path);
+        }
+      } catch (e) {
+        picker.error = e.status === 405 ? `${hostName(host)} runs an older fleet: update it to make folders from here` : e.message;
+        paintPicker();
+      }
+      picker.making = false;
+    };
+    input.addEventListener('input', () => {
+      picker.newName = input.value;
+    });
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        make();
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        picker.newName = null;
+        paintNewRow();
+      }
+    });
+    fill(els.newRow, h('div', 'pop-row', h('label', 'search grow', icon('folder-plus', 'i-sm'), input),
+      h('button', { type: 'button', class: 'btn sm primary', onclick: make }, 'Create'),
+      iconBtn('x', 'Cancel the new folder', () => { picker.newName = null; paintNewRow(); })));
+    setTimeout(() => input.focus());
+  }
+
+  async function saveRoot() {
+    const els = picker.els;
+    const dir = picker.dir;
+    const editing = picker.editing;
+    const existing = dir && rootAt(dir.path);
+    if (!els || !dir || picker.loading || picker.busy || (existing && (!editing || existing.name !== editing.name))) return;
+    const name = els.name.value.trim();
+    if (/[/\\]/.test(name)) {
+      picker.error = 'A root’s name cannot contain / or \\';
+      paintPicker();
+      return;
+    }
+    const adapters = [...els.agents.querySelectorAll('input:checked')].map((i) => i.value);
+    const host = picker.host;
+    picker.busy = true;
+    picker.error = '';
+    paintPicker();
+    try {
+      const r = await api(editing ? 'PUT' : 'POST', pickerAPI('roots' + (editing ? '/' + encodeURIComponent(editing.name) : '')), { path: dir.path, name, adapters, trust: els.trust.checked });
+      toast(`${editing ? 'Saved' : 'Added'} ${r.root.name}${host ? ' on ' + hostName(host) : ''} → ${shortPath(r.root.path)}`);
+      picker.busy = false;
+      closeDialog();
+      if (host) loadPeerRoots(host);
+      return;
+    } catch (e) {
+      picker.error = e.message;
+    }
+    picker.busy = false;
+    paintPicker();
+  }
+
+  // ------------------------------------------------------------------ polls
+  //
+  // With the admin token: the agents of every other fleet that holds this
+  // fleet's key (every 4 s), the workflow runs going on everywhere (3 s),
+  // and how each machine and its agent CLIs' plans are doing (a minute), all
+  // while the page is visible.
+
+  const REMOTE_POLL_MS = 4000;
+  const REMOTE_RETRY_ROUNDS = 5; // not joined or unreachable: ask every 5th round
+  const REMOTE_MAX_FAILS = 3; // rounds a failing fleet keeps its agents listed
+  let remoteTimer = 0;
+  let remoteBusy = false;
+  let remoteRound = 0;
+
+  function scheduleRemote(delay) {
+    clearTimeout(remoteTimer);
+    if (admin) remoteTimer = setTimeout(pollRemote, delay);
+  }
+
+  async function pollRemote() {
+    if (!admin || remoteBusy) return;
+    if (document.hidden) {
+      scheduleRemote(REMOTE_POLL_MS);
+      return;
+    }
+    remoteBusy = true;
+    const round = remoteRound++;
+    const hosts = pickerHosts().filter((x) => x.id);
+    let changed = false;
+    for (const id of [...S.remote.keys()]) {
+      if (!hosts.some((x) => x.id === id)) changed = S.remote.delete(id) || changed;
+    }
+    await Promise.all(hosts.map(async ({ id }) => {
+      const st = hostStates.get(id);
+      if ((st === 'not_joined' || st === 'unreachable') && round % REMOTE_RETRY_ROUNDS) return;
+      try {
+        const r = await api('GET', `/api/hosts/${encodeURIComponent(id)}/agents`);
+        setHostState(id, 'joined');
+        changed = applyRemote(id, (r && r.agents) || []) || changed;
+      } catch (e) {
+        if (e.notJoined) setHostState(id, 'not_joined');
+        else if (e.status === 502 || e.status === 404) setHostState(id, 'unreachable');
+        const r = S.remote.get(id);
+        if (r && ++r.fails >= REMOTE_MAX_FAILS) changed = S.remote.delete(id) || changed;
+      }
+    }));
+    remoteBusy = false;
+    if (changed) invalidate('agents');
+    scheduleRemote(REMOTE_POLL_MS);
+  }
+
+  // applyRemote stores the agent list of fleet host and reports whether it
+  // changed.
+  function applyRemote(host, list) {
+    const prev = S.remote.get(host);
+    const next = new Map(list.map((a) => [a.id, a]));
+    S.remote.set(host, { agents: next, fails: 0 });
+    let changed = !prev || prev.agents.size !== next.size;
+    for (const a of next.values()) {
+      const old = prev && prev.agents.get(a.id);
+      if (!old || !same(old, a)) {
+        changed = true;
+        chatAgent(host, a);
+      }
+    }
+    return changed;
+  }
+
+  const WF_POLL_MS = 3000;
+  let wfTimer = 0;
+  let wfBusy = false;
+
+  function scheduleWorkflows(delay) {
+    clearTimeout(wfTimer);
+    if (admin) wfTimer = setTimeout(pollWorkflows, delay);
+  }
+
+  // pollWorkflows asks this fleet and every joined one for the runs going
+  // on. The list keeps what it needs to draw them.
+  async function pollWorkflows() {
+    if (!admin || wfBusy) return;
+    if (document.hidden) {
+      scheduleWorkflows(WF_POLL_MS);
+      return;
+    }
+    wfBusy = true;
+    const next = new Map();
+    const keep = (host) => {
+      for (const [k, v] of S.workflows) if (host ? k.startsWith(host + '/') : !k.includes('/')) next.set(k, v);
+    };
+    const hosts = ['', ...pickerHosts().filter((x) => x.id && hostStates.get(x.id) === 'joined').map((x) => x.id)];
+    await Promise.all(hosts.map(async (host) => {
+      let r;
+      try {
+        r = await api('GET', host ? `/api/hosts/${encodeURIComponent(host)}/workflows` : '/api/workflows');
+      } catch (e) {
+        if (e.status !== 404) keep(host); // 404: a fleet without workflows
+        return;
+      }
+      for (const { agent, run } of (r && r.workflows) || []) {
+        const k = agentKey(host, agent);
+        if (!next.has(k)) next.set(k, []);
+        next.get(k).push({
+          id: run.id, name: run.name, status: run.status, phase: run.phase,
+          phases: run.phases.map((p) => p.title), counts: run.counts,
+          bars: run.agents.map((a) => a.status), startedMs: run.startedMs, endedMs: run.endedMs,
+        });
+      }
+    }));
+    wfBusy = false;
+    if (!admin) return;
+    if (!same([...S.workflows], [...next])) {
+      S.workflows = next;
+      invalidate('agents');
+    }
+    scheduleWorkflows(WF_POLL_MS);
+  }
+
+  const USAGE_POLL_MS = 60000;
+  let usageTimer = 0;
+  let usageBusy = false;
+  let usageAt = 0;
+
+  function scheduleUsage(delay) {
+    clearTimeout(usageTimer);
+    if (admin) usageTimer = setTimeout(pollUsage, delay);
+  }
+
+  async function pollUsage() {
+    if (!admin || usageBusy || document.hidden) return;
+    usageBusy = true;
+    usageAt = Date.now();
+    const self = S.server && S.server.id;
+    const ids = S.peers.filter((p) => p.id).map((p) => p.id);
+    if (self && !ids.includes(self)) ids.push(self);
+    for (const m of [S.usage, S.host]) for (const id of [...m.keys()]) if (!ids.includes(id)) m.delete(id);
+    await Promise.all(ids.map((id) => {
+      const base = id === self ? '/api/' : `/api/hosts/${encodeURIComponent(id)}/`;
+      // Not joined: nothing to show. Unreachable: keep the last answer.
+      return Promise.all([
+        api('GET', base + 'usage').then((r) => S.usage.set(id, (r && r.agents) || []), (e) => {
+          if (e.notJoined || !S.usage.has(id)) S.usage.set(id, null);
+        }),
+        api('GET', base + 'host').then((r) => S.host.set(id, (r && r.host) || null), (e) => {
+          if (e.notJoined || e.status === 404 || !S.host.has(id)) S.host.set(id, null);
+        }),
+      ]);
+    }));
+    usageBusy = false;
+    if (U.view === 'devices') renderDevices();
+    scheduleUsage(USAGE_POLL_MS);
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    scheduleRemote(0);
+    scheduleWorkflows(0);
+    if (Date.now() - usageAt >= USAGE_POLL_MS) scheduleUsage(0);
+  });
+
+  // ----------------------------------------------------------- renders
+  //
+  // Changes are drawn once per animation frame, by what they touch.
+
+  const dirty = new Set();
+  let rafPending = false;
+  const RENDER = {
+    agents: () => {
+      meet();
+      renderSideList();
+      if (U.view === 'devices') renderDevices();
+      else if (U.view === 'new' || (U.view === 'home' && !small())) renderLaunch();
+    },
+    peers: () => {
+      renderSideFoot();
+      if (U.view === 'devices') renderDevices();
+      else if (U.view === 'new' || (U.view === 'home' && !small())) renderLaunch();
+    },
+    roots: () => {
+      if (U.view === 'devices') renderDevices();
+      if (!launch.host && launch.loaded === '') launchRootsChanged();
+    },
+    devices: () => {
+      if (U.view === 'devices') renderDevices();
+    },
+    server: () => {
+      repaintSettings();
+      renderSideFoot();
+    },
+  };
+
+  function invalidate(...parts) {
+    updateTitle();
+    for (const p of parts) dirty.add(p);
+    if (rafPending) return;
+    rafPending = true;
+    requestAnimationFrame(() => {
+      rafPending = false;
+      const now = [...dirty];
+      dirty.clear();
+      for (const p of now) RENDER[p]();
+    });
+  }
+
+  // ------------------------------------------------------------ messages
+
+  const peerKey = (p) => p.id || p.name + '@' + p.host;
+
+  function resetState() {
+    S.server = null;
+    S.devices = [];
+    S.peers = [];
+    S.roots = [];
+    S.agents.clear();
+    S.snapshotDone = false;
+    S.peersSeen = false;
+  }
+
+  function handle(msg) {
+    switch (msg.type) {
+      case 'hello':
+        resetState();
+        S.server = msg.server || null;
+        invalidate('server', 'agents', 'peers', 'devices', 'roots');
+        // The daemon may have restarted, or the token been rotated.
+        checkSession(linkToken);
+        linkToken = false;
+        break;
+      case 'devices':
+        S.devices = msg.devices || [];
+        invalidate('devices');
+        break;
+      case 'peers': {
+        const next = msg.peers || [];
+        // Lists before the server's first network browse (complete=false)
+        // hold only this daemon: only a complete one tells new fleets.
+        if (S.peersSeen) {
+          const old = new Set(S.peers.map(peerKey));
+          for (const p of next) if (!p.self && !old.has(peerKey(p))) toast(`A new machine on the network: ${p.name || p.host}`);
+        }
+        if (msg.complete) S.peersSeen = true;
+        S.peers = next;
+        invalidate('peers');
+        if (admin) {
+          checkHosts();
+          if (next.some((p) => p.id && !S.usage.has(p.id))) scheduleUsage(0);
+        }
+        break;
+      }
+      case 'roots':
+        S.roots = msg.roots || [];
+        invalidate('roots');
+        break;
+      case 'agent': {
+        const a = msg.agent;
+        if (!a || !a.id) break;
+        S.agents.set(a.id, a);
+        invalidate('agents');
+        chatAgent('', a);
+        break;
+      }
+      case 'agentRemoved':
+        S.agents.delete(msg.id);
+        invalidate('agents');
+        break;
+      case 'snapshotDone':
+        S.snapshotDone = true;
+        invalidate('agents');
+        tryOpenPending();
+        if (U.view === 'chat' && admin) renderMain();
+        break;
+      default:
+        // unknown message types are ignored for forward compatibility
+    }
+  }
+
+  // ---------------------------------------------------------------- socket
 
   let backoff = 500;
   const BACKOFF_MAX = 10000;
+
+  function setConn(state) {
+    S.online = state === 'live';
+    const el = $('conn');
+    el.hidden = S.online;
+    fill(el, h('span', 'spin'), state === 'reconnecting' ? 'Connection lost · reconnecting…' : 'Connecting…');
+    applyShell();
+  }
 
   function connect() {
     const url = (location.protocol === 'https:' ? 'wss' : 'ws') + '://' + location.host + '/ws';
     let ws;
     try {
       ws = new WebSocket(url);
-    } catch (e) {
+    } catch {
       scheduleReconnect();
       return;
     }
@@ -7489,7 +6798,7 @@
       let msg;
       try {
         msg = JSON.parse(ev.data);
-      } catch (e) {
+      } catch {
         return;
       }
       if (msg && typeof msg.type === 'string') handle(msg);
@@ -7505,139 +6814,435 @@
 
   function scheduleReconnect() {
     setConn('reconnecting');
-    setMainDim(true);
     const wait = backoff;
     backoff = Math.min(BACKOFF_MAX, backoff * 2);
     setTimeout(connect, wait);
   }
 
-  function wireRoots() {
-    const filter = $('roots-filter');
-    filter.addEventListener('input', () => invalidate('roots'));
-    filter.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Escape' && filter.value) {
-        filter.value = '';
-        invalidate('roots');
+  // ------------------------------------------------------------------ admin
+  //
+  // Changing the fleet needs the admin token that `fleet web` prints as a
+  // link (http://host:7421/#token=...), or that the unlock dialog gets for
+  // the fleet key. It is kept in localStorage, which is per origin (port
+  // included, unlike cookies), and sent as a Bearer header. The fragment
+  // never reaches the server and is removed from the address bar right away.
+
+  const TOKEN_KEY = 'fleet.adminToken';
+  let memToken = ''; // fallback when storage is unavailable
+  let admin = false;
+  let linkToken = false; // a token just came from a link; the next hello checks it
+
+  function getToken() {
+    try {
+      return localStorage.getItem(TOKEN_KEY) || memToken;
+    } catch {
+      return memToken;
+    }
+  }
+
+  function setToken(t) {
+    memToken = t;
+    try {
+      if (t) localStorage.setItem(TOKEN_KEY, t);
+      else localStorage.removeItem(TOKEN_KEY);
+    } catch {
+      // storage disabled: memToken lasts until the tab closes
+    }
+  }
+
+  // takeLinkToken stores a token from the URL fragment and strips it.
+  function takeLinkToken() {
+    const m = /(?:^#|&)token=([0-9A-Za-z]+)/.exec(location.hash);
+    if (!m) return false;
+    setToken(m[1]);
+    history.replaceState(null, '', location.pathname + location.search);
+    return true;
+  }
+
+  class APIError extends Error {
+    constructor(status, message, notJoined) {
+      super(message);
+      this.status = status;
+      this.notJoined = !!notJoined; // another machine without this fleet's key
+    }
+  }
+
+  // api calls the admin API and returns the decoded JSON reply (null for
+  // 204). Failures throw an APIError carrying the server's message.
+  async function api(method, path, body) {
+    const headers = {};
+    const token = getToken();
+    if (token) headers.Authorization = 'Bearer ' + token;
+    const init = { method, headers, cache: 'no-store', credentials: 'omit' };
+    if (body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(body);
+    }
+    let res;
+    try {
+      res = await fetch(path, init);
+    } catch {
+      throw new APIError(0, 'cannot reach the daemon');
+    }
+    let data = null;
+    if (res.status !== 204) {
+      try {
+        data = await res.json();
+      } catch {
+        // not JSON
       }
-    });
-    $('roots-more').addEventListener('click', () => {
-      rootsAll = !rootsAll;
-      invalidate('roots');
+    }
+    if (res.status === 401) lostAdmin();
+    if (!res.ok) throw new APIError(res.status, (data && data.error) || `request failed (${res.status})`, data && data.notJoined);
+    return data;
+  }
+
+  function setAdmin(on) {
+    if (admin === on) return;
+    admin = on;
+    if (!on) {
+      leaveChat();
+      closeMenu(false);
+      S.remote.clear();
+      S.workflows.clear();
+      S.usage.clear();
+      S.host.clear();
+      S.peerRoots.clear();
+    } else if (dialogShows('unlock')) closeDialog();
+    syncPush();
+    tryOpenPending();
+    scheduleRemote(0);
+    scheduleWorkflows(0);
+    scheduleUsage(0);
+    if (on) checkHosts();
+    renderSideList();
+    renderMain();
+    repaintSettings();
+  }
+
+  // lostAdmin handles a rejected token (rotated, or from another server).
+  function lostAdmin() {
+    const had = admin;
+    setToken('');
+    setAdmin(false);
+    if (had) toast('Admin access ended: unlock again with the fleet key, or run `fleet web` on the server', 'warn');
+  }
+
+  // checkSession asks whether our token is (still) valid. fromLink is set
+  // when it just came from a `fleet web` link.
+  async function checkSession(fromLink) {
+    if (!getToken()) {
+      setAdmin(false);
+      return;
+    }
+    let s;
+    try {
+      s = await api('GET', '/api/session');
+    } catch {
+      return; // daemon unreachable: keep the token, the next hello retries
+    }
+    if (s && s.admin) {
+      setAdmin(true);
+      if (fromLink) toast('This browser can now manage the fleet');
+      return;
+    }
+    setToken('');
+    setAdmin(false);
+    toast(fromLink
+      ? 'This admin link is no longer valid: run `fleet web` again'
+      : 'The saved admin token is no longer valid: unlock again with the fleet key', 'warn');
+  }
+
+  function signOut() {
+    // The api call takes the token before it goes.
+    if (push.on) stopPush();
+    setToken('');
+    setAdmin(false);
+    toast('Signed out: this browser can only look now');
+  }
+
+  // ------------------------------------------------------------------- push
+  //
+  // Notifications when an agent needs input, finishes or fails (push.go).
+  // Browsers offer push to secure contexts only, and iOS only to the web app
+  // added to the Home Screen, so Settings says what is missing instead of
+  // failing. Subscribing needs the admin token; the service worker (sw.js)
+  // shows the notifications.
+
+  const PUSH_OK = window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  const push = { key: '', on: false, busy: false, reg: null, endpoint: '' };
+  let openPending = ''; // an agent to show once it is known: a tapped notification
+
+  function pushHint() {
+    if (!window.isSecureContext) return `Notifications need HTTPS: open this page over https (e.g. tailscale serve), not http://${location.host}.`;
+    if (IOS && !navigator.standalone) return 'On iPhone, add this page to the Home Screen (Share › Add to Home Screen) and open it from there.';
+    return 'This browser does not support push notifications.';
+  }
+
+  // b64url decodes base64url into bytes.
+  function b64url(str) {
+    const bin = atob(str.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((str.length + 3) % 4));
+    return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+  }
+
+  // sameKey reports whether sub was made for the daemon's VAPID key.
+  function sameKey(sub, key) {
+    const k = sub.options && sub.options.applicationServerKey;
+    if (!k) return true; // not exposed: assume it is ours
+    const a = new Uint8Array(k);
+    const b = b64url(key);
+    return a.length === b.length && a.every((x, i) => x === b[i]);
+  }
+
+  // syncPush registers the service worker and checks this browser's
+  // subscription with the daemon: one the daemon lost is sent again, one
+  // made for another key is dropped.
+  async function syncPush() {
+    if (!PUSH_OK || !admin) return repaintSettings();
+    try {
+      await navigator.serviceWorker.register('/sw.js');
+      push.reg = await navigator.serviceWorker.ready;
+      const sub = await push.reg.pushManager.getSubscription();
+      const r = await api('GET', '/api/push' + (sub ? '?endpoint=' + encodeURIComponent(sub.endpoint) : ''));
+      push.key = r.key;
+      push.on = false;
+      if (sub && sameKey(sub, r.key) && Notification.permission === 'granted') {
+        if (!r.subscribed) await api('POST', '/api/push/subscribe', sub.toJSON());
+        Object.assign(push, { on: true, endpoint: sub.endpoint });
+      } else if (sub) {
+        await sub.unsubscribe();
+      }
+    } catch {
+      // e.g. 404: notifications are off on this daemon
+    }
+    repaintSettings();
+  }
+
+  async function toggleNotify() {
+    if (!PUSH_OK) return toast(pushHint(), 'warn');
+    if (push.busy) return;
+    push.busy = true;
+    repaintSettings();
+    try {
+      if (push.on) {
+        await stopPush();
+        toast('Notifications off on this device');
+      } else {
+        if (!push.reg || !push.key) throw new Error('not ready yet, try again in a moment');
+        // Straight from the click: Safari asks for permission only from a
+        // user gesture.
+        const sub = await push.reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64url(push.key) });
+        await api('POST', '/api/push/subscribe', sub.toJSON());
+        Object.assign(push, { on: true, endpoint: sub.endpoint });
+        try {
+          await api('POST', '/api/push/test', { endpoint: sub.endpoint });
+        } catch (e) {
+          // The push service refused this subscription: the daemon dropped it.
+          if (e.status === 410) await stopPush();
+          throw e;
+        }
+        toast('Notifications on: a test notification is on its way');
+      }
+    } catch (e) {
+      if (window.Notification && Notification.permission === 'denied') toast('Notifications are blocked for this site in the browser or system settings', 'warn');
+      else toast(`Notifications: ${e.message}`, 'error');
+    }
+    push.busy = false;
+    repaintSettings();
+  }
+
+  async function testPush() {
+    if (!push.on) return;
+    try {
+      await api('POST', '/api/push/test', { endpoint: push.endpoint });
+      toast('A test notification is on its way');
+    } catch (e) {
+      if (e.status === 410) await stopPush();
+      toast(`Notifications: ${e.message}`, 'error');
+      repaintSettings();
+    }
+  }
+
+  // stopPush ends this browser's subscription here and at the push service.
+  async function stopPush() {
+    const endpoint = push.endpoint;
+    push.on = false;
+    push.endpoint = '';
+    if (endpoint) await api('POST', '/api/push/unsubscribe', { endpoint }).catch(() => {});
+    const sub = push.reg && (await push.reg.pushManager.getSubscription());
+    if (sub) await sub.unsubscribe();
+  }
+
+  // openFromPush shows the agent of a tapped notification once the agent
+  // list and admin rights are in.
+  function openFromPush(id) {
+    openPending = id || '';
+    tryOpenPending();
+  }
+
+  function tryOpenPending() {
+    if (!openPending || !admin || !S.snapshotDone) return;
+    const a = S.agents.get(openPending);
+    openPending = '';
+    if (a) openChat('', a.id, a);
+  }
+
+  function wirePush() {
+    const id = new URLSearchParams(location.search).get('agent');
+    if (id) {
+      history.replaceState(null, '', location.pathname + location.hash);
+      openFromPush(id);
+    }
+    if (!PUSH_OK) return;
+    navigator.serviceWorker.addEventListener('message', (ev) => {
+      if (ev.data && ev.data.type === 'openAgent') openFromPush(ev.data.agent);
     });
   }
 
-  // Ctrl+1–9 opens the numbered live sessions, including from the chat's
-  // message box. N starts a session outside text fields and dialogs.
+  // ------------------------------------------------------------------- keys
+  //
+  // N starts a session and / searches, outside text fields. Ctrl+1–9 opens
+  // the live sessions in the list's order, also from the message box. In a
+  // session Alt+A asks to archive it, Ctrl+C (with nothing selected)
+  // interrupts the agent's turn as in its terminal. Esc goes back in the
+  // panel or closes it, closes the drawer, and on phones goes back.
+
   function wireKeys() {
     document.addEventListener('keydown', (ev) => {
-      if (ev.defaultPrevented || ev.isComposing || ev.repeat || !admin) return;
-      if (ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey && /^[1-9]$/.test(ev.key)) {
-        if (document.querySelector('dialog[open]:not(#chat)')) return;
-        const row = $('agents-live').querySelector(`[data-shortcut="${ev.key}"]`);
-        if (!row) return;
-        const host = row.dataset.host;
-        const a = host ? S.remote.get(host)?.agents.get(row.dataset.id) : S.agents.get(row.dataset.id);
-        if (!a) return;
-        ev.preventDefault();
-        if (!chat.open || chat.host !== host || chat.id !== a.id) openChat(host, a.id, a);
+      if (ev.defaultPrevented || ev.isComposing) return;
+      if (document.querySelector('dialog[open]') || MENU) return;
+      const t = ev.target;
+      const typing = t.closest && t.closest('input, textarea, select, [contenteditable]');
+      if (ev.key === 'Escape') {
+        if (insp.open && U.view === 'chat') {
+          ev.preventDefault();
+          // Out of a workflow agent's conversation or a file first.
+          if (insp.tab === 'workflow' && wf.sub) return closeSub();
+          if (insp.tab === 'files' && files.open) return closeFile();
+          return closeInsp();
+        }
+        if (U.drawer) {
+          ev.preventDefault();
+          return toggleSide(false);
+        }
+        if (typing && t.id === 'side-q') return t.blur();
+        if (small() && U.view !== 'home' && !typing) go('#/');
         return;
       }
-      if (ev.key !== 'n' && ev.key !== 'N') return;
-      if (ev.ctrlKey || ev.metaKey || ev.altKey) return;
-      const t = ev.target;
-      if (t.closest('input, textarea, select, [contenteditable]') || document.querySelector('dialog[open]')) return;
-      ev.preventDefault();
-      openLaunch();
+      if (!admin) return;
+      if (ev.ctrlKey && !ev.metaKey && !ev.altKey && !ev.shiftKey && /^[1-9]$/.test(ev.key)) {
+        const row = document.querySelectorAll('#side-list .grp:not(.archived) .row')[Number(ev.key) - 1];
+        if (!row) return;
+        ev.preventDefault();
+        if (U.key !== row.dataset.key || U.view !== 'chat') go('#/s/' + encodeURIComponent(row.dataset.key));
+        return;
+      }
+      if (U.view === 'chat' && ev.altKey && !ev.ctrlKey && !ev.metaKey && !ev.shiftKey && ev.code === 'KeyA') {
+        ev.preventDefault();
+        if (chat.agent) confirmEnd(chat.host, chat.agent);
+        return;
+      }
+      if (U.view === 'chat' && ev.ctrlKey && !ev.altKey && !ev.metaKey && !ev.shiftKey && ev.key.toLowerCase() === 'c' && chatBusy()) {
+        if ((t.selectionStart ?? 0) !== (t.selectionEnd ?? 0) || String(getSelection())) return;
+        ev.preventDefault();
+        interruptChat();
+        return;
+      }
+      if (typing || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+      if (ev.key === 'n' || ev.key === 'N') {
+        ev.preventDefault();
+        go('#/new');
+      } else if (ev.key === '/') {
+        ev.preventDefault();
+        if (small() && U.view !== 'home') go('#/');
+        else if (narrow()) toggleSide(true);
+        setTimeout(() => $('side-q').focus(), small() ? 300 : 0);
+      }
     });
   }
 
-  // Swiping the session to the right on a touch screen does what Esc
-  // does: steps back from a workflow agent or a file, or closes it. The swipe starts
+  // --------------------------------------------------------------- gestures
+  //
+  // Phones: a session or a view swiped to the right goes back to the list,
+  // the panel swiped to the right goes back to the chat. The swipe starts
   // anywhere but in a text field or a box scrolled sideways, which the
   // finger scrolls back instead.
-  function wireChatSwipe() {
-    const dlg = $('chat');
-    let g = null; // {el, x0, y0, dx, on, t, v}
-    const scrolledLeft = (el) => {
-      for (; el && el !== dlg; el = el.parentElement) if (el.scrollLeft > 0) return true;
-      return false;
-    };
-    dlg.addEventListener('touchstart', (ev) => {
-      g = null;
-      if (ev.touches.length !== 1 || !touch()) return;
-      const t = ev.touches[0];
-      if (ev.target.closest('input, textarea, select, [contenteditable]') || scrolledLeft(ev.target)) return;
-      const el = chat.view === 'sub' ? $('sub-view') : chat.view === 'files' && files.open ? $('file-view') : dlg;
-      g = { el, x0: t.clientX, y0: t.clientY, dx: 0, on: false, t: ev.timeStamp, v: 0 };
-    }, { passive: true });
-    dlg.addEventListener('touchmove', (ev) => {
-      if (!g) return;
-      const t = ev.touches[0];
-      const dx = t.clientX - g.x0, dy = t.clientY - g.y0;
-      if (!g.on) {
-        // Up, down or left: not this gesture. The page may scroll already.
-        if (Math.abs(dy) > 10 || dx < -10 || !ev.cancelable) return (g = null);
-        if (dx < 12 || dx < 2 * Math.abs(dy)) return;
-        g.on = true;
-        g.el.style.transition = 'none';
-      }
-      ev.preventDefault();
-      const x = Math.max(0, dx);
-      g.v = (x - g.dx) / Math.max(1, ev.timeStamp - g.t); // px/ms
-      g.t = ev.timeStamp;
-      g.dx = x;
-      g.el.style.translate = `${x}px 0`;
-    }, { passive: false });
-    const end = (ev) => {
-      const s = g;
-      g = null;
-      if (!s || !s.on) return;
-      const w = s.el.getBoundingClientRect().width;
-      const go = ev.type === 'touchend' && (s.dx > w / 3 || (s.dx > 40 && s.v > 0.5));
-      const done = () => {
-        s.el.style.transition = '';
-        s.el.style.translate = '';
-        if (!go) return;
-        if (s.el === dlg) closeChat();
-        else if (s.el === $('file-view')) closeFile();
-        else setView('wf');
+
+  function wireGestures() {
+    for (const el of [$('main'), $('insp')]) {
+      let g = null; // {x0, y0, dx, on, t, v}
+      const scrolledLeft = (n) => {
+        for (; n && n !== el; n = n.parentElement) if (n.scrollLeft > 0) return true;
+        return false;
       };
-      if (matchMedia('(prefers-reduced-motion: reduce)').matches) return done();
-      s.el.style.transition = 'translate 180ms ease-out';
-      s.el.style.translate = go ? `${w}px 0` : '';
-      setTimeout(done, 190);
-    };
-    dlg.addEventListener('touchend', end);
-    dlg.addEventListener('touchcancel', end);
+      el.addEventListener('touchstart', (ev) => {
+        g = null;
+        if (!small() || ev.touches.length !== 1) return;
+        if (el === $('main') && U.view === 'home') return;
+        if (ev.target.closest('input, textarea, select, [contenteditable], .keys, .ctoolbar') || scrolledLeft(ev.target)) return;
+        const t = ev.touches[0];
+        g = { x0: t.clientX, y0: t.clientY, dx: 0, on: false, t: ev.timeStamp, v: 0 };
+      }, { passive: true });
+      el.addEventListener('touchmove', (ev) => {
+        if (!g) return;
+        const t = ev.touches[0];
+        const dx = t.clientX - g.x0;
+        const dy = t.clientY - g.y0;
+        if (!g.on) {
+          // Up, down or left: not this gesture. The page may scroll already.
+          if (Math.abs(dy) > 10 || dx < -10 || !ev.cancelable) return (g = null);
+          if (dx < 12 || dx < 2 * Math.abs(dy)) return;
+          g.on = true;
+          el.style.transition = 'none';
+        }
+        ev.preventDefault();
+        const x = Math.max(0, dx);
+        g.v = (x - g.dx) / Math.max(1, ev.timeStamp - g.t); // px/ms
+        g.t = ev.timeStamp;
+        g.dx = x;
+        el.style.transform = `translateX(${x}px)`;
+      }, { passive: false });
+      const end = (ev) => {
+        const s = g;
+        g = null;
+        if (!s || !s.on) return;
+        const w = el.getBoundingClientRect().width;
+        const back = ev.type === 'touchend' && (s.dx > w / 3 || (s.dx > 40 && s.v > 0.5));
+        el.style.transition = '';
+        el.style.transform = '';
+        if (!back) return;
+        if (el === $('insp')) closeInsp();
+        else go('#/');
+      };
+      el.addEventListener('touchend', end);
+      el.addEventListener('touchcancel', end);
+    }
   }
 
-  // Touch feedback. Safari has no navigator.vibrate, but it ticks the
-  // Taptic Engine when the user toggles a switch checkbox (<input switch>),
-  // also through its label. Since iOS 26.5 a label.click() from script no
-  // longer does, only a real tap: so on iOS each control gets a clear label
-  // over it with a hidden switch inside (see input.css), the way
+  // --------------------------------------------------------------- haptics
+  //
+  // Touch feedback. Safari has no navigator.vibrate, but it ticks the Taptic
+  // Engine when the user toggles a switch checkbox (<input switch>), also
+  // through its label. Since iOS 26.5 a label.click() from script no longer
+  // does, only a real tap: so on iOS each control gets a clear label over it
+  // with a hidden switch inside (see app.css), the way
   // github.com/tijnjh/ios-haptics does. The tap lands on the label and
   // bubbles to the control's handlers as before, but the label's default
-  // action (toggling the switch) displaces the control's own: links,
-  // summaries and submit buttons get theirs back below. Elsewhere
-  // navigator.vibrate stands in.
-  const TAPPABLE = 'button, a[href], summary, select, input[type="checkbox"], input[type="radio"], .cursor-pointer';
+  // action (toggling the switch) displaces the control's own: links and
+  // submit buttons get theirs back below. Elsewhere navigator.vibrate
+  // stands in.
+
+  const TAPPABLE = 'button, a[href], summary, select, input[type="checkbox"], input[type="radio"]';
   const TYPING = 'textarea, input:not([type="checkbox"]):not([type="radio"])';
-  const HAPTIC_HOST = 'button, a[href], summary, .cursor-pointer:not(label, input, select)';
-  const IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const HAPTIC_HOST = 'button, a[href], summary';
 
   function addHaptic(el) {
     for (const c of el.children) if (c.hasAttribute('data-haptic')) return;
-    const sw = h('input');
-    sw.type = 'checkbox';
-    sw.setAttribute('switch', '');
-    sw.tabIndex = -1;
+    const sw = h('input', { type: 'checkbox', switch: true, tabindex: '-1' });
     // The label passes its click on to the switch: keep that copy from
     // reaching the control's handlers a second time.
     sw.addEventListener('click', (ev) => ev.stopPropagation());
-    const lab = h('label', '', sw);
-    lab.setAttribute('data-haptic', '');
-    lab.setAttribute('aria-hidden', 'true');
+    const lab = h('label', { 'data-haptic': true, 'aria-hidden': 'true' }, sw);
     el.setAttribute('data-haptic-host', '');
     // First, so that controls nested in el paint over its label.
     el.prepend(lab);
@@ -7652,25 +7257,25 @@
     // New controls, and controls whose content (label too) was replaced.
     new MutationObserver((recs) => {
       for (const r of recs) {
-        if (r.target.matches(HAPTIC_HOST)) addHaptic(r.target);
+        if (r.target.matches && r.target.matches(HAPTIC_HOST)) addHaptic(r.target);
         for (const n of r.addedNodes) if (n.nodeType === Node.ELEMENT_NODE) scan(n);
       }
     }).observe(document.body, { childList: true, subtree: true });
-    // Whether the control's own default still runs differs between
-    // engines, so see after the click what it did and do the rest. A link
-    // cannot tell, so it loses its href for the click and is followed here.
+    // Whether the control's own default still runs differs between engines,
+    // so see after the click what it did and do the rest. A link cannot
+    // tell, so it loses its href for the click and is followed here.
     let submits = 0;
     document.addEventListener('submit', () => submits++, true);
-    let link = null;
+    let linkTo = null;
     window.addEventListener('click', (ev) => {
       const lab = ev.target;
-      link = null;
+      linkTo = null;
       if (!(lab instanceof HTMLLabelElement) || !lab.hasAttribute('data-haptic')) return;
       const el = lab.parentElement;
       if (el.matches('a[href]')) {
-        link = el.getAttribute('href');
+        linkTo = el.getAttribute('href');
         el.removeAttribute('href');
-        const href = link;
+        const href = linkTo;
         setTimeout(() => el.setAttribute('href', href));
         return;
       }
@@ -7686,11 +7291,11 @@
         }
       });
     }, true);
-    // On window, so after the page's handlers: a prevented default stays
-    // so. Still in the tap, so a new tab is no popup.
+    // On window, so after the page's handlers: a prevented default stays so.
+    // Still in the tap, so a new tab is no popup.
     window.addEventListener('click', (ev) => {
-      const href = link;
-      link = null;
+      const href = linkTo;
+      linkTo = null;
       if (href == null || ev.defaultPrevented) return;
       if (ev.target.parentElement.target === '_blank') window.open(href, '_blank', 'noopener,noreferrer');
       else location.assign(href);
@@ -7698,7 +7303,7 @@
   }
 
   function wireTouch() {
-    // Without a touch listener iOS Safari skips :active (see input.css).
+    // Without a touch listener iOS Safari skips :active.
     document.addEventListener('touchstart', () => {}, { passive: true });
     if (IOS) return wireHaptics();
     if (!navigator.vibrate) return;
@@ -7715,30 +7320,65 @@
     }, true);
   }
 
-  // ------------------------------------------------------------------- boot
+  // ------------------------------------------------------------------ boot
+
+  // tick keeps times fresh: elapsed ones every second, "4m ago" ones too
+  // (they change once a minute at most).
+  function tick() {
+    for (const el of document.querySelectorAll('[data-since]')) {
+      const t = dur(Date.now() - Number(el.dataset.since));
+      if (el.textContent !== t) el.textContent = t;
+    }
+    for (const el of document.querySelectorAll('time[data-ts]')) {
+      const ts = Number(el.dataset.ts);
+      const t = el.dataset.long ? ago(ts) : rel(ts);
+      if (el.textContent !== t) el.textContent = t;
+    }
+  }
 
   linkToken = takeLinkToken();
-  wireUnlock();
-  wirePush();
-  wirePicker();
-  wireLaunch();
-  wireChat();
-  wireNote();
-  wireRoots();
-  wireKeys();
-  wireTouch();
+  setTheme(theme());
+  buildSide();
+  wireMenus();
+  wireDialog();
+  wireViewer();
   wireSwipe();
-  wireChatSwipe();
-  // A `fleet web` link opened in a tab that already shows the dashboard.
-  window.addEventListener('hashchange', () => {
-    if (takeLinkToken()) checkSession(true);
+  wireLaunch();
+  wireKeys();
+  wirePush();
+  wireTouch();
+  wireGestures();
+  $('side-scrim').addEventListener('click', () => toggleSide(false));
+  addEventListener('hashchange', () => {
+    // A `fleet web` link opened in a tab that already shows the page.
+    if (takeLinkToken()) {
+      checkSession(true);
+      return;
+    }
+    route();
   });
   // Another tab signed in or out.
-  window.addEventListener('storage', (ev) => {
+  addEventListener('storage', (ev) => {
     if (ev.key === TOKEN_KEY || ev.key === null) checkSession(false);
   });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => setTheme(theme()));
+  // Crossing a layout's width: the views draw their bars anew.
+  let layout = `${small()}${narrow()}`;
+  addEventListener('resize', () => {
+    const now = `${small()}${narrow()}`;
+    if (now === layout) return;
+    layout = now;
+    U.drawer = false;
+    N.root = null;
+    applyShell();
+    renderSideList();
+    if (U.view === 'chat') {
+      renderChatHead();
+      renderInsp();
+    } else renderMain();
+  });
+  setInterval(tick, 1000);
   setConn('connecting');
-  renderAccess();
-  invalidate('agents', 'peers', 'devices', 'roots');
+  route();
   connect();
 })();

@@ -34,8 +34,8 @@ var glyph = []string{
 	".sss.....sss",
 }
 
-// palette maps glyph cells to the dashboard's colours (Tailwind zinc and
-// emerald, as in input.css).
+// palette maps glyph cells to the logo's colours (zinc letters and
+// shadow, emerald accent).
 var palette = []struct {
 	key byte
 	hex string
@@ -46,7 +46,8 @@ var palette = []struct {
 	{'L', "#34d399"}, // emerald-400, the accent
 }
 
-// bg is ink-950, also the page's theme colour.
+// bg is the icons' and launch screens' background, also the manifest's
+// theme colour.
 const bg = "#07090c"
 
 // The favicon is a tile of 16 units with the glyph centred and corners of
@@ -286,11 +287,11 @@ func splash(w, h int) *image.NRGBA {
 		for col, r := range []rune(line) {
 			x, y := x0+col*cw, y1+row*2*cw
 			if r == '█' {
-				fill(img, x, y, cw, 2*cw, "#d4d4d8") // zinc-300, as the header's letters
+				fill(img, x, y, cw, 2*cw, "#d4d4d8") // zinc-300, as the logo's letters
 				continue
 			}
 			// A box-drawing line from the cell's middle to the sides it
-			// connects, in the header's shadow colour.
+			// connects, in the logo's shadow colour.
 			up, down := strings.ContainsRune("║╚╝", r), strings.ContainsRune("║╔╗", r)
 			left, right := strings.ContainsRune("═╗╝", r), strings.ContainsRune("═╔╚", r)
 			t := max(1, cw/4)

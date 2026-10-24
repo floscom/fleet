@@ -157,6 +157,10 @@ func TestParseTranscript(t *testing.T) {
 		{"last prompt", `{"type":"last-prompt","lastPrompt":"x","sessionId":"s"}`, nil},
 		{"summary", `{"type":"summary","summary":"Fix tests","leafUuid":"u"}`, nil},
 
+		// the session's title
+		{"ai title", `{"type":"ai-title","aiTitle":"  UI overhaul for chat layout ","sessionId":"s"}`, Es{{Kind: transcript.Title, Text: "UI overhaul for chat layout"}}},
+		{"empty ai title", `{"type":"ai-title","aiTitle":" ","sessionId":"s"}`, nil},
+
 		// malformed
 		{"empty", ``, nil},
 		{"truncated", `{"type":"user","message":{"content":"hi`, nil},

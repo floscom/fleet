@@ -55,6 +55,10 @@ func TestResumeRoute(t *testing.T) {
 	if code := api(t, ts, "POST", "/api/agents/nope/resume", tok, `{"now":true}`, &e); code != 404 {
 		t.Fatalf("unknown agent: %d %+v", code, e)
 	}
+	// The dashboard resumes agents of other machines too.
+	if !forwardable("POST", "agents/a1/resume") {
+		t.Fatal("resume is not forwarded to other daemons")
+	}
 }
 
 func TestLimitNotice(t *testing.T) {

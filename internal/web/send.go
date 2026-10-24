@@ -1,11 +1,11 @@
 package web
 
 // Sending a file of a session straight to another fleet daemon, found the
-// same way as the "Fleet on the network" list (peers.go): the dashboard
-// asks this daemon to push one of a session's files (see files.go,
-// fileOf) to a peer's upload route, signed with the fleet key like any
-// other peer request. The file goes daemon to daemon; the browser only
-// names it and picks the destination.
+// same way as the machines on the dashboard's Devices view (peers.go):
+// the dashboard asks this daemon to push one of a session's files (see
+// files.go, fileOf) to a peer's upload route, signed with the fleet key
+// like any other peer request. The file goes daemon to daemon; the
+// browser only names it and picks the destination.
 //
 //	POST /api/agents/{id}/send   {"path": "...", "host": "<peer id>"}
 //	  -> {"host", "name", "path", "size"}: the peer's id and name, and

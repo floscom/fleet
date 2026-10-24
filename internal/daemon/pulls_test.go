@@ -20,6 +20,8 @@ import (
 //	tool ID COMMAND     a shell call whose output comes later
 //	result ID OUTPUT    its output
 //	shell COMMAND => OUTPUT   a shell call with its output
+//	user TEXT           a message (titles_test.go)
+//	title TEXT          the CLI's title for the session
 type pullAdapter struct{ testAdapter }
 
 func (pullAdapter) ID() string { return "pulls" }
@@ -37,6 +39,12 @@ func (pullAdapter) ParseTranscript(line []byte) []transcript.Entry {
 	if rest, ok := strings.CutPrefix(s, "shell "); ok {
 		cmd, out, _ := strings.Cut(rest, " => ")
 		return []transcript.Entry{{Kind: transcript.Tool, Name: "shell", Text: cmd, Output: out}}
+	}
+	if rest, ok := strings.CutPrefix(s, "user "); ok {
+		return []transcript.Entry{{Kind: transcript.User, Text: rest}}
+	}
+	if rest, ok := strings.CutPrefix(s, "title "); ok {
+		return []transcript.Entry{{Kind: transcript.Title, Text: rest}}
 	}
 	return testAdapter{}.ParseTranscript(line)
 }

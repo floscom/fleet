@@ -39,6 +39,9 @@ const (
 	// started it, Name how it ended (completed, failed, killed), Output
 	// what it returned, and Error marks one that failed.
 	Task = "task"
+	// Title is the title the agent CLI gave the conversation (Text); a
+	// later one replaces an earlier. Not a message: chats do not show it.
+	Title = "title"
 )
 
 // Interrupted is the Text of the Note a turn the user interrupted leaves.

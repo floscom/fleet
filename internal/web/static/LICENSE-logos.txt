@@ -1,6 +1,6 @@
 OpenAI and Claude icons from @lobehub/icons-static-svg 1.95.1.
 https://github.com/lobehub/lobe-icons
-Modified fills for the Fleet dark theme.
+Inlined as symbols in index.html, coloured by app.css.
 
 MIT License
 

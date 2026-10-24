@@ -331,10 +331,15 @@ The daemon reads `config.toml` at startup. Changes made through the CLI
 
 ## Web dashboard
 
-The daemon serves a live dashboard at <http://SERVER:7421/>: agents and
-their states, the fleet daemons it sees on the LAN, paired devices and
-roots. It updates over a WebSocket (`/ws`) as agents start, change state or
-exit.
+The daemon serves a live dashboard at <http://SERVER:7421/>, a chat app for
+its sessions. On a desktop the sessions sit in a sidebar, grouped by
+folder (or machine, or not at all), and the open one fills the rest; on a
+phone the list is the home screen and a session fills the screen.
+**Devices** holds the machines of the fleet: their health, agent CLIs,
+plan usage and folders (roots); elsewhere a dot per machine shows whether
+it is online. The page updates over a WebSocket (`/ws`) as agents start,
+change state or exit. Its theme follows the device's light or dark mode,
+or the one picked in Settings.
 
 **Viewing needs nothing; managing needs the admin link.** Run `fleet web`
 on the server:
@@ -347,51 +352,48 @@ Admin links for the fleet dashboard on studio (open one once per browser):
     http://localhost:7421/#token=3f9c...
 ```
 
-Open one in the browser you manage the fleet from. Or click **unlock** in
-the dashboard's header and type (or paste) the fleet key from
+Open one in the browser you manage the fleet from. Or click **Unlock** (on
+the page, or in Settings) and type (or paste) the fleet key from
 `fleet start --join KEY`, or the admin token from the link: the same key
 unlocks the dashboard of every machine in the fleet, no `fleet web` run
-there needed. That browser then shows **admin** in the header and can:
+there needed. That browser can then open sessions, and:
 
-- **Add folders as roots**: *Roots → Add folder* opens a folder picker
-  over the server's file system. Walk into folders (click, or type to
+- **Add folders as roots**: on Devices, a machine's *Add folder* opens a
+  folder picker over its file system. Walk into folders (click, or type to
   filter and press Enter; Backspace goes up), paste a path, show hidden
   folders; git repositories and existing roots are marked. *New folder*
   makes a folder in the one shown and opens it (ticking *Trust*, since a
   new, empty folder has nothing to run). Then pick a
   name, optionally limit it to some agents, optionally trust it (see
   [Folder trust](#folder-trust)) and add the current folder.
-- **Edit roots**: *Roots → edit* opens the folder picker with the current
-  name, path, agent restrictions and trust setting. Save changes directly;
-  running agents are not affected. An existing root in the picker also has
-  an *Edit root* button, including on other machines.
+- **Edit roots**: a folder's ✎ opens the picker with its name, path,
+  agent restrictions and trust setting. Save changes directly; running
+  agents are not affected. An existing root in the picker also has an
+  *Edit root* button.
 - **Remove roots** (running agents are not affected).
 - **Run sessions**: start Claude Code, Codex or a shell, follow the
-  conversation, answer the agent, type into it and stop it (see
+  conversation, answer the agent, type into it and archive it (see
   [Sessions in the browser](#sessions-in-the-browser)), on this machine or
   on other fleets.
-- **See agent CLIs and plan usage per machine**: under *Fleet on the
-  network*, this daemon and every fleet holding the fleet key list Claude
-  Code and Codex: installed or not, and how much of the logged-in account's
-  plan limits (5-hour session, week, ...) is used, with the reset time below
-  each meter in your local time (full date and time on hover). Each daemon
+- **See agent CLIs and plan usage per machine**: on Devices, this daemon
+  and every fleet holding the fleet key list Claude Code and Codex:
+  installed or not, and how much of the logged-in account's plan limits
+  (5-hour session, week, ...) is used, with the reset time next to each
+  meter in your local time (full date and time on hover). Each daemon
   asks the provider at most every 45 s with the token its CLI stored
   (`~/.claude/.credentials.json`, or the macOS Keychain for Claude;
   `~/.codex/auth.json`) and never refreshes it.
-- **See how each machine is doing**: above the agent CLIs, each fleet's
-  machine shows its OS, CPU, memory and uptime, then meters for its load
-  (the 1-minute average per CPU), memory, swap and disks (`/`, the home
-  folder, the roots, `~/.fleet`). A meter turns amber at 80% and red at
-  90% (load: at one and one and a half per CPU), and so does the dot
-  before them; hover a meter for the numbers (`GET /api/host`, also
-  `fleet host`).
-- **Add roots on other machines**: the folder picker starts with a
-  *Machine* row listing this daemon and every fleet on the LAN with a
-  dashboard. Pick one to browse its folders and add a root there (see
-  [Several machines](#several-machines-one-dashboard)).
-- **Jump to other fleets**: every daemon under *Fleet on the network*
-  links to its own dashboard. Each fleet has its own admin token: unlock
-  it there with the fleet key, or run `fleet web` there once as well.
+- **See how each machine is doing**: each machine on Devices shows its OS,
+  CPU, memory and uptime, then meters for its load (the 1-minute average
+  per CPU), memory, swap and disks (`/`, the home folder, the roots,
+  `~/.fleet`). A meter turns amber at 80% and red at 90% (load: at one and
+  one and a half per CPU); hover a meter for the numbers (`GET /api/host`,
+  also `fleet host`).
+- **Add roots on other machines**: every machine on Devices has its own
+  *Add folder* (see [Several machines](#several-machines-one-dashboard)).
+- **Jump to other fleets**: every other machine on Devices links to its
+  own dashboard. Each fleet has its own admin token: unlock it there with
+  the fleet key, or run `fleet web` there once as well.
 
 Changes apply at once, rewrite `config.toml` and show up in the CLI
 (`fleet roots`) and in every open dashboard.
@@ -402,8 +404,8 @@ Changes apply at once, rewrite `config.toml` and show up in the CLI
   an `Authorization: Bearer` header on admin requests; there is no cookie,
   so other sites cannot make your browser act for them.
   `fleet web --rotate` replaces it and every browser loses admin rights on
-  its next request (no restart needed). *sign out* forgets it in one
-  browser. *unlock* sends the key typed into it to `POST /api/unlock`,
+  its next request (no restart needed). *Sign out* in Settings forgets it
+  in one browser. *Unlock* sends the key typed into it to `POST /api/unlock`,
   which answers with the admin token (creating it if `fleet web` never
   ran) when the key is this machine's fleet key or admin token.
 - **Plain HTTP.** The token crosses the network in the clear on each admin
@@ -417,31 +419,35 @@ Changes apply at once, rewrite `config.toml` and show up in the CLI
   disables it. If the port is busy the daemon logs a warning and runs
   without it. The daemon advertises the dashboard's port in mDNS (TXT
   `web`) unless it listens on loopback only.
-- On desktop, clicking outside a dialog closes it. **Ctrl+1** through
-  **Ctrl+9** opens the first nine live agents in the displayed order,
-  respecting the folder filter. The shortcuts also switch sessions from
-  an open chat; each agent row shows its shortcut. In a chat, **Alt+A**
-  (⌥A on a Mac) asks to archive the session, or delete a finished one;
-  Enter confirms, Esc keeps it.
+- **Keys.** **N** starts a session and **/** searches the sessions.
+  **Ctrl+1** through **Ctrl+9** open the first nine live sessions in the
+  sidebar's order, also from the message box. In a session, **Alt+A** (⌥A
+  on a Mac) asks to archive it, or to delete a finished one (Enter
+  confirms, Esc keeps it), and **Ctrl+C** with no text selected
+  interrupts the agent's turn. **Esc** closes a menu, a dialog or the
+  panel, and on a phone goes back. Settings lists them all. On desktop,
+  clicking outside a dialog closes it.
 - Text fields are 16px on phones, so iOS does not zoom in, and dialogs
-  do not pop up the keyboard when they open. Buttons, keys and list rows
-  are at least 44px tall on touch screens and phone-width windows.
-- Everything is embedded in the binary. The compiled Tailwind CSS
-  (`internal/web/static/app.css`) is committed, so `make build` needs no
-  Tailwind; `make web` rebuilds it after UI changes.
+  do not pop up the keyboard when they open. The buttons in bars and
+  dialogs are 44px tall there. A session swiped to the right goes back to
+  the list, a row swiped to the left shows *Archive* (or *Delete*);
+  swiped on past half its width, letting go asks right away.
+- Everything is embedded in the binary: the page is plain HTML, CSS and
+  JavaScript in `internal/web/static`, with no build step. `DESIGN.md`
+  records its design (colours, type, spacing, layouts).
 - The favicon and the home-screen / install icons (with a web app
   manifest) are drawn from one pixel map in `internal/web/gen_icons.go`;
   `make icons` redraws them, and the results are committed too. Added to
   an iPhone's or iPad's home screen, the dashboard opens full screen with
-  a launch screen (the icon over the header's FLEET logo): iOS needs one
-  image per screen size and orientation, so `make icons` draws 44 of them
-  into `static/splash/` and writes their links into `index.html`.
+  a launch screen (the icon over the FLEET logo): iOS needs one image per
+  screen size and orientation, so `make icons` draws 44 of them into
+  `static/splash/` and writes their links into `index.html`.
 
 ### Notifications
 
-*notify* (next to *sign out*) subscribes the browser to Web Push: the
-daemon then sends a notification when one of its agents needs input, is
-done or fails, and tapping it opens that session. *Done* means the agent
+*Push notifications on this device* in Settings subscribes the browser to
+Web Push: the daemon then sends a notification when one of its agents
+needs input, is done or fails, and tapping it opens that session. *Done* means the agent
 stayed idle for 20 seconds and its session runs no background subagents or
 workflows: those start another turn when they end, so the turns in between
 send nothing. It is the
@@ -459,24 +465,23 @@ HTTP port is not enough. With Tailscale, enable HTTPS certificates for the
 tailnet and run `tailscale serve --bg 7421` on the server, then open
 `https://SERVER.TAILNET.ts.net/`. On iPhone: open that URL in Safari,
 Share › Add to Home Screen, open the app, unlock it (a Home Screen app has
-its own storage), and tap *notify*.
+its own storage), and switch notifications on in Settings.
 
 ### Usage limits
 
 When a Claude Code or Codex session stops because the account ran out of
 a plan limit (the 5-hour window, the week, ...), the daemon notices, finds
 out when the limit resets, and types `continue` into the session a minute
-after that. The agent shows *idle* with a **limit** chip (`limit 5h ·
-resumes 22:58`), its session a bar with **Resume now** and **Turn
-auto-resume off** (per agent; `[limits] auto_resume = false` turns it off
-for all), and a notification says the agent hit the limit.
+after that. Its row says *Usage limit · resumes 22:58*, its session shows
+a *Usage limit reached* bar with **Resume now** and **Turn auto-resume
+off** (per agent; `[limits] auto_resume = false` turns it off for all),
+and a notification says the agent hit the limit.
 
 How it knows: Claude Code writes the refused turn to the transcript with
 the limit and its reset time (`"error":"rate_limit"`, `quotaLimits.resetsAt`).
 Codex writes the window that ran out with its `resets_at` (`token_count`),
 and its refusal (`error`, or the message on the screen). When neither says
-when it resets, the account's usage (the meters under *Fleet on the
-network*) does. Before typing, the daemon asks the account's usage again
+when it resets, the account's usage (the meters on Devices) does. Before typing, the daemon asks the account's usage again
 and waits longer if the limit is still used up; it does nothing while the
 agent is working (Claude Code can wait out a limit by itself), closes a
 dialog first (Esc), and gives up, with a notification, after 3 resumes the
@@ -484,38 +489,40 @@ session did not react to, or 4 limits within an hour.
 
 ### Sessions in the browser
 
-With the admin link, every agent row has an **open** button (**answer** when
-it needs input), and *Agents → New session* (or the **N** key, or **▸ start**
-on a root, which picks that folder) starts one:
+With the admin link, click a session in the sidebar to open its chat;
+sessions that wait on you are also listed on top, under *Needs you*. *New
+session* (or the **N** key, the **+** on a folder's group, or *New session*
+on a machine or folder in Devices, which pick it) starts one:
 
-- **Start**: one line of pickers (the folder, the agent: Claude Code,
-  Codex or a shell, its model and effort; the machine next to the title
-  when the fleet has more than one), then the prompt, which is optional.
-  The folder is the last one a session started in; click it (or
-  Ctrl/⌘+K) for recent folders, the other roots, a search over all of
-  them and the folders inside them, and › to look inside one. A folder
-  starts in the most specific root around it, so `~/app` gets the agents
-  and trust of the root `~/app` even when found through a root `~`.
-  **New folder** (or a search that finds nothing) makes a folder anywhere
-  on the machine, `~/` or an absolute path, adds it as a root, trusted
-  unless unticked, and chooses it (`POST /api/fs`, then `POST /api/roots`).
-  Agent rows show a small provider logo on the right. The launcher remembers
-  the last successfully used provider for each root on each machine, using
-  recent sessions on other browsers and local storage after sessions are
-  removed. If that provider is unavailable or disallowed, it picks an
-  installed provider the root allows.
+- **Start**: above the prompt, the machine (when the fleet has more than
+  one), the folder, the checkout and *Options*; under it the agent (Claude
+  Code, Codex or a shell), its model and effort, and *Start*. The prompt
+  is optional; a shell takes none. The folder is the last one a session
+  started in; click it (or Ctrl/⌘+K) for recent folders, the other roots,
+  a search over all of them and the folders inside them, and › to look
+  inside one. A folder starts in the most specific root around it, so
+  `~/app` gets the agents and trust of the root `~/app` even when found
+  through a root `~`. **New folder** (or a search that finds nothing)
+  makes a folder anywhere on the machine, `~/` or an absolute path, adds
+  it as a root, trusted unless unticked, and chooses it (`POST /api/fs`,
+  then `POST /api/roots`). The agent menu shows each agent's plan usage.
+  The launcher remembers the last successfully used provider for each root
+  on each machine, using recent sessions on other browsers and local
+  storage after sessions are removed. If that provider is unavailable or
+  disallowed, it picks an installed provider the root allows.
   *Model* and *Effort* choose what the agent runs at (Claude Code: Opus,
   Fable, Sonnet, Haiku at Low to Max or Ultracode; Codex: the models it
   lists), *default* leaves it to the CLI's own settings; the page remembers
-  the pick per agent. Folded under *Options*, which sums up whatever is
-  not the default: *Checkout* (worktree or the folder itself) and
-  *Sandbox* (Docker or not) are click choices like `fleet run`'s flags, *Then*
-  opens the chat, the chat with the terminal screen, or stays on the list;
-  the page remembers them. *Name* and *Branch* are optional. Keys:
-  Ctrl/⌘+Enter starts, Ctrl/⌘+Shift+Enter starts and shows the screen,
-  Ctrl/⌘+K opens the folders, Alt+1–9 picks the agent.
-- **Roots**: with more than six, the list shows the first six, a filter and
-  *Show all*.
+  the pick per agent. *Checkout* is like `fleet run`'s flags: an own
+  worktree, the folder itself, or auto (a worktree in git repositories).
+  Folded under *Options*, which sums up whatever is not the default:
+  *Sandbox* (Docker or not), *Then* (show the chat, the chat and its
+  terminal, or stay on the page), and an optional *Name* and *Branch*; the
+  page remembers them. Keys: Ctrl/⌘+Enter starts, Ctrl/⌘+Shift+Enter
+  starts and shows the terminal, Ctrl/⌘+K opens the folders, Alt+1–9
+  picks the agent.
+- **Roots**: on Devices, a machine with more than six shows the first six,
+  a filter and *Show all*.
 - **Model and effort.** Under the message box, *model* and *effort* show
   what the session runs at (read from the transcript: the model of the
   last reply, or a switch since). In a Claude Code session they switch it,
@@ -527,18 +534,23 @@ on a root, which picks that folder) starts one:
 - **Chat.** The conversation is read from the transcript the CLI writes
   (`~/.claude/projects/…/<session>.jsonl` for Claude Code,
   `~/.codex/sessions/…/rollout-….jsonl` for Codex; in a sandbox, those in
-  the sandbox home). Your messages, the agent's replies and every tool call
-  are shown; click a tool call for its input and output. Messages appear
-  when the CLI has written them, not token by token. The page long-polls
+  the sandbox home). Your messages and the agent's replies are shown, and
+  the tool calls between two of them fold into one line (*Read 3 files,
+  ran a command · 42s*); click it for the calls, and a call for its input
+  and output (an edit as a diff). Messages appear when the CLI has written
+  them, not token by token. The page long-polls
   (`GET /api/agents/{id}/chat?wait=1`, answered as soon as something
-  changes, else after 8 seconds); *Load earlier* pages back through long
-  sessions. After `/clear` the chat follows the new session.
+  changes, else after 8 seconds); *Load earlier messages* pages back
+  through long sessions. After `/clear` the chat follows the new session.
+  The session's title is the one the CLI gave it (Claude Code names its
+  sessions), else the start of its first message (`Agent.title`).
 - **Images.** Images pasted into a message, and those a tool returned (a
   `Read` of a PNG, a browser screenshot), show in the chat as thumbnails;
   click one for full size. They stay in the transcript: the page fetches
   each as it scrolls into view (`GET /api/agents/{id}/image`, the data as
-  JSON). The *Media* tab, shown once a session holds an image, has all of
-  them in a grid, newest first, labelled with the file a tool read (or "sent
+  JSON). The panel's *Media* tab (the panel opens from the session's
+  header), shown once a session holds an image, has all of them in a grid,
+  newest first, labelled with the file a tool read (or "sent
   by you"); in the full-size view the arrow keys, a sideways swipe or ‹ ›
   step through them. It lists them with `GET /api/agents/{id}/media` (the
   whole transcript, then what follows an offset) and asks again whenever the
@@ -551,7 +563,7 @@ on a root, which picks that folder) starts one:
   the message gets a line `Video: <path>` for the agent to open with its
   own tools (ffmpeg, say). Uploads live in `<[sandbox] dir>/uploads`,
   mounted read-only into sandboxes, and are removed after 30 days.
-- **Files.** The *Files* tab lists what the agent made, newest first: the
+- **Files.** The panel's *Files* tab lists what the agent made, newest first: the
   files its tool calls wrote (Claude's Write and Edit, Codex's patches and
   generated images, wherever they are) and every file of its folder changed
   since the session started, which also catches what its commands produced
@@ -559,7 +571,8 @@ on a root, which picks that folder) starts one:
   (every word must be in the path; `.git`, `node_modules`, virtualenvs,
   build caches and `target` are skipped). Click a file to see it: images,
   video and sound play in the page, markdown is rendered, code is
-  highlighted with line numbers; *Download* saves any file up to 16 MB. The
+  highlighted with line numbers; ↓ saves any file up to 16 MB, and *Send
+  to* copies it to another machine of the fleet (into its uploads). The
   daemon serves only files in the agent's folder (links that lead out of it
   excepted) or written by it (`GET /api/agents/{id}/files?q=…`,
   `GET /api/agents/{id}/file?path=…`).
@@ -577,7 +590,7 @@ on a root, which picks that folder) starts one:
   Enter (Enter sends, Shift+Enter is a new line; text with several lines
   goes in as one paste). While the agent works, Claude Code and Codex queue
   it.
-- **Send images.** Attach images with the picture button, by pasting them
+- **Send images.** Attach images with the paperclip, by pasting them
   into the message box or by dropping them on the chat (up to 10 per
   message). They go with the next message: the daemon saves each in the
   agent's state dir and pastes its path, which Claude Code and Codex turn
@@ -586,57 +599,61 @@ on a root, which picks that folder) starts one:
   `fleet send <agent> --image a.png --image b.png "what changed?"`.
 - **Stop a turn.** While the agent works or waits on a dialog, *Stop*
   beside *Send* interrupts its turn as Esc in its terminal does; so does
-  Ctrl+C (with no text selected) in the session, while Esc still closes it.
-  The agent keeps running and waits for your next message. The daemon marks the agent idle once its transcript records
-  the interruption. From the CLI: `fleet interrupt <agent>`.
-- **Screen and keys.** Permission prompts, folder trust and menus are not
-  part of the transcript. *Screen* shows the agent's terminal as text
-  (refreshed every 1.5 seconds; it opens by itself when the agent needs
-  input), and the key row sends Esc, arrows, Tab, Enter, 1-3 and Ctrl-C to
-  answer them. For the full terminal, `fleet attach` still works.
+  Ctrl+C (with no text selected) in the session. The agent keeps running
+  and waits for your next message. The daemon marks the agent idle once
+  its transcript records the interruption. From the CLI:
+  `fleet interrupt <agent>`.
+- **Terminal and keys.** Permission prompts, folder trust and menus are
+  not part of the transcript. While the agent waits on one, a card above
+  the message box shows the bottom of its terminal with keys to answer:
+  Esc, arrows, Tab, Enter, 1-6 and Ctrl-C (the keyboard button in the
+  message box shows them too). The panel's *Terminal* tab, or the
+  terminal button in the header, shows the whole screen as text
+  (refreshed every 1.5 seconds). For the full terminal, `fleet attach`
+  still works.
 - **Pull requests.** When an agent opens a pull request (`gh pr create`),
-  its row gets a *PR #n* chip linking to it, a push notification says so,
-  and the session shows a bar per pull request: its state, checks, review
-  and size, and *Merge* (pick squash / merge / rebase as the repository
-  allows, optionally delete the branch, click again to confirm). The
+  its row and its session's header get a chip (*#12 open*), a push notification
+  says so, and the header's git button lists each pull request: its state,
+  checks, review and size, and *Merge* (pick squash / merge / rebase as the
+  repository allows, optionally delete the branch, click again to
+  confirm). The
   daemon looks pull requests up and merges them with `gh` on its host, so
   that `gh` must be logged in. Same from the CLI: `fleet prs`, `fleet merge`.
-- **Git.** The session shows its checkout's branch, what it has to push
-  (↑) and pull (↓) against its upstream and the remote's default branch,
-  uncommitted files and the last commit, with *Fetch*, *Pull* (fast-forward,
-  rebase or merge; from the upstream, or from `origin/main` for a branch
-  never pushed) and *Push* (sets the upstream; a branch that diverged gets
-  a *Force push* with lease, click again to confirm). The row gets a ⎇ ↑n ↓n
-  chip when there is something to push or pull. Pulling waits until the
-  agent is idle, and a merge or rebase that conflicts is aborted. Git runs
-  on the daemon host with that user's credentials and never prompts. Same
-  from the CLI: `fleet git <agent> [fetch|pull|push]`. Git and the pull
-  requests fold into one line (branch, ↑ ↓, uncommitted, a pill per pull
-  request) that unfolds to the buttons; it starts folded on phones, and
-  stays as you last left it. Merged and closed pull requests take a line.
-- **Notes.** *✎ note* on an agent's row (or *Note* in its session) leaves
-  a note on it, e.g. "customer is testing the preview, keep it open". It
-  shows under the row and in the session's header, where a click edits or
-  removes it; Enter saves, Shift+Enter starts a new line. Notes stay with
-  the agent in History and across daemon restarts. Same from the CLI:
-  `fleet note <agent> [text]`.
-- **Stop** asks in a bar under the header, away from Stop itself, so a
-  double tap cannot stop a session; *Stop session* there kills it like
-  `fleet kill` (the worktree is kept). On a phone the session fills the
-  screen and closes with the back arrow at the top left.
+- **Git.** The session's header shows its checkout's branch with what it
+  has to push (↑) and pull (↓) and its uncommitted files; click it for the
+  details against its upstream and the remote's default branch, the last
+  commit, and *Fetch*, *Pull* (fast-forward, rebase or merge; from the
+  upstream, or from `origin/main` for a branch never pushed) and *Push*
+  (sets the upstream; a branch that diverged gets a *Force push* with
+  lease, click again to confirm). Pulling waits until the agent is idle,
+  and a merge or rebase that conflicts is aborted. Git runs on the daemon
+  host with that user's credentials and never prompts. Same from the CLI:
+  `fleet git <agent> [fetch|pull|push]`.
+- **Notes.** The note button on a session's row (on hover) or in its
+  header leaves a note on it, e.g. "customer is testing the preview, keep
+  it open". It shows under the row and as a bar under the session's
+  header, where *Edit* changes or removes it; Enter saves, Shift+Enter
+  starts a new line. Notes stay with the agent in *Archived* and across
+  daemon restarts. Same from the CLI: `fleet note <agent> [text]`.
+- **Archive** (in the header's ⋯ menu, Alt+A, or a row swiped to the left
+  on a phone) asks first, then ends the agent like `fleet kill` (the
+  worktree is kept) and moves the session to *Archived* at the bottom of
+  the sidebar, where its chat stays readable; *Delete* removes a finished
+  one. On a phone the session fills the screen and goes back to the list
+  with the arrow at the top left.
 - **Workflows.** When Claude Code runs a workflow (its Workflow tool: a
   script that starts many subagents in phases, in the background), the
-  agent's row shows each run going on: its phase, a bar per subagent and
-  how long it has run (a finished run stays for 10 minutes). The session
-  gets a *Workflows* tab, and the Workflow call in the chat a *progress*
-  link. Each run is a card: its phases side by side, then every subagent
-  by phase with what
-  it does right now (its latest tool call), its tool calls, tokens and
-  time; once the run ended, the script's log and its result (JSON shown
-  as sections, text as markdown), or the error it failed with. Click a
-  subagent for its whole conversation, read-only (Esc goes back). The tab
-  long-polls (`GET /api/agents/{id}/workflows?wait=1`); the list asks
-  `GET /api/workflows` every 3 seconds, on every joined machine.
+  agent's row shows each run going on: its name, phase and a bar per
+  subagent (a finished run stays for 10 minutes). The Workflow call in the
+  chat is a card with the run's phases and the subagents at work, and
+  *Open run* opens it in the panel's *Workflow* tab. There each run is a
+  card: its phases side by side, then every subagent by phase with what it
+  does right now (its latest tool call), its tool calls, tokens and time;
+  once the run ended, the script's log and its result (JSON shown as
+  sections, text as markdown), or the error it failed with. Click a
+  subagent for its whole conversation, read-only (Esc or ‹ goes back).
+  The tab long-polls (`GET /api/agents/{id}/workflows?wait=1`); the list
+  asks `GET /api/workflows` every 3 seconds, on every joined machine.
 
 The agent's hooks tell the daemon where its transcript is; fleet only
 reads transcripts inside the CLI's own transcript folder (and, for
@@ -667,12 +684,13 @@ To manage other machines from this dashboard, start fleet on them with:
 
 Run it once on each machine (it starts fleet there if needed, and only
 stores the key if fleet already runs). From then on, the dashboard of any
-of them lists the agents of all of them (tagged with their machine, polled
-every 4 seconds), starts sessions on any of them, and its folder picker
-can browse and add roots on all of them. A machine without the
-key shows up as *not joined*, with the command to copy; the picker notices
-when it has been run. No pairing is needed for this: pairing (`fleet pair`)
-is only for the fleet CLI and native apps talking to a daemon over TLS.
+of them lists the sessions of all of them (tagged with their machine, or
+grouped by it; polled every 4 seconds), starts sessions on any of them,
+and can browse and add roots on all of them from Devices. A machine
+without the key shows up there as *not in this fleet yet*, with the
+command to copy; the page notices when it has been run. No pairing is
+needed for this: pairing (`fleet pair`) is only for the fleet CLI and
+native apps talking to a daemon over TLS.
 
 The dashboard finds the other machines with mDNS on the LAN and, when
 [Tailscale](https://tailscale.com) runs, on the tailnet: mDNS does not

@@ -502,6 +502,10 @@ message Agent {
   // A note the user left on the agent ("customer is testing, keep it
   // open"); empty if none. See SetNoteRequest.
   string note = 24;
+  // The conversation's title: the one the agent CLI gave it (Claude
+  // Code's) once it wrote one, else the start of the first message;
+  // empty before any message.
+  string title = 25;
 }
 
 // GitStatus is the git state of an agent's checkout. The daemon reads it

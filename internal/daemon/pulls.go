@@ -170,14 +170,22 @@ func (m *manager) pullLoop(ctx context.Context) {
 // then looks up the pull requests that are due.
 func (m *manager) watchPulls(ctx context.Context) {
 	budget := int64(pullScan)
-	var ids []string
+	// Live agents first: the budget reaches them before the history (after
+	// an upgrade, every transcript is read once for its title).
+	var ids, done []string
 	m.mu.Lock()
 	for _, a := range m.sortedLocked() {
-		if !a.busy && (a.Transcript != "" || a.live()) {
+		if a.busy || (a.Transcript == "" && !a.live()) {
+			continue
+		}
+		if a.live() {
 			ids = append(ids, a.ID)
+		} else {
+			done = append(done, a.ID)
 		}
 	}
 	m.mu.Unlock()
+	ids = append(ids, done...)
 	read := false
 	for _, id := range ids {
 		if ctx.Err() != nil || budget <= 0 {
@@ -197,8 +205,9 @@ func (m *manager) watchPulls(ctx context.Context) {
 }
 
 // scanPulls reads agent id's transcript from where the last scan stopped,
-// at most about limit bytes, adds the pull requests it finds, and returns
-// how many bytes it read. The new offset is saved with the next save.
+// at most about limit bytes, adds the pull requests it finds, takes the
+// session's title on the way (titles.go), and returns how many bytes it
+// read. The new offset is saved with the next save.
 func (m *manager) scanPulls(id string, limit int64) int64 {
 	s, err := m.session(id)
 	if err != nil || s.t == nil || s.path == "" {
@@ -217,19 +226,23 @@ func (m *manager) scanPulls(id string, limit int64) int64 {
 	} else {
 		scan = prScan{Path: s.path}
 	}
+	titled := a.TitleScan == s.path
 	m.mu.Unlock()
 
-	if fi, err := os.Stat(s.path); err != nil || fi.Size() == scan.Off {
+	fi, err := os.Stat(s.path)
+	if err != nil || (fi.Size() == scan.Off && titled) {
 		return 0
-	} else if fi.Size() < scan.Off {
+	}
+	if fi.Size() < scan.Off {
 		scan = prScan{Path: s.path} // replaced
 	}
 	start := scan.Off
 	var found []foundPR
+	var titles titleFind
 	for scan.Off-start < limit {
 		p, err := transcript.Forward(s.path, scan.Off, s.t.ParseTranscript)
 		if errors.Is(err, transcript.ErrShrunk) {
-			scan, start, found = prScan{Path: s.path}, 0, nil
+			scan, start, found, titles = prScan{Path: s.path}, 0, nil, titleFind{}
 			continue
 		}
 		if err != nil {
@@ -237,9 +250,24 @@ func (m *manager) scanPulls(id string, limit int64) int64 {
 			break
 		}
 		found = append(found, scan.read(p.Entries)...)
+		titles.read(p.Entries)
 		scan.Off = p.End
 		if !p.More {
 			break
+		}
+	}
+	read := scan.Off - start
+	// The first message is known only from a read from the start. A
+	// transcript read before titles were is looked at once more for it.
+	if start > 0 {
+		titles.first = ""
+		if !titled {
+			back, n := titleBackfill(s.path, s.t.ParseTranscript)
+			if titles.cli == "" {
+				titles.cli = back.cli
+			}
+			titles.first = back.first
+			read += n
 		}
 	}
 
@@ -247,9 +275,15 @@ func (m *manager) scanPulls(id string, limit int64) int64 {
 	defer m.mu.Unlock()
 	a, ok = m.agents[id]
 	if !ok {
-		return scan.Off - start
+		return read
 	}
 	a.PRScan = &scan
+	a.TitleScan = s.path
+	if a.applyTitle(titles) {
+		// Like a note, a title leaves UpdatedAtMs alone: lists sort by it.
+		m.saveLocked()
+		m.broadcastLocked(&fleetv1.Event{Kind: &fleetv1.Event_AgentUpserted{AgentUpserted: a.proto()}})
+	}
 	added := false
 	for _, f := range found {
 		if slices.ContainsFunc(a.PullRequests, func(p *fleetv1.PullRequest) bool { return p.Url == f.ref.url }) {
@@ -266,7 +300,7 @@ func (m *manager) scanPulls(id string, limit int64) int64 {
 	if added {
 		m.changedLocked(a)
 	}
-	return scan.Off - start
+	return read
 }
 
 // pullDue reports whether pull request p of an agent (live or not) is due
