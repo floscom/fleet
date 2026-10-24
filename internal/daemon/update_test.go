@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,9 +23,12 @@ import (
 )
 
 // fakeRelease serves a repository whose latest release is tag, and makes
-// the daemon update from it quickly.
-func fakeRelease(t *testing.T, tag string) {
+// the daemon update from it quickly. Looking for the latest release waits
+// until open is called, so a daemon cannot update and restart before the
+// test saw it start.
+func fakeRelease(t *testing.T, tag string) (open func()) {
 	t.Helper()
+	gate := make(chan struct{})
 	target := "fleet-" + runtime.GOOS + "-" + runtime.GOARCH
 	script := "#!/bin/sh\necho 'fleet " + tag + " (protocol v1)'\n"
 	var buf bytes.Buffer
@@ -38,6 +42,11 @@ func fakeRelease(t *testing.T, tag string) {
 	sum := sha256.Sum256(archive)
 	mux := http.NewServeMux()
 	mux.HandleFunc("HEAD /releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-gate:
+		case <-r.Context().Done():
+			return
+		}
 		http.Redirect(w, r, "/releases/tag/"+tag, http.StatusFound)
 	})
 	mux.HandleFunc("GET /releases/download/"+tag+"/checksums.txt", func(w http.ResponseWriter, r *http.Request) {
@@ -53,6 +62,8 @@ func fakeRelease(t *testing.T, tag string) {
 		srv.Close()
 	})
 	updateFirst, updatePoll, updateSource = 10*time.Millisecond, 20*time.Millisecond, update.Source{URL: srv.URL}
+	var once sync.Once
+	return func() { once.Do(func() { close(gate) }) }
 }
 
 func updateReq(r *fleetv1.UpdateRequest) *fleetv1.ClientMessage {
@@ -60,13 +71,14 @@ func updateReq(r *fleetv1.UpdateRequest) *fleetv1.ClientMessage {
 }
 
 func TestAutoUpdateRestartsOnTheNewRelease(t *testing.T) {
-	fakeRelease(t, "v0.4.0")
+	open := fakeRelease(t, "v0.4.0")
 	e := newEnv(t)
 	e.stop()
 	e.version = "v0.3.0"
 	e.binary = filepath.Join(t.TempDir(), "fleet")
 	os.WriteFile(e.binary, []byte("old"), 0o755)
 	e.start()
+	open()
 	select {
 	case err := <-e.done:
 		e.cancel = nil
@@ -82,7 +94,7 @@ func TestAutoUpdateRestartsOnTheNewRelease(t *testing.T) {
 }
 
 func TestAutoUpdateOff(t *testing.T) {
-	fakeRelease(t, "v0.4.0")
+	fakeRelease(t, "v0.4.0")()
 	e := newEnv(t)
 	c := e.dialUnix()
 	st := c.ok(updateReq(&fleetv1.UpdateRequest{})).GetUpdate().GetStatus()
