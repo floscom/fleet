@@ -11,20 +11,33 @@ agents in formation // lan // tmux
 ```
 
 fleet runs coding agents (Claude Code, Codex, a plain shell, and more
-through adapters) in tmux sessions on a server, and lets your other machines
-on the same LAN start, watch, stop and type into them.
+through adapters) in tmux sessions on a server, and lets your other
+machines on the same LAN start, watch, stop and type into them.
 
-- **One Go binary.** `fleet daemon` is the headless server; every other
-  subcommand is the CLI.
-- **Terminal-first.** Each agent runs its own interactive TUI in tmux.
-  Clients stream the real terminal. Hooks installed into the agent CLI
-  report finer status (working, idle, needs input).
-- **LAN pairing, no accounts.** Daemons advertise themselves with mDNS.
-  A device pairs once with a short code and is pinned to the daemon's
-  certificate. There is no cloud relay.
-- **Roots.** Agents can only be started inside folders you allow.
-- **Agents outlive the daemon.** Restarting the daemon re-adopts running
-  agents. tmux sessions are always cleaned up.
+## Features
+
+- **One Go binary** — `fleet daemon` is the server, every other subcommand
+  is the CLI; no accounts, no cloud relay.
+- **Real terminals, not a chat wrapper** — each agent runs its actual CLI
+  in tmux; attach for the full TUI, or watch and type from a dashboard or
+  any paired machine.
+- **Web dashboard** — a chat-first UI for every session, on desktop or
+  phone: conversations, images, files, workflows and questions, all live.
+- **LAN pairing** — mDNS discovery, a one-time code, certificate pinning;
+  or join several daemons into one fleet with a shared key.
+- **Git-aware isolation** — each agent gets its own worktree by default, or
+  runs pinned in a shared folder; `--clone` spins up a fresh checkout from
+  any repo.
+- **Docker sandboxing** — run agents in a container that only sees their
+  own checkout, with your CLI logins shared in if you choose.
+- **GitHub integration** — list and merge the pull requests agents open,
+  from the CLI or the dashboard.
+- **Push notifications** — know when an agent needs input, finishes, or
+  fails.
+- **Usage-limit auto-resume** — Claude Code and Codex sessions that hit a
+  plan limit resume themselves once it resets.
+- **Agents outlive the daemon** — restarts re-adopt running agents; tmux
+  sessions are always cleaned up.
 
 The protocol is protobuf over TLS, documented for native clients (a macOS
 app is next) in [docs/PROTOCOL.md](docs/PROTOCOL.md).
@@ -136,54 +149,47 @@ Agents are referred to by id (`a1b2c3`) or name (`claude-api-1`, or the
 
 ### Starting in a folder
 
-`--root` makes folders roots as the daemon starts, so a machine joins the
-fleet with one command from wherever you are:
+`--root` joins the fleet with one command from inside a project:
 
 ```sh
 cd ~/code/api
 fleet start --root .            # start the daemon if needed, allow agents in ~/code/api
 ```
 
-- If the daemon already runs, `fleet start --root` only adds the folder.
-  A folder that already is a root is left as it is, so running it again is
-  harmless. `fleet daemon --root .` does the same in the foreground.
-- The root is named after the folder (`api`, or `api-2` if that name is
-  taken). Like `fleet roots add`, it is saved in `config.toml` and stays
-  after the daemon stops; `fleet roots rm api` removes it.
-- `--root` can be repeated. `--trust` trusts the roots it adds (see
-  [Folder trust](#folder-trust)), not roots that already existed.
-- A relative path is taken from the current folder, and the folder must
-  exist. If it does not, `fleet start` fails before starting the daemon.
+- If the daemon already runs, this only adds the folder; a folder that's
+  already a root is left alone, so running it again is harmless.
+- The root is named after the folder (`api`, or `api-2` if that's taken),
+  saved in `config.toml`, and removed with `fleet roots rm api`.
+- `--root` can repeat. `--trust` trusts the roots it adds, not ones that
+  already existed.
+- A relative path is resolved from the current folder, which must exist.
 
-Once the daemon runs it is on the LAN (`fleet discover`, the dashboards of
-other fleets), and every paired device can start agents in the new root:
-`fleet -H studio run claude api: --prompt "..."`. A device that never
-paired with this machine still pairs once (`fleet pair`, `fleet connect`).
+Once the daemon runs it's on the LAN, and every paired device can start
+agents in the new root: `fleet -H studio run claude api: --prompt "..."`.
+A device that never paired with this machine still only pairs once.
 
 ### Isolation
 
-Inside a git repository an agent gets its own **worktree** by default: a
-new branch `fleet/<name>` checked out under
-`~/.fleet/worktrees/<repo>-<hash>/<name>`, so several agents can work on
-the same repo without stepping on each other. `--pinned` runs the agent
-directly in the folder instead; several pinned agents may share a folder
-(and its files).
-Outside git, agents are always pinned. `fleet kill --rm-worktree` removes
-the worktree (the branch is kept) unless it has uncommitted changes.
+Inside a git repository, an agent gets its own **worktree** by default: a
+new branch `fleet/<name>` under `~/.fleet/worktrees/<repo>-<hash>/<name>`,
+so several agents can work on the same repo without stepping on each
+other. `--pinned` runs the agent directly in the folder instead; several
+pinned agents may share a folder. Outside git, agents are always pinned.
+`fleet kill --rm-worktree` removes the worktree (keeping the branch)
+unless it has uncommitted changes.
 
-`--clone <repo>` starts from a fresh clone instead of a folder: the daemon
-clones `owner/repo` (GitHub), an `https://` or `ssh://` URL, or
-`git@host:org/repo` with its own git credentials into
-`~/.fleet/clones/<name>`, and checks out `--branch` (the remote branch if it
-exists, else a new branch, default `fleet/<name>`). `fleet kill
---rm-worktree` deletes the clone unless it has uncommitted changes or
-commits that were never pushed.
+`--clone <repo>` starts from a fresh clone instead of a folder: GitHub
+`owner/repo`, an `https://`/`ssh://` URL, or `git@host:org/repo`, cloned
+with the daemon's own git credentials into `~/.fleet/clones/<name>`, then
+checking out `--branch` (the remote branch if it exists, else a new one,
+default `fleet/<name>`). `fleet kill --rm-worktree` deletes the clone too,
+unless it has uncommitted or unpushed work.
 
 ### Docker sandbox
 
 `--docker` (or `--sandbox docker`, or `default = "docker"` under
-`[sandbox]`) runs the agent in a container instead of on the server. It
-works with every mode above:
+`[sandbox]`) runs the agent in a container instead of on the server, in
+every mode above:
 
 ```sh
 fleet sandbox build                                  # once, on the server: the fleet-agent image
@@ -192,59 +198,46 @@ fleet run claude code:notes --docker --pinned        # the folder itself, mounte
 fleet run claude --clone owner/repo --docker --prompt "fix issue 42"
 ```
 
-Nothing else changes: the tmux pane runs `docker run -it`, so attach,
-send, `needs input` and exit codes work as usual, and the container is
-removed when the agent exits or is killed (the daemon also removes
-leftover containers at startup).
+Attach, send, `needs input` and exit codes all work as usual; the
+container is removed when the agent exits or is killed (leftover
+containers are also cleaned up at daemon startup).
 
-What the container sees, each at the same path as on the host:
+The container sees, each at the same path as on the host:
 
-- the agent's checkout: its worktree or clone, or for `--pinned` the
-  folder (the whole repository when the folder is inside one), read-write;
+- the agent's checkout — its worktree, clone, or (for `--pinned`) the
+  folder — read-write;
 - for a worktree, the repository's `.git` directory, read-write so the
-  agent can commit. The rest of your checkout is not visible;
-- `.git/config`, `.git/hooks` and a worktree's `.git` file read-only,
-  because git on the host runs what they name;
-- a home directory, `/home/fleet`, kept across containers in
-  `[sandbox] dir`/home: log in once (`/login` in Claude Code) and it sticks,
-  or share the server's login (below);
-- a socket that only accepts this agent's hook events, and a copy of the
-  fleet binary for the hooks. The daemon's own socket is not visible.
+  agent can commit; the rest of your checkout isn't visible;
+- `.git/config`, `.git/hooks` and a worktree's `.git` file, read-only;
+- a home directory, `/home/fleet`, kept across containers (log in once
+  and it sticks), or the server's own login shared in (below);
+- a socket that only accepts this agent's hook events.
 
-**Using the server's login.** With `auth = ["claude", "codex"]` under
-`[sandbox]`, sandboxed agents use the Claude Code and Codex logins of the
-user running the daemon (`~/.claude/.credentials.json`,
-`~/.codex/auth.json`, or under `CLAUDE_CONFIG_DIR` / `CODEX_HOME`). They are
-not bind-mounted: the CLIs replace these files atomically, which a file
-mount does not survive, and snap Docker cannot see them. The daemon copies
-them into the sandbox home instead, and keeps both copies in sync while
-sandboxed agents run: whichever side refreshed its token last wins, and the
-host file is written under Claude's own write lock. That way neither side
-logs the other out when OAuth tokens rotate. A missing host login is never
-recreated from a sandbox. On macOS, Claude Code keeps its login in the
-Keychain, so there is no file to share.
+**Sharing the server's login.** `auth = ["claude", "codex"]` under
+`[sandbox]` gives sandboxed agents the Claude Code / Codex logins of the
+daemon's user, copied into the sandbox home rather than bind-mounted
+(the CLIs replace credential files atomically, which a mount doesn't
+survive) and kept in sync as tokens rotate. A missing host login is never
+recreated from a sandbox. macOS keeps Claude Code's login in the Keychain,
+so there's nothing to share there.
 
 The container runs as your uid:gid with all capabilities dropped. Your
-git name and email, and the daemon environment variables listed in
-`[sandbox] env` (default `CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`,
-`GITHUB_TOKEN`), are passed in; `claude setup-token` gives you a
-`CLAUDE_CODE_OAUTH_TOKEN` for the daemon's environment. Folder trust
-prompts are skipped in a sandbox, since what a folder's settings run stays
-in the container. The image ships Claude Code, Codex, git, gh, ripgrep,
-Node and Python; `fleet sandbox dockerfile` prints its Dockerfile to build
-your own `FROM fleet-agent` with more tools. Update the agent CLIs with
-`fleet sandbox build --pull`.
+git name and email, and the env vars in `[sandbox] env` (default
+`CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`), are passed in.
+Folder trust prompts are skipped, since a sandbox's own settings stay in
+the container. The image ships Claude Code, Codex, git, gh, ripgrep, Node
+and Python; `fleet sandbox dockerfile` prints its Dockerfile to build your
+own `FROM fleet-agent`. Update agent CLIs with `fleet sandbox build --pull`.
 
-**Docker installed as a snap** (Ubuntu's default) cannot see `/tmp` or
-hidden folders such as `~/.fleet`. fleet checks this and tells you; set
-`dir` under `[sandbox]` to a visible folder, such as `~/fleet-sandbox`.
-Worktrees and clones of sandboxed agents, their state, the sandbox home and
-the fleet binary copy all live there. Repositories you mount (`--pinned`,
-and a worktree's `.git`) must be visible to Docker too.
+**Docker installed as a snap** (Ubuntu's default) can't see `/tmp` or
+hidden folders such as `~/.fleet`; fleet checks and tells you — set
+`dir` under `[sandbox]` to a visible folder such as `~/fleet-sandbox`.
+Anything you mount (`--pinned`, a worktree's `.git`) must be visible to
+Docker too.
 
-The sandbox protects the server from what the agent runs. It does not make
-the agent's output trustworthy: review what it commits before building or
-running it on the host.
+The sandbox protects the server from what the agent runs. It does not
+make the agent's output trustworthy: review what it commits before
+building or running it on the host.
 
 ## Configuration
 
@@ -331,15 +324,14 @@ The daemon reads `config.toml` at startup. Changes made through the CLI
 
 ## Web dashboard
 
-The daemon serves a live dashboard at <http://SERVER:7421/>, a chat app for
-its sessions. On a desktop the sessions sit in a sidebar, grouped by
-folder (or machine, or not at all), and the open one fills the rest; on a
-phone the list is the home screen and a session fills the screen.
-**Devices** holds the machines of the fleet: their health, agent CLIs,
-plan usage and folders (roots); elsewhere a dot per machine shows whether
-it is online. The page updates over a WebSocket (`/ws`) as agents start,
-change state or exit. Its theme follows the device's light or dark mode,
-or the one picked in Settings.
+A live dashboard at `http://SERVER:7421/` — a chat app for your sessions.
+On desktop the sessions sit in a sidebar, grouped by folder (or machine,
+or not at all), and the open one fills the rest; on a phone the list is
+the home screen and a session fills the screen. **Devices** shows the
+machines of the fleet: health, agent CLIs, plan usage and roots; elsewhere
+a dot per machine shows whether it's online. The page updates over a
+WebSocket as agents start, change state or exit, and follows the device's
+light/dark mode (or the one picked in Settings).
 
 **Viewing needs nothing; managing needs the admin link.** Run `fleet web`
 on the server:
@@ -352,336 +344,154 @@ Admin links for the fleet dashboard on studio (open one once per browser):
     http://localhost:7421/#token=3f9c...
 ```
 
-Open one in the browser you manage the fleet from. Or click **Unlock** (on
-the page, or in Settings) and type (or paste) the fleet key from
-`fleet start --join KEY`, or the admin token from the link: the same key
-unlocks the dashboard of every machine in the fleet, no `fleet web` run
-there needed. That browser can then open sessions, and:
+Open one in the browser you manage the fleet from — or click **Unlock**
+and paste the fleet key (from `fleet start --join KEY`) or the admin token
+from the link; the same key unlocks every machine in the fleet, no
+`fleet web` run there needed. That browser can then:
 
-- **Add folders as roots**: on Devices, a machine's *Add folder* opens a
-  folder picker over its file system. Walk into folders (click, or type to
-  filter and press Enter; Backspace goes up), paste a path, show hidden
-  folders; git repositories and existing roots are marked. *New folder*
-  makes a folder in the one shown and opens it (ticking *Trust*, since a
-  new, empty folder has nothing to run). Then pick a
-  name, optionally limit it to some agents, optionally trust it (see
-  [Folder trust](#folder-trust)) and add the current folder.
-- **Edit roots**: a folder's ✎ opens the picker with its name, path,
-  agent restrictions and trust setting. Save changes directly; running
-  agents are not affected. An existing root in the picker also has an
-  *Edit root* button.
-- **Remove roots** (running agents are not affected).
-- **Run sessions**: start Claude Code, Codex or a shell, follow the
-  conversation, answer the agent, type into it and archive it (see
-  [Sessions in the browser](#sessions-in-the-browser)), on this machine or
-  on other fleets.
-- **See agent CLIs and plan usage per machine**: on Devices, this daemon
-  and every fleet holding the fleet key list Claude Code and Codex:
-  installed or not, and how much of the logged-in account's plan limits
-  (5-hour session, week, ...) is used, with the reset time next to each
-  meter in your local time (full date and time on hover). Each daemon
-  asks the provider at most every 45 s with the token its CLI stored
-  (`~/.claude/.credentials.json`, or the macOS Keychain for Claude;
-  `~/.codex/auth.json`) and never refreshes it.
-- **See how each machine is doing**: each machine on Devices shows its OS,
-  CPU, memory and uptime, then meters for its load (the 1-minute average
-  per CPU), memory, swap and disks (`/`, the home folder, the roots,
-  `~/.fleet`). A meter turns amber at 80% and red at 90% (load: at one and
-  one and a half per CPU); hover a meter for the numbers (`GET /api/host`,
-  also `fleet host`).
-- **Add roots on other machines**: every machine on Devices has its own
-  *Add folder* (see [Several machines](#several-machines-one-dashboard)).
-- **Jump to other fleets**: every other machine on Devices links to its
-  own dashboard. Each fleet has its own admin token: unlock it there with
-  the fleet key, or run `fleet web` there once as well.
+- **Manage folders** — *Add folder* on Devices opens a file picker over a
+  machine's filesystem (walk in, type to filter, paste a path, show hidden
+  folders); existing roots and git repos are marked. *New folder* creates
+  and trusts a folder in one step. A folder's ✎ edits its name, agent
+  restrictions and trust; roots can also be removed. None of this affects
+  agents already running.
+- **Run sessions** — start Claude Code, Codex or a shell, chat with it,
+  answer it, type into it and archive it, on this machine or any other in
+  the fleet (see [Sessions in the browser](#sessions-in-the-browser)).
+- **See plan usage and host health** — Devices lists, per machine, whether
+  Claude Code and Codex are installed and how much of the account's plan
+  limits are used (polled from the provider at most every 45s), plus OS,
+  CPU, memory, swap, disk and load, with a meter that turns amber/red near
+  capacity.
+- **Jump to other fleets** — every other machine on Devices links to its
+  own dashboard, which has its own admin token (unlock it there too).
 
-Changes apply at once, rewrite `config.toml` and show up in the CLI
-(`fleet roots`) and in every open dashboard.
+Changes apply at once, rewrite `config.toml`, and show up in the CLI
+(`fleet roots`) and every open dashboard.
 
 - **The token.** `fleet web` creates `~/.fleet/web-token` (0600) and
-  prints it in the link's `#fragment`, which browsers never send to the
-  server. The page moves it to `localStorage` (per origin) and sends it as
-  an `Authorization: Bearer` header on admin requests; there is no cookie,
-  so other sites cannot make your browser act for them.
-  `fleet web --rotate` replaces it and every browser loses admin rights on
-  its next request (no restart needed). *Sign out* in Settings forgets it
-  in one browser. *Unlock* sends the key typed into it to `POST /api/unlock`,
-  which answers with the admin token (creating it if `fleet web` never
-  ran) when the key is this machine's fleet key or admin token.
+  prints it in the link's fragment, which browsers never send to the
+  server; there's no cookie, so other sites can't act as you. `fleet web
+  --rotate` revokes it everywhere at once (no restart needed); *Sign out*
+  in Settings forgets it in one browser only.
 - **Plain HTTP.** The token crosses the network in the clear on each admin
-  request. Use it on a network you trust, over Tailscale/WireGuard, or keep
-  the dashboard on the server (`web = "127.0.0.1:7421"`) and forward it:
-  `ssh -L 7421:127.0.0.1:7421 studio`.
-- Requests whose `Host` does not name this machine (an IP, `localhost` or
-  its hostname) get 403 (DNS rebinding), the WebSocket only accepts
-  same-origin pages, and a strict Content-Security-Policy is sent.
-- `--web ADDR` or `web` in `config.toml` sets the address, `--web off`
-  disables it. If the port is busy the daemon logs a warning and runs
-  without it. The daemon advertises the dashboard's port in mDNS (TXT
-  `web`) unless it listens on loopback only.
-- **Keys.** **N** starts a session and **/** searches the sessions.
-  **Ctrl+1** through **Ctrl+9** open the first nine live sessions in the
-  sidebar's order, also from the message box. In a session, **Alt+A** (⌥A
-  on a Mac) asks to archive it, or to delete a finished one (Enter
-  confirms, Esc keeps it), and **Ctrl+C** with no text selected
-  interrupts the agent's turn. **Esc** closes a menu, a dialog or the
-  panel, and on a phone goes back. Settings lists them all. On desktop,
-  clicking outside a dialog closes it.
-- Text fields are 16px on phones, so iOS does not zoom in, and dialogs
-  do not pop up the keyboard when they open. The buttons in bars and
-  dialogs are 44px tall there. A session swiped to the right goes back to
-  the list, a row swiped to the left shows *Archive* (or *Delete*);
-  swiped on past half its width, letting go asks right away.
-- Everything is embedded in the binary: the page is plain HTML, CSS and
-  JavaScript in `internal/web/static`, with no build step. `DESIGN.md`
-  records its design (colours, type, spacing, layouts). The daemon serves
-  the files gzipped and with ETags. Over HTTPS (or on localhost) a
-  service worker keeps the page, script and styles, so the dashboard
-  opens without waiting for the network; after a daemon upgrade it fetches
-  them anew and the page reloads itself (at once if it just opened, else
-  the next time it is in the background).
-- The favicon and the home-screen / install icons (with a web app
-  manifest) are drawn from one pixel map in `internal/web/gen_icons.go`;
-  `make icons` redraws them, and the results are committed too. Added to
-  an iPhone's or iPad's home screen, the dashboard opens full screen with
-  a launch screen (the FLEET logo of the header, light or dark as the
-  phone is): iOS needs one image per screen size, orientation and colour
-  scheme, so `make icons` draws 88 of them into `static/splash/` and
-  writes their links into `index.html`. iOS keeps the launch screen it
-  got when the app was added: remove and add it again to see a new one.
+  request. Use a trusted network, Tailscale/WireGuard, or an SSH tunnel
+  (`ssh -L 7421:127.0.0.1:7421 studio`) and keep `web = "127.0.0.1:7421"`.
+- Requests whose `Host` doesn't name this machine get 403 (DNS rebinding
+  protection), the WebSocket only accepts same-origin pages, and a strict
+  Content-Security-Policy is sent.
+- `--web ADDR` / `web` in `config.toml` sets the address, `off` disables
+  it; a busy port just logs a warning and runs without it.
+- **Keys.** **N** starts a session, **/** searches, **Ctrl+1–9** jump to
+  the first nine sessions. In a session, **Alt+A** archives or deletes,
+  **Ctrl+C** (no text selected) interrupts the turn, **Esc** closes a
+  dialog or goes back. Settings lists them all.
+- Installable to a phone's home screen (manifest, launch screens) and
+  cached by a service worker, so the dashboard opens instantly and
+  refreshes itself after a daemon upgrade. Everything is embedded in the
+  binary — no build step (`internal/web/static`; see `DESIGN.md`).
 
 ### Notifications
 
-*Push notifications on this device* in Settings subscribes the browser to
-Web Push: the daemon then sends a notification when one of its agents
-needs input, is done or fails, and tapping it opens that session. *Done* means the agent
-stayed idle for 20 seconds and its session runs no background subagents or
-workflows: those start another turn when they end, so the turns in between
-send nothing. It is the
-standard Push API, so it works with Safari (macOS 13+, and iOS/iPadOS
-16.4+ once the dashboard is added to the Home Screen and opened from
-there), Chrome, Edge and Firefox. No Apple developer account or relay is
-needed: the daemon signs with its own VAPID key (`~/.fleet/push-key`) and
-posts the encrypted message straight to the browser's push service
-(`*.push.apple.com`, FCM, Mozilla), so the server needs outbound HTTPS.
-Subscriptions live in `~/.fleet/push.json`; ones the push service reports
-gone are dropped.
+*Push notifications on this device* (Settings) subscribes the browser to
+Web Push: the daemon sends one when an agent needs input, is done (idle
+20s, no background runs) or fails, and tapping it opens that session.
+Works in Safari (macOS 13+, iOS/iPadOS 16.4+ once added to Home Screen),
+Chrome, Edge and Firefox — no Apple developer account or relay, the daemon
+signs with its own VAPID key (`~/.fleet/push-key`) and posts straight to
+each browser's push service.
 
-Browsers only offer push to **HTTPS** pages (or `localhost`), so the plain
-HTTP port is not enough. With Tailscale, enable HTTPS certificates for the
-tailnet and run `tailscale serve --bg 7421` on the server, then open
-`https://SERVER.TAILNET.ts.net/`. On iPhone: open that URL in Safari,
-Share › Add to Home Screen, open the app, unlock it (a Home Screen app has
-its own storage), and switch notifications on in Settings.
+Browsers only offer push to **HTTPS** pages (or localhost). With
+Tailscale: enable HTTPS certs for the tailnet, `tailscale serve --bg 7421`
+on the server, then open `https://SERVER.TAILNET.ts.net/` — on iPhone, add
+that to the Home Screen first.
 
 ### Usage limits
 
-When a Claude Code or Codex session stops because the account ran out of
-a plan limit (the 5-hour window, the week, ...), the daemon notices, finds
-out when the limit resets, and types `continue` into the session a minute
-after that. Its row says *Usage limit · resumes 22:58*, its session shows
-a *Usage limit reached* bar with **Resume now** and **Turn auto-resume
-off** (per agent; `[limits] auto_resume = false` turns it off for all),
-and a notification says the agent hit the limit.
-
-How it knows: Claude Code writes the refused turn to the transcript with
-the limit and its reset time (`"error":"rate_limit"`, `quotaLimits.resetsAt`).
-Codex writes the window that ran out with its `resets_at` (`token_count`),
-and its refusal (`error`, or the message on the screen). When neither says
-when it resets, the account's usage (the meters on Devices) does. Before typing, the daemon asks the account's usage again
-and waits longer if the limit is still used up; it does nothing while the
-agent is working (Claude Code can wait out a limit by itself), closes a
-dialog first (Esc), and gives up, with a notification, after 3 resumes the
-session did not react to, or 4 limits within an hour.
+When a Claude Code or Codex session stops on a plan limit (5-hour window,
+week, ...), the daemon reads the reset time from the transcript (or, if
+that's missing, the account's usage) and types `continue` a minute after
+it resets. The row shows *Usage limit · resumes 22:58* with **Resume now**
+and **Turn auto-resume off** (or `[limits] auto_resume = false` globally),
+and a notification fires. It does nothing while the agent is still
+working, and gives up — with a notification — after 3 resumes the session
+never reacted to, or 4 limits within an hour.
 
 ### Sessions in the browser
 
-With the admin link, click a session in the sidebar to open its chat;
-sessions that wait on you are also listed on top, under *Needs you*. *New
-session* (or the **N** key, the **+** on a folder's group, or *New session*
-on a machine or folder in Devices, which pick it) starts one:
+Click a session in the sidebar to open its chat; ones waiting on you are
+listed on top under *Needs you*. *New session* (**N**, Ctrl/⌘+K, or a
+folder/machine's **+**) opens the starter: machine (if more than one),
+folder, checkout mode, agent (Claude Code, Codex or shell) with its model
+and effort, then **Start**; *Options* folds sandbox, post-start action,
+name and branch. *New folder* in the folder picker creates and trusts a
+folder anywhere on the machine. Ctrl/⌘+Enter starts; Ctrl/⌘+Shift+Enter
+starts and opens the terminal too.
 
-- **Start**: above the prompt, the machine (when the fleet has more than
-  one), the folder, the checkout and *Options*; under it the agent (Claude
-  Code, Codex or a shell), its model and effort, and *Start*. The prompt
-  is optional; a shell takes none. The folder is the last one a session
-  started in; click it (or Ctrl/⌘+K) for recent folders, the other roots,
-  a search over all of them and the folders inside them, and › to look
-  inside one. A folder starts in the most specific root around it, so
-  `~/app` gets the agents and trust of the root `~/app` even when found
-  through a root `~`. **New folder** (or a search that finds nothing)
-  makes a folder anywhere on the machine, `~/` or an absolute path, adds
-  it as a root, trusted unless unticked, and chooses it (`POST /api/fs`,
-  then `POST /api/roots`). The agent menu shows each agent's plan usage.
-  The launcher remembers the last successfully used provider for each root
-  on each machine, using recent sessions on other browsers and local
-  storage after sessions are removed. If that provider is unavailable or
-  disallowed, it picks an installed provider the root allows.
-  *Model* and *Effort* choose what the agent runs at (Claude Code: Opus,
-  Fable, Sonnet, Haiku at Low to Max or Ultracode; Codex: the models it
-  lists), *default* leaves it to the CLI's own settings; the page remembers
-  the pick per agent. *Checkout* is like `fleet run`'s flags: an own
-  worktree, the folder itself, or auto (a worktree in git repositories).
-  Folded under *Options*, which sums up whatever is not the default:
-  *Sandbox* (Docker or not), *Then* (show the chat, the chat and its
-  terminal, or stay on the page), and an optional *Name* and *Branch*; the
-  page remembers them. Keys: Ctrl/⌘+Enter starts, Ctrl/⌘+Shift+Enter
-  starts and shows the terminal, Ctrl/⌘+K opens the folders, Alt+1–9
-  picks the agent.
-- **Roots**: on Devices, a machine with more than six shows the first six,
-  a filter and *Show all*.
-- **Model and effort.** Under the message box, *model* and *effort* show
-  what the session runs at (read from the transcript: the model of the
-  last reply, or a switch since). In a Claude Code session they switch it,
-  for this session only: the daemon opens `/model` in the terminal, picks
-  the model and effort, and presses `s`, which, unlike Enter or
-  `/model <name>`, does not make them your default for new sessions
-  (`POST /api/agents/{id}/model`). Codex saves any `/model` pick as its
-  default, so a Codex session shows its model and effort without switching.
-- **Chat.** The conversation is read from the transcript the CLI writes
-  (`~/.claude/projects/…/<session>.jsonl` for Claude Code,
-  `~/.codex/sessions/…/rollout-….jsonl` for Codex; in a sandbox, those in
-  the sandbox home). Your messages and the agent's replies are shown, and
-  the tool calls between two of them fold into one line (*Read 3 files,
-  ran a command · 42s*); click it for the calls, and a call for its input
-  and output (an edit as a diff). Messages appear when the CLI has written
-  them, not token by token. The page long-polls
-  (`GET /api/agents/{id}/chat?wait=1`, answered as soon as something
-  changes, else after 8 seconds); *Load earlier messages* pages back
-  through long sessions. After `/clear` the chat follows the new session.
-  The session's title is the one the CLI gave it (Claude Code names its
-  sessions), else the start of its first message (`Agent.title`).
-- **Images.** Images pasted into a message, and those a tool returned (a
-  `Read` of a PNG, a browser screenshot), show in the chat as thumbnails;
-  click one for full size. They stay in the transcript: the page fetches
-  each as it scrolls into view (`GET /api/agents/{id}/image`, the data as
-  JSON). The panel's *Media* tab (the panel opens from the session's
-  header), shown once a session holds an image, has all of them in a grid,
-  newest first, labelled with the file a tool read (or "sent
-  by you"); in the full-size view the arrow keys, a sideways swipe or ‹ ›
-  step through them. It lists them with `GET /api/agents/{id}/media` (the
-  whole transcript, then what follows an offset) and asks again whenever the
-  chat shows a new image. Claude Code only for now.
-- **Videos.** Attach, paste or drop videos into a message or a new
-  session's prompt (any agent CLI, up to five, 4 GB each). Too big to go
-  with the message, each is uploaded to the agent's machine as soon as it
-  is picked, with its progress on its tile (`POST /api/uploads?name=…`,
-  the file as the body, streamed through to another fleet's machine), and
-  the message gets a line `Video: <path>` for the agent to open with its
-  own tools (ffmpeg, say). Uploads live in `<[sandbox] dir>/uploads`,
-  mounted read-only into sandboxes, and are removed after 30 days.
-- **Files.** The panel's *Files* tab lists what the agent made, newest first: the
-  files its tool calls wrote (Claude's Write and Edit, Codex's patches and
-  generated images, wherever they are) and every file of its folder changed
-  since the session started, which also catches what its commands produced
-  (a build, a rendered image). The search box looks through the whole folder
-  (every word must be in the path; `.git`, `node_modules`, virtualenvs,
-  build caches and `target` are skipped). Click a file to see it: images,
-  video and sound play in the page, markdown is rendered, code is
-  highlighted with line numbers; ↓ saves any file up to 16 MB, and *Send
-  to* copies it to another machine of the fleet (into its uploads). The
-  daemon serves only files in the agent's folder (links that lead out of it
-  excepted) or written by it (`GET /api/agents/{id}/files?q=…`,
-  `GET /api/agents/{id}/file?path=…`).
-- **Questions.** When Claude asks you something with choices (its
-  AskUserQuestion tool), the questions show as a form above the message box:
-  pick one option, or several where it allows, type your own answer, add a
-  note, and *Answer*. A message sent while the form shows answers none of
-  them: Claude reads it instead, as with *Chat about this* in the terminal.
-  The dialog stays open in the terminal meanwhile, and whichever you answer
-  first wins. This works through Claude's PermissionRequest hook, which
-  `fleet hook --wait` holds open until the question is answered or gone
-  (`POST /api/agents/{id}/answer`); sessions started before this version,
-  or a question asked while the daemon restarted, fall back to the keys.
-- **Send.** The message box types into the agent's terminal and presses
-  Enter (Enter sends, Shift+Enter is a new line; text with several lines
-  goes in as one paste). While the agent works, Claude Code and Codex queue
-  it.
-- **Send images.** Attach images with the paperclip, by pasting them
-  into the message box or by dropping them on the chat (up to 10 per
-  message). They go with the next message: the daemon saves each in the
-  agent's state dir and pastes its path, which Claude Code and Codex turn
-  into `[Image #n]`. Photos over 2000 px are scaled down in the browser
-  first; formats the agents cannot read (HEIC) become JPEG. From the CLI:
-  `fleet send <agent> --image a.png --image b.png "what changed?"`.
-- **Stop a turn.** While the agent works or waits on a dialog, *Stop*
-  beside *Send* interrupts its turn as Esc in its terminal does; so does
-  Ctrl+C (with no text selected) in the session. The agent keeps running
-  and waits for your next message. The daemon marks the agent idle once
-  its transcript records the interruption. From the CLI:
-  `fleet interrupt <agent>`.
-- **Terminal and keys.** Permission prompts, folder trust and menus are
-  not part of the transcript. While the agent waits on one, a card above
-  the message box shows the bottom of its terminal with keys to answer:
-  Esc, arrows, Tab, Enter, 1-6 and Ctrl-C (the keyboard button in the
-  message box shows them too). The panel's *Terminal* tab, or the
-  terminal button in the header, shows the whole screen as text
-  (refreshed every 1.5 seconds). For the full terminal, `fleet attach`
-  still works.
-- **Pull requests.** When an agent opens a pull request (`gh pr create`),
-  its row and its session's header get a chip (*#12 open*), a push notification
-  says so, and the header's git button lists each pull request: its state,
-  checks, review and size, and *Merge* (pick squash / merge / rebase as the
-  repository allows, optionally delete the branch, click again to
-  confirm). The
-  daemon looks pull requests up and merges them with `gh` on its host, so
-  that `gh` must be logged in. Same from the CLI: `fleet prs`, `fleet merge`.
-- **Git.** The session's header shows its checkout's branch with what it
-  has to push (↑) and pull (↓) and its uncommitted files; click it for the
-  details against its upstream and the remote's default branch, the last
-  commit, and *Fetch*, *Pull* (fast-forward, rebase or merge; from the
-  upstream, or from `origin/main` for a branch never pushed) and *Push*
-  (sets the upstream; a branch that diverged gets a *Force push* with
-  lease, click again to confirm). Pulling waits until the agent is idle,
-  and a merge or rebase that conflicts is aborted. Git runs on the daemon
-  host with that user's credentials and never prompts. Same from the CLI:
-  `fleet git <agent> [fetch|pull|push]`.
-- **Notes.** The note button on a session's row (on hover) or in its
-  header leaves a note on it, e.g. "customer is testing the preview, keep
-  it open". It shows under the row and as a bar under the session's
-  header, where *Edit* changes or removes it; Enter saves, Shift+Enter
-  starts a new line. Notes stay with the agent in *Archived* and across
-  daemon restarts. Same from the CLI: `fleet note <agent> [text]`.
-- **Archive** (in the header's ⋯ menu, Alt+A, or a row swiped to the left
-  on a phone) asks first, then ends the agent like `fleet kill` (the
-  worktree is kept) and moves the session to *Archived* at the bottom of
-  the sidebar, where its chat stays readable; *Delete* removes a finished
-  one. On a phone the session fills the screen and goes back to the list
-  with the arrow at the top left.
-- **Workflows.** When Claude Code runs a workflow (its Workflow tool: a
-  script that starts many subagents in phases, in the background), the
-  agent's row shows each run going on: its name, phase and a bar per
-  subagent (a finished run stays for 10 minutes). The Workflow call in the
-  chat is a card with the run's phases and the subagents at work, and
-  *Open run* opens it in the panel's *Workflow* tab. There each run is a
-  card: its phases side by side, then every subagent by phase with what it
-  does right now (its latest tool call), its tool calls, tokens and time;
-  once the run ended, the script's log and its result (JSON shown as
-  sections, text as markdown), or the error it failed with. Click a
-  subagent for its whole conversation, read-only (Esc or ‹ goes back).
-  The tab long-polls (`GET /api/agents/{id}/workflows?wait=1`); the list
-  asks `GET /api/workflows` every 3 seconds, on every joined machine.
+Once a session is open:
 
-The agent's hooks tell the daemon where its transcript is; fleet only
-reads transcripts inside the CLI's own transcript folder (and, for
-sandboxed agents, inside the sandbox home), so a sandboxed agent cannot
-point the dashboard at other files on the server. Agents started before
-this version are found by their session id.
+- **Chat** — messages are read straight from the transcript the CLI
+  itself writes, so nothing here is reinterpreted; tool calls between two
+  messages fold into one line (*Read 3 files, ran a command · 42s*) you
+  can expand for inputs and outputs (edits as a diff).
+- **Images** — pasted into a message, or returned by a tool (a file read,
+  a screenshot), show as thumbnails; the panel's *Media* tab collects them
+  all (Claude Code only, for now).
+- **Videos** — attach, paste or drop into a message or a new session's
+  prompt (any agent, up to 5, 4 GB each); large ones upload in the
+  background with progress shown, and the agent gets a `Video: <path>` to
+  open with its own tools.
+- **Files** — the panel's *Files* tab lists what the agent wrote and what
+  else changed in its folder, newest first, with a search box; click one
+  to preview (images/video/audio play, markdown renders, code is
+  highlighted), save it, or send it to another machine in the fleet.
+- **Questions** — Claude's AskUserQuestion shows as a form above the
+  message box: pick an option (or several, where allowed), type your own,
+  add a note. Sending a chat message instead has Claude read it, same as
+  *Chat about this* in the terminal.
+- **Send** — types into the terminal and presses Enter (Shift+Enter for a
+  new line); Claude Code and Codex queue it while the agent is working.
+- **Send images** — paperclip, paste or drop (up to 10 per message); large
+  photos are scaled down and HEIC becomes JPEG automatically. From the
+  CLI: `fleet send <agent> --image a.png "what changed?"`.
+- **Stop a turn** — *Stop* (or Ctrl+C with no text selected) interrupts
+  like Esc in the terminal; the agent keeps running. CLI: `fleet interrupt
+  <agent>`.
+- **Terminal** — permission prompts, trust dialogs and menus aren't part
+  of the transcript, so a card above the message box shows the terminal's
+  tail with answer keys (Esc, arrows, Tab, Enter, 1-6, Ctrl-C) whenever one
+  is up; the panel's *Terminal* tab shows the whole screen. `fleet attach`
+  still works for the full thing.
+- **Pull requests** — when an agent opens one (`gh pr create`), a chip
+  (*#12 open*) appears on its row and header, a notification fires, and
+  the git button lists state, checks, review, size and **Merge** (pick
+  squash/merge/rebase, optionally delete the branch). CLI: `fleet prs`,
+  `fleet merge`.
+- **Git** — the header shows the checkout's branch, ahead/behind counts
+  and uncommitted files; click it for *Fetch*, *Pull* (fast-forward,
+  rebase or merge) and *Push* (force-with-lease if it diverged). Runs on
+  the daemon host with that user's git credentials. CLI: `fleet git
+  <agent> [fetch|pull|push]`.
+- **Notes** — leave a note on a session (e.g. "customer is testing the
+  preview, keep it open") from its row or header; survives archiving and
+  restarts. CLI: `fleet note <agent> [text]`.
+- **Archive** (header menu, Alt+A, or a left swipe on a phone) ends the
+  agent like `fleet kill` (keeping the worktree) and moves it to
+  *Archived*, chat still readable; *Delete* removes a finished one.
+- **Workflows** — a Claude Code Workflow run (many subagents in phases, in
+  the background) shows live on the agent's row and as a card in the chat;
+  *Open run* shows every subagent's phase, current tool call, tokens and
+  time in the panel's *Workflow* tab, and the script's result once it ends.
 
-Claude Code keeps a workflow run next to the session's transcript
-(`<session>/subagents/workflows/<run>/`: a journal of the agents started
-and finished, and each agent's transcript; the script in
-`<session>/workflows/scripts/`). How a run ended is in the session's
-transcript; the whole result and the script's log are in the task's output
-file under `/tmp/claude-<uid>/`, which fleet reads only at the exact path
-of that session and task. Symlinks there are not followed. Fleet reads
-each of these files once and then only what is appended, so following a
-run with dozens of agents costs a few hundred microseconds a poll.
+fleet only ever reads transcripts inside the CLI's own transcript folder
+(or, for sandboxed agents, inside the sandbox home), so an agent can't
+point the dashboard at other files on the server.
 
-### Several machines, one dashboard
+## Several machines, one dashboard
 
-Machines that hold the same **fleet key** manage each other's roots, and
-run each other's agents, from their dashboards. `fleet web` prints the command for the other machines:
+Machines holding the same **fleet key** manage and run each other's
+agents from any of their dashboards. `fleet web` prints the join command
+for the others:
 
 ```
 To manage other machines from this dashboard, start fleet on them with:
@@ -689,180 +499,146 @@ To manage other machines from this dashboard, start fleet on them with:
     fleet start --join 5b1e...
 ```
 
-Run it once on each machine (it starts fleet there if needed, and only
-stores the key if fleet already runs). From then on, the dashboard of any
-of them lists the sessions of all of them (tagged with their machine, or
-grouped by it; polled every 4 seconds), starts sessions on any of them,
-and can browse and add roots on all of them from Devices. A machine
-without the key shows up there as *not in this fleet yet*, with the
-command to copy; the page notices when it has been run. No pairing is
-needed for this: pairing (`fleet pair`) is only for the fleet CLI and
-native apps talking to a daemon over TLS.
+Run it once per machine (starts fleet there if needed; only stores the key
+if fleet already runs). From then on, any of their dashboards lists all of
+their sessions, starts sessions on any of them, and browses/adds roots on
+all of them from Devices — found via mDNS on the LAN and, with
+[Tailscale](https://tailscale.com) running, across the tailnet too (their
+dashboard must be reachable on its LAN or tailnet address). No pairing is
+needed for this; `fleet pair`/`connect` is only for the CLI and native
+apps talking to a daemon over TLS.
 
-The dashboard finds the other machines with mDNS on the LAN and, when
-[Tailscale](https://tailscale.com) runs, on the tailnet: mDNS does not
-cross Tailscale, so every 10 seconds it lists the online machines with
-`tailscale status --json` (the `tailscale` CLI on `PATH`, or the one in
-the macOS app) and asks each for `GET /api/hello` on this dashboard's port
-and 7421. A machine on both is listed once, LAN addresses first. Their
-dashboard must listen on the tailnet (the default `0.0.0.0:7421` does) and
-be reachable through its firewall.
+How it works: the browser only ever talks to the dashboard it opened. That
+daemon asks another one for a nonce and signs the request with the fleet
+key (HMAC over the target's server id, the nonce, method, path and body) —
+the key itself never crosses the network, and a signature is only good for
+one request to one daemon. Only folder listings, adding/removing roots and
+the session routes are forwarded.
 
-How it works: the browser only talks to the dashboard it opened, with that
-machine's admin token. That daemon asks the other one for a nonce and sends
-the request signed with the key (HMAC-SHA256 over the target's server id,
-the nonce, the method, the path and the body). The key never crosses the
-network, a signature is good for one request to one daemon, and a machine
-that only pretends to be a fleet learns nothing it can use. Only folder
-listings, adding or removing roots, and the session routes (list, start,
-chat, images, screen, input, answers, model, stop, workflows) are
-forwarded.
-
-- The key lives in `~/.fleet/fleet-key` (0600). `fleet web --rotate` does
-  not change it. For a new key, delete the file and run `fleet web`
-  again, then join the other machines again.
-- The key is a password for all machines at once: whoever has it, or the
-  admin token of any member, can add roots, list folders, read agent
-  conversations and start agents (a shell included) on every member. Treat
-  it like an SSH key that opens all of them.
-- The other machines' dashboards must be reachable from this one (the
-  `web` port on their LAN address).
+- The key lives in `~/.fleet/fleet-key` (0600); `fleet web --rotate`
+  doesn't change it. For a new key, delete the file, run `fleet web`
+  again, and rejoin every machine.
+- The key is a password for the whole fleet: whoever has it, or any
+  member's admin token, can add roots, read conversations and start a
+  shell on every machine holding it. Treat it like an SSH key that opens
+  all of them.
+- Inter-daemon requests are signed but sent over plain HTTP, so folder
+  listings, conversations and what you type can be read on the wire.
 
 ## How tmux is used, and how cleanup works
 
-- The daemon uses its own tmux server, `tmux -L fleet`, never your default
-  one. Each agent is the only pane of a session named `fleet-<agent id>`.
-  On the server you can look at them directly:
-  `tmux -L fleet ls`, `tmux -L fleet attach -t fleet-a1b2c3`.
-- Sessions are created with `remain-on-exit on`, so when an agent exits,
-  its pane stays around long enough for the daemon to read the exit status
-  (or the killing signal) and the last lines of output.
-- A reconcile loop checks tmux every second. It records dead panes as
-  EXITED (or FAILED, if the agent died with an error within about 3 seconds
-  of starting) and then **kills the session**. Sessions that vanished are
-  marked EXITED. Killing an agent kills its session right away.
-- `exit-empty on`: when the last fleet session is gone, the tmux server
-  exits.
-- When the daemon starts, it re-adopts every agent whose session still
-  exists and **kills every `fleet-*` session it has no record of**. Agents
-  keep running while the daemon is stopped or restarted.
-- Attaching (from the CLI or an app) starts a tmux client in a PTY on the
-  server and streams it; detaching kills only that client.
-- Two daemons with different `FLEET_HOME`s get different sockets by
-  default, so they do not reap each other's sessions.
+- The daemon runs its own tmux server, `tmux -L fleet`, never your default
+  one. Each agent is the only pane of a session named `fleet-<agent id>`;
+  inspect directly with `tmux -L fleet ls` / `attach -t fleet-a1b2c3`.
+- Sessions are created with `remain-on-exit on`, so a dead agent's pane
+  stays around long enough for the daemon to read its exit status and last
+  output.
+- A reconcile loop checks tmux every second: it records dead panes as
+  EXITED (or FAILED, if the agent died with an error within ~3s of
+  starting) and kills the session. A vanished session is marked EXITED.
+  Killing an agent kills its session right away.
+- `exit-empty on`: the tmux server itself exits once the last fleet
+  session is gone.
+- On startup, the daemon re-adopts every agent whose session still exists
+  and **kills every `fleet-*` session it has no record of**. Agents keep
+  running while the daemon is stopped or restarted.
+- Attaching starts a tmux client in a PTY and streams it; detaching kills
+  only that client.
+- Different `FLEET_HOME`s get different tmux sockets by default, so they
+  don't reap each other's sessions.
 
 ## Folder trust
 
 Claude Code and Codex ask "Do you trust this folder?" the first time they
 start in a project. Nothing reports that prompt through hooks, so fleet
-watches the screen of each starting agent: while the prompt is up the agent
-is `needs input` with a note saying so, until someone answers it in the
-agent's terminal (`fleet attach`). Codex's "Hooks need review" prompt is
-reported the same way.
+watches the screen of a starting agent: while the prompt is up the agent
+is `needs input` with a note saying so, until it's answered in the
+terminal (`fleet attach`). Codex's "Hooks need review" prompt is handled
+the same way.
 
 A root added with `--trust` (`trust = true` in `config.toml`) skips the
-prompt. Before starting an agent there, fleet records the trust the way the
-CLI would if you had answered yes. The trusted folder is the agent's git
-repository (the main checkout, which also covers its worktrees) or, outside
-git, the agent's folder:
+prompt — before starting an agent there, fleet records the trust the way
+the CLI would if you'd answered yes yourself:
 
 - **Claude Code**: fleet sets `hasTrustDialogAccepted` for that folder in
-  `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`). It takes the
-  lock Claude uses for that file, so running sessions keep their changes.
-  The entry stays, as it would after answering yes yourself.
+  `~/.claude.json` (or `$CLAUDE_CONFIG_DIR/.claude.json`), taking the same
+  lock Claude uses, so running sessions keep their changes.
 - **Codex**: fleet passes `-c projects={"<folder>"={trust_level="trusted"}}`
-  for that launch only. `~/.codex/config.toml` is not changed.
+  for that launch only; `~/.codex/config.toml` is never changed.
 
-Trusting a parent folder is not enough for either CLI: both look only at
-the repository (or folder) itself. That is why fleet trusts each
-repository as it is used, not the root. A trusted project may run its own
-hooks, MCP servers and settings, so only use `--trust` for roots that hold
-  code you trust. Existing roots can be edited in the dashboard, or in
-  `config.toml` (then restart the daemon).
+Trust follows the git repository (the main checkout, covering its
+worktrees) or, outside git, the agent's folder — not the root above it,
+since neither CLI looks further up. A trusted project can run its own
+hooks, MCP servers and settings, so only use `--trust` for roots you
+actually trust. Existing roots can be edited in the dashboard or in
+`config.toml` (then restart the daemon).
 
 ## Security model
 
 What protects the daemon:
 
-- **Transport.** Remote clients talk TLS 1.3 to a self-signed certificate.
-  Clients pin the SHA-256 of that certificate (the server id), learned
-  during pairing.
-- **Pairing.** `fleet pair` creates a code of 8 Crockford-base32 characters
-  (40 bits). It is single use, lives at most 5 minutes, dies after 5 wrong
-  attempts, and is replaced by the next `fleet pair`. The client proves it
-  knows the code with an HMAC bound to the certificate it saw and to its
-  device key; the daemon proves it knows the code back.
-- **Authentication.** Each device has an Ed25519 key and signs a fresh
-  per-connection nonce plus the certificate hash. Revoking a device
-  (`fleet devices revoke`) closes its connections and it must pair again.
-- **Local socket.** `~/.fleet/fleet.sock` is mode 0600: any process of the
-  same Unix user has full access without pairing.
-- **Web dashboard.** Anyone who can reach its port sees agents, paths,
-  roots and devices. Everything else needs the admin token from `fleet
-  web`, which *unlock* also hands out for the fleet key (see
-  [Web dashboard](#web-dashboard)): changing roots, listing
-  folders, reading conversations and terminal screens, and starting,
-  typing into and stopping agents. Like a paired device, the admin token
-  is a shell on the server. Machines holding the same fleet key accept
-  each other's signed requests for the same actions.
+- **Transport** — TLS 1.3 to a self-signed certificate, pinned by its
+  SHA-256 (the server id) during pairing.
+- **Pairing** — `fleet pair` makes an 8-character, single-use code (40
+  bits, 5-minute lifetime, dies after 5 wrong attempts, replaced by the
+  next `fleet pair`). The client proves it knows the code with an HMAC
+  bound to the certificate and its device key; the daemon proves the same
+  back.
+- **Authentication** — each device has an Ed25519 key and signs a fresh
+  per-connection nonce plus the certificate hash. `fleet devices revoke`
+  closes its connections right away and it must pair again.
+- **Local socket** — `~/.fleet/fleet.sock` is mode 0600: any process of
+  the same Unix user has full access, no pairing needed.
+- **Web dashboard** — read-only to anyone who can reach the port; the
+  admin token (or the fleet key, via *Unlock*) is needed to change roots,
+  read conversations/terminals, or start and control agents. Machines
+  holding the same fleet key accept each other's signed requests for the
+  same actions.
 
 Honest limits:
 
-- **A paired device has full control, which means a shell on the server.**
-  There are no per-device permissions in v1. Any paired device can run the
-  `shell` adapter, pass arbitrary extra arguments to agent CLIs (including
-  flags that disable their permission prompts), type into any agent, add
-  roots, pair more devices and revoke others. Pair only devices you would
-  give an SSH login to.
-- **Roots restrict where agents start, not what they can touch.** An agent
-  runs as the daemon's user with that user's full permissions and
-  environment (the claude adapter only removes `ANTHROPIC_API_KEY` and
-  `CLAUDECODE`). It can read and write anything that user can, anywhere,
-  unless it runs in a Docker sandbox (`--docker`), which confines it to
-  its checkout and a home directory of its own.
-- **A sandboxed agent can still reach the network,** and it can write the
-  repository's git objects and refs (it commits). It cannot write
-  `.git/config` or `.git/hooks`, but it could, for example, add a
-  `.git/commondir` file to a pinned repository that points git on the host
-  at a config it wrote. Treat a sandboxed agent's repository like one you
-  cloned from a stranger until you have looked at it.
-- **`[sandbox] auth` hands your login to the agent.** A sandboxed agent
-  with the server's Claude or Codex credentials can use them like you, also
-  from outside the container. Leave it off when you run code you do not
-  trust.
-- **`--clone` uses the daemon's git credentials.** Any paired device can
+- **A paired device, or the admin token, is a shell on the server.** No
+  per-device permissions in v1 — any of them can run the `shell` adapter,
+  pass arbitrary flags to agent CLIs (including ones that disable their
+  own permission prompts), add roots, pair more devices and revoke others.
+  Only pair devices, or hand out the admin token, as you would an SSH login.
+- **Roots restrict where agents start, not what they can touch.** Outside
+  Docker, an agent runs as the daemon's user with that user's full
+  permissions and environment (the claude adapter only strips
+  `ANTHROPIC_API_KEY` and `CLAUDECODE`).
+- **A sandboxed agent can still reach the network,** and can write the
+  repository's git objects and refs (it commits). It can't write
+  `.git/config` or `.git/hooks` directly, but could, say, add a
+  `.git/commondir` pointing git on the host at a config it wrote. Treat a
+  sandboxed agent's repository like one cloned from a stranger.
+- **`[sandbox] auth` hands your login to the agent** — including from
+  outside the container. Leave it off for code you don't trust.
+- **`--clone` uses the daemon's git credentials** — any paired device can
   make the daemon clone anything those credentials can read.
-- **The pairing code is short.** The proof is an HMAC keyed with a 40-bit
-  code. An active man in the middle on the LAN who captures a pairing
-  exchange during the code's 5-minute window can brute-force the code
-  offline and then pair with the real daemon. The defence is the
-  fingerprint check: `fleet connect` refuses to send the proof until the
-  server fingerprint matches `--fingerprint` or the user confirmed it, and
-  native apps must do the same. That check only helps if people actually
-  compare the fingerprint. **Pair on a trusted network**, and compare the
-  fingerprint. A PAKE bound to both certificates would remove this attack;
-  it needs protocol v2.
-- **mDNS and `/api/hello` are unauthenticated.** Anyone on the LAN, or
-  on the tailnet, can claim to be a daemon. Pinning makes this harmless for paired servers; during pairing
-  the fingerprint check is what stops it.
-- **The web admin token travels over plain HTTP.** Someone who can sniff
-  the LAN can capture it from a browser's admin request and then do
-  anything the daemon's user can: start a shell agent, read conversations,
-  add roots (with trust) and list every folder.
-  Rotate it with `fleet web --rotate`, and bind the dashboard to
-  `127.0.0.1` on networks you do not trust. Unlocking a dashboard sends
-  the fleet key over the wire in the clear, once; unlike the token, a
-  captured fleet key can only be replaced by joining every machine again
-  (delete `~/.fleet/fleet-key`, `fleet web`, `fleet start --join` on the
-  others). With a fleet key, that token
-  reaches every machine in the fleet through this dashboard. The requests
-  between daemons are signed but also plain HTTP, so folder listings,
-  conversations and what you type can be read on the wire.
+- **The pairing code is short.** An active man-in-the-middle who captures
+  a pairing exchange within its 5-minute window could brute-force it
+  offline and then pair for real. The actual defence is the fingerprint
+  check: `fleet connect` refuses to send its proof until the server
+  fingerprint matches `--fingerprint` or is confirmed, and native apps must
+  do the same — but only if people actually compare it. **Pair on a
+  trusted network**, and compare the fingerprint. A PAKE bound to both
+  certificates would remove this attack; it needs protocol v2.
+- **mDNS and `/api/hello` are unauthenticated.** Anyone on the LAN or
+  tailnet can claim to be a daemon; pinning makes this harmless once
+  paired — the fingerprint check is what matters during pairing.
+- **The web admin token travels over plain HTTP,** sniffable on the LAN,
+  and gives anyone who captures it the same access as the daemon's user.
+  Rotate it with `fleet web --rotate`, and bind to `127.0.0.1` on networks
+  you don't trust. Unlocking a dashboard sends the fleet key over the wire
+  once, in the clear; a captured fleet key can only be replaced by
+  rejoining every machine (delete `~/.fleet/fleet-key`, `fleet web`,
+  `fleet start --join` on the others). Inter-daemon requests are signed
+  but also plain HTTP.
 - **The device key is the credential.** Whoever copies
-  `~/.fleet/identity/device.key` (or an app's key) has that device's access
-  until it is revoked.
-- **LAN only.** Do not expose the listen port to the internet. Use a VPN
-  such as WireGuard or Tailscale if you need remote access.
+  `~/.fleet/identity/device.key` (or an app's key) has that device's
+  access until it's revoked.
+- **LAN only.** Don't expose the listen port to the internet; use a VPN
+  such as WireGuard or Tailscale for remote access.
 
 ## Adapters
 
