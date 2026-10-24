@@ -65,6 +65,7 @@ message ClientMessage {
     GitRequest git = 38;
     SetNoteRequest set_note = 39;
     InterruptAgentRequest interrupt_agent = 44;
+    EditQueueRequest edit_queue = 45;
 
     // Terminal streaming
     AttachRequest attach = 40;
@@ -115,6 +116,7 @@ message ServerMessage {
     GitResponse git = 38;
     SetNoteResponse set_note = 39;
     InterruptAgentResponse interrupt_agent = 44;
+    EditQueueResponse edit_queue = 45;
 
     AttachResponse attach = 40;
     // Pushed while attached (id 0).
@@ -506,6 +508,20 @@ message Agent {
   // Code's) once it wrote one, else the start of the first message;
   // empty before any message.
   string title = 25;
+  // Messages the user queued for the agent, next first: the daemon types
+  // the next one in once the agent finished its turn and nothing runs in
+  // its background. See EditQueueRequest.
+  repeated QueuedMessage queue = 26;
+  // The queue waits instead: an interrupted turn pauses it.
+  bool queue_paused = 27;
+}
+
+// A message waiting in an agent's queue.
+message QueuedMessage {
+  // Unique within the agent's queue.
+  string id = 1;
+  string text = 2;
+  int64 added_at_ms = 3;
 }
 
 // GitStatus is the git state of an agent's checkout. The daemon reads it
@@ -768,6 +784,25 @@ message SetNoteRequest {
   string note = 2;
 }
 message SetNoteResponse {
+  Agent agent = 1;
+}
+
+// Adds a message to an agent's queue (Agent.queue), removes one, or
+// pauses or resumes the queue. The agent must be live.
+message EditQueueRequest {
+  // Agent id or name.
+  string agent = 1;
+  oneof op {
+    // Appends a message: trimmed, at most 10000 characters, at most 50
+    // messages queued.
+    string add = 2;
+    // Removes the message with this id.
+    string remove = 3;
+    // Pauses (true) or resumes (false) the queue.
+    bool paused = 4;
+  }
+}
+message EditQueueResponse {
   Agent agent = 1;
 }
 

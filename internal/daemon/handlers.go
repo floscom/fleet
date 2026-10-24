@@ -163,6 +163,12 @@ func (c *conn) dispatch(id uint64, m *fleetv1.ClientMessage) error {
 			return err
 		}
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_Git{Git: r}})
+	case *fleetv1.ClientMessage_EditQueue:
+		a, err := d.agents.editQueue(msg.EditQueue)
+		if err != nil {
+			return err
+		}
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_EditQueue{EditQueue: &fleetv1.EditQueueResponse{Agent: a}}})
 	case *fleetv1.ClientMessage_SetNote:
 		a, err := d.agents.setNote(msg.SetNote.GetAgent(), msg.SetNote.GetNote())
 		if err != nil {

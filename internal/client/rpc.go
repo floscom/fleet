@@ -91,6 +91,14 @@ func (c *Client) SetNote(ctx context.Context, agent, note string) (*fleetv1.Agen
 	return r.GetAgent(), err
 }
 
+// EditQueue adds a message to an agent's queue, removes one, or pauses or
+// resumes the queue, and returns the agent.
+func (c *Client) EditQueue(ctx context.Context, in *fleetv1.EditQueueRequest) (*fleetv1.Agent, error) {
+	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_EditQueue{EditQueue: in}},
+		(*fleetv1.ServerMessage).GetEditQueue)
+	return r.GetAgent(), err
+}
+
 // SendText types text into an agent's terminal, pressing Enter if submit.
 func (c *Client) SendText(ctx context.Context, agent, text string, submit bool) error {
 	_, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_SendText{SendText: &fleetv1.SendTextRequest{Agent: agent, Text: text, Submit: submit}}},

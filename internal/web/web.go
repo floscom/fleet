@@ -124,6 +124,10 @@ type Source interface {
 	SetAutoResume(ctx context.Context, agent string, auto *bool, now bool) (*fleetv1.Agent, error)
 	// SetNote sets or ("") clears the note on an agent and returns it.
 	SetNote(agent, note string) (*fleetv1.Agent, error)
+	// EditQueue adds a message to a live agent's queue, removes one, or
+	// pauses or resumes the queue, and returns the agent
+	// (fleetv1.EditQueueRequest).
+	EditQueue(req *fleetv1.EditQueueRequest) (*fleetv1.Agent, error)
 	// MergePull merges a pull request an agent created and returns it
 	// after (fleetv1.MergePullRequestRequest).
 	MergePull(ctx context.Context, req *fleetv1.MergePullRequestRequest) (*fleetv1.PullRequest, error)
@@ -431,6 +435,17 @@ type Agent struct {
 	Note string `json:"note"`
 	// Title is the conversation's title, "" before its first message.
 	Title string `json:"title"`
+	// Queue is what the user queued for it, next first; QueuePaused holds
+	// it (after Stop).
+	Queue       []QueuedMessage `json:"queue"`
+	QueuePaused bool            `json:"queuePaused"`
+}
+
+// QueuedMessage is a message in an agent's queue (fleetv1.QueuedMessage).
+type QueuedMessage struct {
+	ID        string `json:"id"`
+	Text      string `json:"text"`
+	AddedAtMs int64  `json:"addedAtMs"`
 }
 
 // GitStatus is the git state of an agent's checkout (fleetv1.GitStatus).
@@ -539,6 +554,11 @@ func agentOf(a *fleetv1.Agent) Agent {
 		Git:             gitOf(a.Git),
 		Note:            a.Note,
 		Title:           a.Title,
+		Queue:           make([]QueuedMessage, 0, len(a.Queue)),
+		QueuePaused:     a.QueuePaused,
+	}
+	for _, q := range a.Queue {
+		out.Queue = append(out.Queue, QueuedMessage{ID: q.Id, Text: q.Text, AddedAtMs: q.AddedAtMs})
 	}
 	for _, p := range a.PullRequests {
 		out.PullRequests = append(out.PullRequests, pullOf(p))

@@ -159,6 +159,11 @@ func (s *webSource) SetNote(agent, note string) (*fleetv1.Agent, error) {
 	return a, webError(err)
 }
 
+func (s *webSource) EditQueue(req *fleetv1.EditQueueRequest) (*fleetv1.Agent, error) {
+	a, err := s.d.agents.editQueue(req)
+	return a, webError(err)
+}
+
 func (s *webSource) MergePull(ctx context.Context, req *fleetv1.MergePullRequestRequest) (*fleetv1.PullRequest, error) {
 	p, err := s.d.agents.mergePull(ctx, req)
 	return p, webError(err)

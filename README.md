@@ -130,6 +130,7 @@ address. Without it, commands talk to the local daemon.
 | `fleet send <agent> [text...] [--image FILE]... [--no-enter]` | Type text into an agent's terminal and press Enter; `--image` attaches image files first. |
 | `fleet interrupt <agent>...` | Interrupt the turn agents are working on, as Esc does; they keep running. |
 | `fleet kill <agent>... [--rm-worktree] [--force] [--forget]` | Stop agents; optionally remove their worktree or clone and history entry. |
+| `fleet queue add\|ls\|rm\|pause\|resume <agent> ...` | Queue messages for an agent; the daemon sends the next one each time it finishes a turn. |
 | `fleet note <agent> [text...] [-d]` | Leave a note on an agent (e.g. why it must stay open), shown on its dashboard row and in `fleet ls`; without text prints it, `-d` removes it. |
 | `fleet sandbox build [--pull] [--tag T]` / `sandbox dockerfile` | Build the Docker image sandboxed agents run in (on the server) / print its Dockerfile. |
 | `fleet watch` | Print agent state changes as they happen. |
@@ -457,6 +458,11 @@ Once a session is open:
 - **Stop a turn** — *Stop* (or Ctrl+C with no text selected) interrupts
   like Esc in the terminal; the agent keeps running. CLI: `fleet interrupt
   <agent>`.
+- **Queue** — the queue button beside *Send* (or Alt/⌥+Enter) lines a
+  message up instead; the daemon sends the next one each time the agent
+  finishes a turn with no subagent or workflow left running, even with
+  the dashboard closed. × removes one; *Stop* pauses the queue, *Resume*
+  continues. Images can't be queued. CLI: `fleet queue add <agent> <text>`.
 - **Terminal** — permission prompts, trust dialogs and menus aren't part
   of the transcript, so a card above the message box shows the terminal's
   tail with answer keys (Esc, arrows, Tab, Enter, 1-6, Ctrl-C) whenever one

@@ -17,6 +17,7 @@ package web
 //	POST /api/agents/{id}/answer      answer the questions it asks
 //	POST /api/agents/{id}/model       switch its model and/or effort
 //	POST /api/agents/{id}/note        set or clear the note on it
+//	POST /api/agents/{id}/queue       add a message to its queue, remove one, pause or resume it
 //	POST /api/agents/{id}/merge       merge a pull request it created
 //	POST /api/agents/{id}/git         read, fetch, pull or push its checkout
 //	POST /api/agents/{id}/stop        kill it; forget drops it from the list too
@@ -326,6 +327,37 @@ func (s *Server) apiNote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a, err := s.opts.Source.SetNote(r.PathValue("id"), *req.Note)
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]Agent{"agent": agentOf(a)})
+}
+
+// apiQueue edits an agent's queue: {"add": text} queues a message,
+// {"remove": id} drops one, {"paused": bool} pauses or resumes it.
+func (s *Server) apiQueue(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Add    *string `json:"add"`
+		Remove *string `json:"remove"`
+		Paused *bool   `json:"paused"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	in := &fleetv1.EditQueueRequest{Agent: r.PathValue("id")}
+	switch {
+	case req.Add != nil && req.Remove == nil && req.Paused == nil:
+		in.Op = &fleetv1.EditQueueRequest_Add{Add: *req.Add}
+	case req.Remove != nil && req.Add == nil && req.Paused == nil:
+		in.Op = &fleetv1.EditQueueRequest_Remove{Remove: *req.Remove}
+	case req.Paused != nil && req.Add == nil && req.Remove == nil:
+		in.Op = &fleetv1.EditQueueRequest_Paused{Paused: *req.Paused}
+	default:
+		writeError(w, http.StatusBadRequest, "one of add, remove or paused is required")
+		return
+	}
+	a, err := s.opts.Source.EditQueue(in)
 	if err != nil {
 		s.writeSourceError(w, err)
 		return

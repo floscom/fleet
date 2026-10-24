@@ -939,6 +939,24 @@ effort the adapter does not offer);
 - Errors: `INVALID_ARGUMENT` (empty `agent`, more than 500 characters,
   not UTF-8); `NOT_FOUND`.
 
+**`EditQueueRequest{agent, add | remove | paused}` → `EditQueueResponse{agent}`**
+
+- `Agent.queue` are messages the user queued for a live agent, next
+  first. The daemon types the next one into the agent's session (then
+  Enter) once the agent is done with its turn: IDLE for a few seconds,
+  no dialog, no usage limit, no workflow or subagent running in its
+  background, and no dialog on its screen. Then it waits for that turn
+  to end. A message is taken off the queue as it is typed in.
+- `add` appends a message (trimmed; at most 10000 characters and 50
+  messages); `remove` drops the message with that id; `paused` pauses or
+  resumes the queue (`Agent.queue_paused`). `InterruptAgentRequest`
+  pauses a queue that is not empty; an empty queue is never paused. The
+  queue is kept across daemon restarts. A change comes as an
+  `agent_upserted` event; `updated_at_ms` stays as it was.
+- Errors: `INVALID_ARGUMENT` (empty `agent` or op, the agent is not
+  running or its adapter reports no activity state, an empty or too long
+  message, a full queue); `NOT_FOUND` (agent, or no message with that id).
+
 `Agent.title` is what the conversation is about, for clients to list
 sessions by: the title the agent CLI gave it (Claude Code writes one into
 its transcript; the latest counts), else the start of the first message

@@ -94,9 +94,17 @@ type agentRec struct {
 	Title           string `json:"title,omitempty"`
 	TitleFromPrompt bool   `json:"title_from_prompt,omitempty"`
 	TitleScan       string `json:"title_scan,omitempty"`
+	// Queue is what the user queued for the agent, next first, and
+	// QueuePaused holds it (queue.go).
+	Queue       []queued `json:"queue,omitempty"`
+	QueuePaused bool     `json:"queue_paused,omitempty"`
 
 	// limit is the usage limit that stopped the agent (limits.go).
 	limit *fleetv1.UsageLimit
+	// idleSince is when the queue saw the agent idle with UpdatedAtMs at
+	// idleAt, queueSent when it last sent a message of it (queue.go).
+	idleSince, queueSent time.Time
+	idleAt               int64
 
 	attached int32
 	// dialogGone counts the screens in a row that showed none of Dialogs
@@ -147,6 +155,8 @@ func (a *agentRec) proto() *fleetv1.Agent {
 		Git:             cloneGit(a.Git),
 		Note:            a.Note,
 		Title:           a.Title,
+		Queue:           queueProto(a.Queue),
+		QueuePaused:     a.QueuePaused,
 	}
 }
 

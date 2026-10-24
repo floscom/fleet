@@ -875,6 +875,7 @@
       if (k === 'exited') bits.unshift(a.exitCode ? `Ended · exit ${a.exitCode}` : 'Ended');
       out.push(h('span', null, bits.join(' · ') || shortPath(folderOf(a))));
     }
+    if (!isFinished(a) && a.queue && a.queue.length) out.push(h('span', 't-queue', `· ${a.queue.length} queued${a.queuePaused ? ', paused' : ''}`));
     return out;
   }
 
@@ -1784,6 +1785,7 @@
     switching: false, // a model switch is in flight
     switchedAt: 0, // when the last one ended: replies read before it are stale
     interrupting: false,
+    queueing: false, // a message is being queued
     asks: [], // questions the agent waits on, the first shown first
     answered: new Set(), // ids of questions answered here: late replies may still list them
     askForm: null, // the form of asks[0]
@@ -1843,7 +1845,7 @@
     chat.seq++;
     Object.assign(chat, {
       open: true, host, id, agent: findAgent(host, id), sending: false, held: false, model: null, switching: false, switchedAt: 0,
-      interrupting: false, asks: [], askForm: null, images: [], videos: [], keys: false, gitUI: {},
+      interrupting: false, queueing: false, asks: [], askForm: null, images: [], videos: [], keys: false, gitUI: {},
     });
     chat.answered.clear();
     chat.prUI.clear();
@@ -1943,10 +1945,12 @@
     C.ask = h('div');
     C.dlg = h('div');
     C.keys = h('div');
+    C.queue = h('div');
+    C.queueKey = '';
     C.compBox = h('div');
     C.status = h('div', { class: 'dock-status', role: 'status', 'aria-live': 'polite' });
     C.comp = null;
-    C.root = h('div', 'view chat', C.head, C.banners, C.scroll, h('div', 'dock', h('div', 'dock-in', C.ask, C.dlg, C.keys, C.compBox, C.status)));
+    C.root = h('div', 'view chat', C.head, C.banners, C.scroll, h('div', 'dock', h('div', 'dock-in', C.ask, C.dlg, C.keys, C.queue, C.compBox, C.status)));
     fill($('main'), C.root);
     wireChatDrop(C.root);
   }
@@ -2051,6 +2055,7 @@
     renderChatAsk();
     renderDialogCard();
     renderKeys();
+    renderQueue();
     if (a && isFinished(a)) {
       C.comp = null;
       fill(C.compBox, h('div', 'banner locked', icon(a.state === 'failed' ? 'alert' : 'archive'),
@@ -2165,9 +2170,10 @@
     const effortBtn = h('button', { type: 'button', class: 'cpick effort', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => chatEffortMenu(ev.currentTarget) });
     const keysBtn = h('button', { type: 'button', class: 'cpick icon-only', 'aria-label': 'Terminal keys', title: 'Keys for the agent’s own dialogs', 'aria-pressed': 'false', onclick: () => { chat.keys = !chat.keys; renderKeys(); api_.update(); } }, icon('keyboard'));
     const stop = h('button', { type: 'button', class: 'stop-btn', 'aria-label': 'Stop', title: 'Interrupt the agent’s turn, as Esc in its terminal (Ctrl+C)', onclick: interruptChat }, icon('stop'), h('span', 'stop-lbl', 'Stop'));
+    const queueBtn = h('button', { type: 'button', class: 'cpick icon-only', 'aria-label': 'Queue', onclick: queueMessage }, icon('queue'));
     const send = h('button', { type: 'submit', class: 'send', 'aria-label': 'Send' }, icon('arrow-up'));
     const form = h('form', { class: 'composer', novalidate: true },
-      thumbs, ta, h('div', 'ctoolbar', attach, modelBtn, effortBtn, h('span', 'grow'), keysBtn, stop, send), file);
+      thumbs, ta, h('div', 'ctoolbar', attach, modelBtn, effortBtn, h('span', 'grow'), keysBtn, stop, queueBtn, send), file);
 
     const fit = () => {
       ta.style.height = 'auto';
@@ -2189,6 +2195,11 @@
       api_.update();
     });
     ta.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && ev.altKey && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.isComposing) {
+        ev.preventDefault();
+        queueMessage();
+        return;
+      }
       if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing && !touch()) {
         ev.preventDefault();
         sendMessage();
@@ -2227,6 +2238,10 @@
         attach.disabled = !live || shell || chat.sending || askShown();
         stop.hidden = !chatBusy();
         stop.disabled = chat.interrupting;
+        queueBtn.hidden = !live || shell;
+        queueBtn.disabled = chat.queueing || askShown() || chat.images.length > 0 || (!ta.value.trim() && !chat.videos.length);
+        queueBtn.title = chat.images.length ? 'Images cannot be queued: send them now'
+          : `Queue it: sent once ${short} is done${keyboard() ? ` (${MAC ? '⌥' : 'Alt+'}Enter)` : ''}`;
         keysBtn.hidden = shell || !live;
         keysBtn.setAttribute('aria-pressed', String(chat.keys || dialogShown()));
         send.disabled = !live || shell || chat.sending || (!ta.value.trim() && !chat.images.length && !chat.videos.length);
@@ -2386,6 +2401,81 @@
     chat.held = held;
     renderDock();
     if (keyboard()) ta.focus();
+  }
+
+  // queueMessage queues the text in the message box (POST .../queue): the
+  // daemon types it in once the agent is done with its turn and anything
+  // queued before it.
+  async function queueMessage() {
+    if (!C.comp || chat.queueing || !chatLive() || askShown()) return;
+    const ta = C.comp.ta;
+    const text = ta.value;
+    const videos = chat.videos.slice();
+    const { host, id, seq } = chat;
+    if (!text.trim() && !videos.length) return;
+    if (chat.images.length) {
+      toast('Images cannot be queued: send them now, or remove them', 'warn');
+      return;
+    }
+    const problem = videosProblem(videos);
+    if (problem) {
+      toast(problem, 'warn');
+      return;
+    }
+    chat.queueing = true;
+    C.comp.update();
+    try {
+      const r = await api('POST', chatAPI('queue'), { add: withVideos(text, videos) });
+      if (seq === chat.seq || loadDraft(host, id) === text) saveDraft(host, id, '');
+      if (seq === chat.seq) {
+        ta.value = '';
+        C.comp.fit();
+        chat.videos = chat.videos.filter((v) => !videos.includes(v));
+        C.comp.paint();
+      }
+      if (r && r.agent) putAgent(host, r.agent);
+    } catch (e) {
+      toast(`Could not queue: ${e.message}`, 'error');
+    }
+    if (seq !== chat.seq) return;
+    chat.queueing = false;
+    renderDock();
+    if (keyboard()) ta.focus();
+  }
+
+  // editQueue removes a queued message ({remove: id}) or resumes the
+  // queue ({paused: false}).
+  async function editQueue(body) {
+    const { host } = chat;
+    try {
+      const r = await api('POST', chatAPI('queue'), body);
+      if (r && r.agent) putAgent(host, r.agent);
+    } catch (e) {
+      toast(`Could not ${body.remove ? 'remove it' : 'resume the queue'}: ${e.message}`, 'error');
+    }
+  }
+
+  // renderQueue shows the messages queued for the agent above the box.
+  function renderQueue() {
+    if (!C.queue) return;
+    const a = chat.agent;
+    const q = (chatLive() && a.queue) || [];
+    const key = JSON.stringify([q, a && a.queuePaused, a && a.adapter]);
+    if (key === C.queueKey) return;
+    C.queueKey = key;
+    if (!q.length) {
+      fill(C.queue);
+      return;
+    }
+    const short = a.adapter === 'claude' ? 'Claude' : a.adapter === 'codex' ? 'Codex' : 'the agent';
+    const resume = a.queuePaused ? h('button', { type: 'button', class: 'btn sm', title: 'Stop pauses the queue: go on sending it', onclick: () => editQueue({ paused: false }) }, icon('play'), 'Resume') : null;
+    fill(C.queue, h('section', { class: 'queue' + (a.queuePaused ? ' paused' : ''), 'aria-label': 'Queued messages' },
+      h('div', 'queue-h', icon('queue'),
+        h('span', 'grow', `${q.length} queued · `, a.queuePaused ? 'paused' : `the next goes in once ${short} is done`), resume),
+      h('ol', 'queue-list', q.map((m, i) => h('li', 'queue-item',
+        h('span', 'queue-n', String(i + 1)),
+        h('span', { class: 'queue-text', title: m.text }, m.text),
+        iconBtn('x', `Remove “${m.text.length > 40 ? m.text.slice(0, 40) + '…' : m.text}” from the queue`, () => editQueue({ remove: m.id })))))));
   }
 
   async function sendKey(key) {

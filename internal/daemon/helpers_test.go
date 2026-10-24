@@ -107,6 +107,8 @@ func (testAdapter) HandleHook(ev adapter.HookEvent) (adapter.StateUpdate, bool) 
 		return adapter.StateUpdate{Transcript: string(ev.Payload)}, true
 	case "working":
 		return adapter.StateUpdate{State: fleetv1.AgentState_AGENT_STATE_WORKING, Detail: string(ev.Payload)}, true
+	case "idle":
+		return adapter.StateUpdate{State: fleetv1.AgentState_AGENT_STATE_IDLE}, true
 	case "ask", "done": // payload "<subagent>/<call>"
 		by, call, _ := strings.Cut(string(ev.Payload), "/")
 		u := adapter.StateUpdate{State: fleetv1.AgentState_AGENT_STATE_WORKING, Subagent: by, Call: call}

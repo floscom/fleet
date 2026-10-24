@@ -224,6 +224,11 @@ func Run(ctx context.Context, opts Options) error {
 	bg.Add(1)
 	go func() {
 		defer bg.Done()
+		d.agents.queueLoop(ctx)
+	}()
+	bg.Add(1)
+	go func() {
+		defer bg.Done()
 		d.agents.pullLoop(ctx)
 	}()
 	bg.Add(1)

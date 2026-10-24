@@ -46,6 +46,8 @@ func (m *manager) interrupt(ctx context.Context, ref string) (*fleetv1.Agent, bo
 		return nil, false, errf(codeInvalid, "agent %s is not working", a.ID)
 	}
 	id, session := a.ID, a.TmuxSession
+	// The turn ends now: the next queued message would undo the Stop.
+	m.pauseQueueLocked(a)
 	m.mu.Unlock()
 
 	// Where the transcript ends now: the interruption is recorded after.
