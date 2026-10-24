@@ -438,6 +438,10 @@ func (s *Server) forwardBody(ctx context.Context, p Peer, key, method, uri strin
 		if len(reply) > maxPeerReply {
 			return 0, nil, errors.New("reply too large")
 		}
+		if !json.Valid(reply) && resp.StatusCode == http.StatusNotFound {
+			// A daemon older than the route: its mux's plain-text 404.
+			return http.StatusNotFound, []byte(`{"error":"not supported by the fleet version there"}`), nil
+		}
 		if !json.Valid(reply) && resp.StatusCode != http.StatusNoContent {
 			return 0, nil, fmt.Errorf("status %d without a JSON reply", resp.StatusCode)
 		}

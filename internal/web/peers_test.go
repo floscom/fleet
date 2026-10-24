@@ -182,7 +182,8 @@ func TestHostProxy(t *testing.T) {
 	dir := t.TempDir()
 	keyPath := filepath.Join(dir, "fleet-key")
 	LoadOrCreateToken(keyPath)
-	// b holds the key, c has another one, d has none, e is gone.
+	// b holds the key, c has another one, d has none, e is gone, f is a
+	// daemon older than some routes.
 	bSrc := newFakeSource()
 	bSrc.id = "b-id"
 	b := startServerOpts(t, Options{Source: bSrc, KeyPath: keyPath})
@@ -196,12 +197,20 @@ func TestHostProxy(t *testing.T) {
 	d := startServerOpts(t, Options{Source: dSrc})
 	gone := httptest.NewServer(http.NotFoundHandler())
 	gone.Close()
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/nonce" {
+			writeJSON(w, http.StatusOK, map[string]string{"nonce": "n"})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer old.Close()
 
 	var found []discovery.Found
 	for _, p := range []struct {
 		id string
 		ts *httptest.Server
-	}{{"b-id", b}, {"c-id", c}, {"d-id", d}, {"e-id", gone}} {
+	}{{"b-id", b}, {"c-id", c}, {"d-id", d}, {"e-id", gone}, {"f-id", old}} {
 		h, port := hostPort(t, p.ts)
 		// A refused address first: the next one is tried.
 		found = append(found, discovery.Found{ServerID: p.id, Name: strings.TrimSuffix(p.id, "-id"), Addrs: []string{"127.0.0.2", h}, WebPort: port})
@@ -294,6 +303,10 @@ func TestHostProxy(t *testing.T) {
 	}
 	if code := api(t, a, "GET", "/api/hosts/e-id/roots", tok, "", &e); code != 502 || e.NotJoined {
 		t.Fatalf("unreachable: %d %+v", code, e)
+	}
+	// The dashboard hides what an older daemon lacks on a 404.
+	if code := api(t, a, "GET", "/api/hosts/f-id/update", tok, "", &e); code != 404 || e.Error == "" {
+		t.Fatalf("route an older daemon lacks: %d %+v", code, e)
 	}
 	for _, p := range []string{"/api/hosts/zz-id/roots", "/api/hosts/self-id/roots", "/api/hosts/b-id/join", "/api/hosts/b-id/hosts/c-id/roots", "/api/hosts/b-id/nonce"} {
 		if code := api(t, a, "GET", p, tok, "", &e); code != 404 {
