@@ -1841,7 +1841,7 @@
     asks: [], // questions the agent waits on, the first shown first
     answered: new Set(), // ids of questions answered here: late replies may still list them
     askForm: null, // the form of asks[0]
-    images: [], // {data (base64), url (data: URL), name} to send with the next message
+    images: [], // {data (base64), url (data: URL), name} to send with the next message; no data yet while read
     videos: [], // uploaded to the agent's machine for the next message (see addVideos)
     keys: false, // the keys for the terminal's dialogs show
     prUI: new Map(), // pull request URL -> {method, deleteBranch, armed (ms), busy}
@@ -2228,8 +2228,9 @@
     const stop = h('button', { type: 'button', class: 'stop-btn', 'aria-label': 'Stop', title: 'Interrupt the agent’s turn, as Esc in its terminal (Ctrl+C)', onclick: interruptChat }, icon('stop'), h('span', 'stop-lbl', 'Stop'));
     const queueBtn = h('button', { type: 'button', class: 'cpick icon-only', 'aria-label': 'Queue', onclick: queueMessage }, icon('queue'));
     const send = h('button', { type: 'submit', class: 'send', 'aria-label': 'Send' }, icon('arrow-up'));
+    const prog = sendBar();
     const form = h('form', { class: 'composer', novalidate: true },
-      thumbs, ta, h('div', 'ctoolbar', attach, modelBtn, effortBtn, h('span', 'grow'), keysBtn, stop, queueBtn, send), file);
+      prog.el, thumbs, ta, h('div', 'ctoolbar', attach, modelBtn, effortBtn, h('span', 'grow'), keysBtn, stop, queueBtn, send), file);
 
     const fit = () => {
       ta.style.height = 'auto';
@@ -2275,7 +2276,7 @@
     });
 
     const api_ = {
-      el: form, ta, fit,
+      el: form, ta, fit, progress: prog.set,
       paint() {
         renderThumbs(thumbs, chat.images, chat.videos);
         api_.update();
@@ -2423,7 +2424,7 @@
       }
       return;
     }
-    const problem = videosProblem(videos);
+    const problem = imagesProblem(images) || videosProblem(videos);
     if (problem) {
       toast(problem, 'warn');
       return;
@@ -2437,8 +2438,14 @@
       // The daemon holds Enter back if the agent shows a dialog, where
       // Enter picks the highlighted option whatever was typed.
       const body = { text: withVideos(text, videos), submit: true };
-      if (images.length) body.images = images.map((im) => im.data);
-      const r = await api('POST', chatAPI('input'), body);
+      let r;
+      if (images.length) {
+        body.images = images.map((im) => im.data);
+        C.comp.progress(0, images.length);
+        r = await apiUpload('POST', chatAPI('input'), body, (frac) => {
+          if (seq === chat.seq) C.comp?.progress(frac, images.length);
+        });
+      } else r = await api('POST', chatAPI('input'), body);
       held = !!(r && r.held);
       if (seq === chat.seq || loadDraft(host, id) === text) saveDraft(host, id, '');
       if (seq === chat.seq) {
@@ -2453,6 +2460,7 @@
       toast(`Could not send: ${e.message}`, 'error');
     }
     if (seq !== chat.seq) return;
+    C.comp?.progress(null);
     chat.sending = false;
     chat.held = held;
     renderDock();
@@ -2772,10 +2780,10 @@
   async function addChatFiles(files) {
     if (!chatLive() || chat.sending || askShown()) return;
     const seq = chat.seq;
-    addVideos(files, chat.videos, chatUploads(), () => {
+    addVideos(files, chat.videos, chatUploads(), chat.host ? hostName(chat.host) : '', () => {
       if (seq === chat.seq) C.comp?.paint();
     });
-    if (await readImages(files, chat.images, () => seq === chat.seq)) C.comp?.paint();
+    await readImages(files, chat.images, () => seq === chat.seq, () => C.comp?.paint());
   }
 
   // A file dropped anywhere on the chat goes with the next message; it
@@ -2791,26 +2799,65 @@
     });
   }
 
-  // readImages adds the image files among files to images, ready to send,
-  // up to MAX_IMAGES in all. It stops, answering false, once alive() is
-  // false: the message they were for is gone.
-  async function readImages(files, images, alive) {
+  // readImages adds the image files among files to images, up to
+  // MAX_IMAGES in all: each at once, without data while it is read (and
+  // perhaps scaled down), then ready to send. changed() runs after each
+  // step. It stops once alive() is false: the message they were for is gone.
+  async function readImages(files, images, alive, changed) {
+    const picked = [];
     for (const f of [...files].filter(isImage)) {
       if (images.length >= MAX_IMAGES) {
         toast(`At most ${MAX_IMAGES} images per message`, 'warn');
         break;
       }
-      try {
-        const blob = await fitImage(f);
-        const url = await blobURL(blob);
-        if (!alive()) return false;
-        if (images.length < MAX_IMAGES) images.push({ data: url.slice(url.indexOf(',') + 1), url, name: f.name || 'pasted image' });
-      } catch (e) {
-        if (!alive()) return false;
-        toast(`${f.name || 'image'}: ${e.message}`, 'error');
-      }
+      const im = { data: '', url: '', name: f.name || 'pasted image', file: f };
+      images.push(im);
+      picked.push(im);
     }
-    return alive();
+    if (!picked.length) return;
+    changed();
+    for (const im of picked) {
+      try {
+        const url = await blobURL(await fitImage(im.file));
+        if (!alive()) return;
+        Object.assign(im, { data: url.slice(url.indexOf(',') + 1), url });
+      } catch (e) {
+        if (!alive()) return;
+        const i = images.indexOf(im);
+        if (i >= 0) images.splice(i, 1);
+        toast(`${im.name}: ${e.message}`, 'error');
+      }
+      im.file = null;
+      changed();
+    }
+  }
+
+  function imagesProblem(images) {
+    return images.some((im) => !im.data) ? 'Wait for the images to be ready.' : '';
+  }
+
+  // sendBar shows how far the images going with a message or a start have
+  // gone up: set(frac, n) for n images, frac 0 to 1 (1: all sent, the reply
+  // awaited); set(null) hides it.
+  function sendBar() {
+    const lbl = h('span', 'lbl');
+    const done = h('span');
+    const bar = h('span', 'bar', done);
+    const el = h('div', { class: 'send-prog', hidden: true, role: 'progressbar', 'aria-valuemin': '0', 'aria-valuemax': '100' }, lbl, bar);
+    return {
+      el,
+      set(frac, n = 1) {
+        el.hidden = frac == null;
+        if (frac == null) return;
+        const pct = Math.round(frac * 100);
+        const what = n === 1 ? 'the image' : `${n} images`;
+        lbl.textContent = frac < 1 ? `Uploading ${what} · ${pct}%` : `Uploaded ${what} · delivering…`;
+        el.setAttribute('aria-valuenow', String(pct));
+        el.setAttribute('aria-valuetext', lbl.textContent);
+        bar.classList.toggle('wait', frac >= 1);
+        done.style.width = pct + '%';
+      },
+    };
   }
 
   // fitImage returns f as is if the agents can read it and it is small
@@ -2851,10 +2898,10 @@
   }
 
   // addVideos starts uploading the videos among files to url, the uploads
-  // route of the agent's machine, adding each to videos as {name, size,
-  // sent, path, error, xhr}; changed() runs when one is added, done or
-  // failed.
-  function addVideos(files, videos, url, changed) {
+  // route of the agent's machine (dest names it if it is another one), adding
+  // each to videos as {name, size, sent, path, error, xhr, dest}; changed()
+  // runs when one is added, done or failed.
+  function addVideos(files, videos, url, dest, changed) {
     let added = false;
     for (const f of [...files].filter(isVideo)) {
       if (videos.length >= MAX_VIDEOS) {
@@ -2865,7 +2912,7 @@
         toast(`${f.name || 'video'}: too large (at most 4 GB)`, 'error');
         continue;
       }
-      const v = { name: f.name || 'video', size: f.size, sent: 0, path: '', error: '', xhr: null };
+      const v = { name: f.name || 'video', size: f.size, sent: 0, path: '', error: '', xhr: null, dest };
       v.xhr = uploadFile(url, f, (sent) => {
         v.sent = sent;
         paintVideo(v);
@@ -2889,6 +2936,7 @@
     const token = getToken();
     if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
     xhr.upload.onprogress = (ev) => progress(ev.loaded);
+    xhr.upload.onload = () => progress(file.size);
     xhr.onload = () => {
       let data = null;
       try {
@@ -2930,7 +2978,8 @@
   function renderThumbs(box, images, videos = []) {
     box.hidden = !images.length && !videos.length;
     const remove = (kind, i, name) => h('button', { type: 'button', class: 'icon-btn', ['data-' + kind]: String(i), 'aria-label': `Remove ${name}` }, icon('x'));
-    fill(box, images.map((im, i) => h('div', 'att', h('img', { src: im.url, alt: im.name, title: im.name }), remove('image', i, im.name))),
+    fill(box, images.map((im, i) => h('div', im.data ? 'att' : 'att wait', im.data ? h('img', { src: im.url, alt: im.name, title: im.name })
+      : h('span', { class: 'spin', role: 'img', 'aria-label': `Preparing ${im.name}`, title: `Preparing ${im.name}` }), remove('image', i, im.name))),
       videos.map((v, i) => {
         v.statusEl = h('span', 'st');
         v.barEl = h('span');
@@ -2944,9 +2993,13 @@
   function paintVideo(v) {
     if (!v.statusEl) return;
     const pct = v.path ? 100 : v.size ? Math.min(99, Math.floor((v.sent / v.size) * 100)) : 0;
-    v.statusEl.textContent = v.error ? v.error : v.path ? `${fmtSize(v.size)} · uploaded` : `uploading ${pct}%`;
+    // All sent from here: the daemon still stores it, or passes it on.
+    const after = !v.path && !v.error && v.sent >= v.size;
+    v.statusEl.textContent = v.error ? v.error : v.path ? `${fmtSize(v.size)} · uploaded`
+      : after ? (v.dest ? `sending on to ${v.dest}…` : 'saving…') : `uploading ${pct}%`;
     v.statusEl.className = 'st' + (v.error ? ' bad' : '');
-    v.barEl.style.width = (v.error ? 0 : pct) + '%';
+    v.barEl.style.width = (v.error ? 0 : after ? 100 : pct) + '%';
+    v.barEl.parentNode?.classList.toggle('wait', after);
   }
 
   // ------------------------------------------------------------------ feeds
@@ -5239,7 +5292,7 @@
     thenPref: 'chat', // chat, screen, stay (kept)
     name: '',
     branch: '',
-    images: [], // {data, url, name} to send with the prompt
+    images: [], // {data, url, name} to send with the prompt; no data yet while read
     videos: [], // uploaded to the machine for the prompt
   };
 
@@ -5433,7 +5486,7 @@
   // launchImagesProblem says why the images or videos cannot go with the
   // session.
   function launchImagesProblem() {
-    const vp = videosProblem(launch.videos);
+    const vp = imagesProblem(launch.images) || videosProblem(launch.videos);
     if (vp) return vp;
     if (!launch.images.length) return '';
     if (!launchImages()) return `${launch.adapter || 'This agent'} takes no images at start: remove them, or choose another agent.`;
@@ -5445,7 +5498,7 @@
     if (launch.busy) return;
     const gen = launch.gen;
     const alive = () => gen === launch.gen && U.view !== 'chat';
-    addVideos(files, launch.videos, launchAPI('uploads'), () => {
+    addVideos(files, launch.videos, launchAPI('uploads'), launch.host ? hostName(launch.host) : '', () => {
       if (alive()) renderLaunch();
     });
     if (![...files].some(isImage)) return;
@@ -5453,7 +5506,7 @@
       toast(`${launch.adapter || 'This agent'} takes no images at start`, 'warn');
       return;
     }
-    if (await readImages(files, launch.images, alive)) renderLaunch();
+    await readImages(files, launch.images, alive, renderLaunch);
   }
 
   // Last successfully used provider, per machine and root folder. Session
@@ -5996,9 +6049,10 @@
     N.effortBtn = h('button', { type: 'button', class: 'cpick effort', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => launchEffortMenu(ev.currentTarget) });
     N.start = h('button', { type: 'submit', class: 'start-btn' }, 'Start');
     N.status = h('div', { class: 'newv-hint', role: 'status', 'aria-live': 'polite' });
+    N.prog = sendBar();
     N.recent = h('div', 'recent');
     const form = h('form', { class: 'composer', novalidate: true, onsubmit: (ev) => startSession(ev) },
-      N.ctx, N.thumbs, N.ta, h('div', 'ctoolbar', N.attach, N.agentBtn, N.modelBtn, N.effortBtn, h('span', 'grow'), N.start), N.file);
+      N.ctx, N.prog.el, N.thumbs, N.ta, h('div', 'ctoolbar', N.attach, N.agentBtn, N.modelBtn, N.effortBtn, h('span', 'grow'), N.start), N.file);
     N.root = h('div', 'view',
       lead || small() ? h('div', 'topbar', lead, h('h1', null, 'New session')) : null,
       h('div', 'newv', h('div', 'newv-in',
@@ -6062,8 +6116,9 @@
     launch.error = '';
     renderLaunch();
     const pick = launchPick();
+    const images = launch.images.map((im) => im.data);
     try {
-      const r = await api('POST', launchAPI('agents'), {
+      const body = {
         model: (pick && pick.model && pick.model.id) || '',
         effort: (pick && pick.effort && pick.effort.id) || '',
         adapter,
@@ -6074,8 +6129,14 @@
         branch: (launch.branch || '').trim(),
         isolation: launch.iso || '',
         sandbox: launch.sandbox || '',
-        images: launch.images.map((im) => im.data),
-      });
+        images,
+      };
+      let r;
+      if (images.length) {
+        N.prog.set(0, images.length);
+        r = await apiUpload('POST', launchAPI('agents'), body, (frac) => N.prog.set(frac, images.length));
+        N.prog.set(null);
+      } else r = await api('POST', launchAPI('agents'), body);
       rememberRootProvider(host, place.root, adapter);
       launch.busy = false;
       closeLaunch();
@@ -6090,6 +6151,7 @@
       else renderLaunch();
       return;
     } catch (e) {
+      if (images.length) N.prog.set(null);
       launch.error = e.message;
     }
     launch.busy = false;
@@ -7221,6 +7283,36 @@
     if (res.status === 401) lostAdmin();
     if (!res.ok) throw new APIError(res.status, (data && data.error) || `request failed (${res.status})`, data && data.notJoined);
     return data;
+  }
+
+  // apiUpload is api for a body that takes a while to go up (images in it),
+  // over XHR for its progress: progress gets the share sent, 0 to 1 (1 once
+  // all is sent and the reply is awaited).
+  function apiUpload(method, path, body, progress) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open(method, path);
+      const token = getToken();
+      if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable && ev.total) progress(Math.min(1, ev.loaded / ev.total));
+      };
+      xhr.upload.onload = () => progress(1);
+      xhr.onload = () => {
+        let data = null;
+        try {
+          data = JSON.parse(xhr.responseText);
+        } catch {
+          // not JSON
+        }
+        if (xhr.status === 401) lostAdmin();
+        if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+        else reject(new APIError(xhr.status, (data && data.error) || `request failed (${xhr.status})`, data && data.notJoined));
+      };
+      xhr.onerror = () => reject(new APIError(0, 'cannot reach the daemon'));
+      xhr.send(JSON.stringify(body));
+    });
   }
 
   function setAdmin(on) {

@@ -1835,6 +1835,16 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
 .att.video .st.bad { color: var(--red); }
 .att.video .bar { display: block; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .att.video .bar span { display: block; height: 100%; background: var(--accent); }
+.att.video .bar.wait span, .send-prog .bar.wait span { animation: pulse 1.2s ease-in-out infinite; }
+/* An image still being read or scaled down. */
+.att.wait { display: grid; place-items: center; color: var(--fg-3); }
+.att.wait .spin { width: 18px; height: 18px; border-width: 2px; }
+/* Images going up with a message or a start. */
+.send-prog { display: flex; flex-direction: column; gap: 5px; margin: 2px 6px 10px 0; }
+.send-prog[hidden] { display: none; }
+.send-prog .lbl { font-size: 12px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.send-prog .bar { display: block; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.send-prog .bar span { display: block; height: 100%; background: var(--accent); transition: width 0.15s; }
 
 /* Options with previews (the agent's questions). */
 .opt-preview {
