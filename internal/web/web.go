@@ -285,7 +285,9 @@ func (s *Server) handler() http.Handler {
 		case "/ws":
 			s.serveWS(w, r)
 		default:
-			files.ServeHTTP(w, r)
+			if !serveAsset(w, r) {
+				files.ServeHTTP(w, r)
+			}
 		}
 	})
 }

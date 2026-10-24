@@ -68,6 +68,10 @@ func main() {
 		"icon-maskable-512.png": encode(icon(512, 26, 0)),
 	}
 	links := splashes(files)
+	// Launch screens of sizes no longer made go.
+	if err := os.RemoveAll(filepath.Join("static", "splash")); err != nil {
+		log.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join("static", "splash"), 0o755); err != nil {
 		log.Fatal(err)
 	}
@@ -229,8 +233,9 @@ var screens = []struct{ w, h, dpr int }{ // portrait, in CSS pixels
 	{1032, 1376, 2}, // iPad Pro 13" (M4, M5)
 }
 
-// wordmark is the ASCII logo of the page header: blocks are letters, the
-// box-drawing characters their shadow.
+// wordmark is the logo of the page header (app.js wordmark): FLEET in
+// figlet's "ANSI Shadow" letters. Blocks are the letters; the box-drawing
+// characters become a thin line shadow.
 var wordmark = []string{
 	"███████╗██╗     ███████╗███████╗████████╗",
 	"██╔════╝██║     ██╔════╝██╔════╝╚══██╔══╝",
@@ -240,82 +245,107 @@ var wordmark = []string{
 	"╚═╝     ╚══════╝╚══════╝╚══════╝   ╚═╝   ",
 }
 
-// splashes adds a launch screen per screen and orientation to files, and
-// returns their links.
+// The wordmark's cells are 6 units wide and 10 tall, its shadow lines 2.4
+// units thick, as in the header's SVG.
+const cellW, cellH, shadeW = 6.0, 10.0, 2.4
+
+// themes are the launch screens' colours, those of the page's sidebar and
+// logo (app.css --bg-side, --fg, --logo-shade), and the media feature that
+// picks each.
+var themes = []struct{ scheme, bg, ink, shade string }{
+	{"light", "#f4f6f5", "#151918", "#b3bbb8"},
+	{"dark", "#111213", "#ececec", "#4a4e52"},
+}
+
+// splashes adds a launch screen per screen, orientation and colour scheme
+// to files, and returns their links.
 func splashes(files map[string][]byte) []string {
 	var links []string
-	for _, sc := range screens {
-		for _, o := range []string{"portrait", "landscape"} {
-			w, h := sc.w*sc.dpr, sc.h*sc.dpr
-			if o == "landscape" {
-				w, h = h, w
+	for _, th := range themes {
+		for _, sc := range screens {
+			for _, o := range []string{"portrait", "landscape"} {
+				w, h := sc.w*sc.dpr, sc.h*sc.dpr
+				if o == "landscape" {
+					w, h = h, w
+				}
+				name := fmt.Sprintf("splash/%s-%dx%d.png", th.scheme, w, h)
+				files[name] = encode(splash(w, h, th.bg, th.ink, th.shade))
+				links = append(links, fmt.Sprintf(`<link rel="apple-touch-startup-image" href="/%s" media="(device-width: %dpx) and (device-height: %dpx) and (-webkit-device-pixel-ratio: %d) and (orientation: %s) and (prefers-color-scheme: %s)">`,
+					name, sc.w, sc.h, sc.dpr, o, th.scheme))
 			}
-			name := fmt.Sprintf("splash/%dx%d.png", w, h)
-			files[name] = encode(splash(w, h))
-			links = append(links, fmt.Sprintf(`<link rel="apple-touch-startup-image" href="/%s" media="(device-width: %dpx) and (device-height: %dpx) and (-webkit-device-pixel-ratio: %d) and (orientation: %s)">`,
-				name, sc.w, sc.h, sc.dpr, o))
 		}
 	}
 	return links
 }
 
-// splash draws a w×h launch screen: the glyph above the wordmark, centred
-// on the page background, sized by the shorter side.
-func splash(w, h int) *image.NRGBA {
+// splash draws a w×h launch screen: the wordmark centred on bg, two
+// fifths of the shorter side wide, anti-aliased by sampling each pixel
+// 4×4.
+func splash(w, h int, bg, ink, shade string) *image.NRGBA {
+	cols, rows := len([]rune(wordmark[0])), len(wordmark)
+	ww, wh := float64(cols)*cellW, float64(rows)*cellH // units
+	s := 0.4 * float64(min(w, h)) / ww                 // pixels per unit
+	x0, y0 := (float64(w)-ww*s)/2, (float64(h)-wh*s)/2
 	img := image.NewNRGBA(image.Rect(0, 0, w, h))
-	draw.Draw(img, img.Bounds(), image.NewUniform(rgb(bg)), image.Point{}, draw.Src)
-	short := min(w, h)
-	// The glyph a quarter of the short side wide, the wordmark half of it,
-	// in cells twice as tall as wide like a terminal's.
-	gs := max(1, short/4/len(glyph[0]))
-	cw := max(1, short/2/len([]rune(wordmark[0])))
-	gw, gh := len(glyph[0])*gs, len(glyph)*gs
-	ww, wh := len([]rune(wordmark[0]))*cw, len(wordmark)*2*cw
-	gap := gh / 2
-	y0 := (h - gh - gap - wh) / 2
-	for _, p := range palette {
-		for row, line := range glyph {
-			for col := range line {
-				if line[col] == p.key {
-					fill(img, (w-gw)/2+col*gs, y0+row*gs, gs, gs, p.hex)
+	back, sh, in := rgb(bg), rgb(shade), rgb(ink)
+	draw.Draw(img, img.Bounds(), image.NewUniform(back), image.Point{}, draw.Src)
+	const n = 4
+	for y := int(y0) - 1; y <= int(y0+wh*s)+1; y++ {
+		for x := int(x0) - 1; x <= int(x0+ww*s)+1; x++ {
+			var letters, lines int
+			for i := 0; i < n; i++ {
+				for j := 0; j < n; j++ {
+					ux := (float64(x) + (float64(i)+0.5)/n - x0) / s
+					uy := (float64(y) + (float64(j)+0.5)/n - y0) / s
+					switch cellAt(ux, uy) {
+					case 2:
+						letters++
+					case 1:
+						lines++
+					}
 				}
 			}
-		}
-	}
-	x0, y1 := (w-ww)/2, y0+gh+gap
-	for row, line := range wordmark {
-		for col, r := range []rune(line) {
-			x, y := x0+col*cw, y1+row*2*cw
-			if r == '█' {
-				fill(img, x, y, cw, 2*cw, "#d4d4d8") // zinc-300, as the logo's letters
-				continue
-			}
-			// A box-drawing line from the cell's middle to the sides it
-			// connects, in the logo's shadow colour.
-			up, down := strings.ContainsRune("║╚╝", r), strings.ContainsRune("║╔╗", r)
-			left, right := strings.ContainsRune("═╗╝", r), strings.ContainsRune("═╔╚", r)
-			t := max(1, cw/4)
-			mx, my := x+(cw-t)/2, y+cw-t/2
-			const shadow = "#3f3f46" // zinc-700
-			if up {
-				fill(img, mx, y, t, my-y+t, shadow)
-			}
-			if down {
-				fill(img, mx, my, t, y+2*cw-my, shadow)
-			}
-			if left {
-				fill(img, x, my, mx-x+t, t, shadow)
-			}
-			if right {
-				fill(img, mx, my, x+cw-mx, t, shadow)
-			}
+			img.SetNRGBA(x, y, mix(mix(back, sh, float64(lines)/n/n), in, float64(letters)/n/n))
 		}
 	}
 	return img
 }
 
-func fill(img *image.NRGBA, x, y, w, h int, hex string) {
-	draw.Draw(img, image.Rect(x, y, x+w, y+h), image.NewUniform(rgb(hex)), image.Point{}, draw.Src)
+// cellAt says what of the wordmark is at (ux, uy) in units: 2 a letter, 1
+// its shadow, 0 nothing.
+func cellAt(ux, uy float64) int {
+	if ux < 0 || uy < 0 {
+		return 0
+	}
+	col, row := int(ux/cellW), int(uy/cellH)
+	if row >= len(wordmark) {
+		return 0
+	}
+	line := []rune(wordmark[row])
+	if col >= len(line) {
+		return 0
+	}
+	r := line[col]
+	if r == '█' {
+		return 2
+	}
+	// The shadow line from the cell's middle to the sides it connects.
+	dx, dy := ux-float64(col)*cellW-cellW/2, uy-float64(row)*cellH-cellH/2
+	t := shadeW / 2
+	up, down := strings.ContainsRune("║╚╝", r), strings.ContainsRune("║╔╗", r)
+	left, right := strings.ContainsRune("═╗╝", r), strings.ContainsRune("═╔╚", r)
+	horiz := math.Abs(dy) <= t && (left && dx <= t || right && dx >= -t)
+	vert := math.Abs(dx) <= t && (up && dy <= t || down && dy >= -t)
+	if horiz || vert {
+		return 1
+	}
+	return 0
+}
+
+// mix is a with share f of b over it.
+func mix(a, b color.NRGBA, f float64) color.NRGBA {
+	l := func(x, y uint8) uint8 { return uint8(math.Round(float64(x) + (float64(y)-float64(x))*f)) }
+	return color.NRGBA{l(a.R, b.R), l(a.G, b.G), l(a.B, b.B), 255}
 }
 
 // writeLinks puts the launch screen links between the splash markers of

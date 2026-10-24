@@ -6792,6 +6792,7 @@
     ws.onopen = () => {
       backoff = 500;
       setConn('live');
+      checkShell();
     };
     ws.onmessage = (ev) => {
       if (typeof ev.data !== 'string') return;
@@ -7099,6 +7100,41 @@
     });
   }
 
+  // ------------------------------------------------------------ app shell
+  //
+  // The service worker (sw.js) keeps the page's files, so it opens without
+  // waiting for the daemon. A daemon with other files hands out a new
+  // worker, looked for when the socket connects again (a restart) and when
+  // the page comes back into view. Once it takes over, the page loads anew:
+  // at once if it just opened, else the next time it is hidden.
+
+  const SHELL_OK = window.isSecureContext && 'serviceWorker' in navigator;
+  const OPENED = Date.now();
+  let shellChecked = 0;
+
+  function wireShell() {
+    if (!SHELL_OK) return;
+    const had = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!had) return; // the first worker: the page is current
+      if (Date.now() - OPENED < 8000) return location.reload();
+      addEventListener('visibilitychange', () => {
+        if (document.hidden) location.reload();
+      });
+    });
+    addEventListener('visibilitychange', () => {
+      if (!document.hidden) checkShell();
+    });
+  }
+
+  // checkShell asks for a newer service worker, once a minute at most.
+  function checkShell() {
+    if (!SHELL_OK || Date.now() - shellChecked < 60000) return;
+    shellChecked = Date.now();
+    navigator.serviceWorker.getRegistration().then((reg) => reg?.update()).catch(() => {});
+  }
+
   // ------------------------------------------------------------------- keys
   //
   // N starts a session and / searches, outside text fields. Ctrl+1–9 opens
@@ -7346,6 +7382,7 @@
   wireLaunch();
   wireKeys();
   wirePush();
+  wireShell();
   wireTouch();
   wireGestures();
   $('side-scrim').addEventListener('click', () => toggleSide(false));

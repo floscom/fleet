@@ -434,14 +434,21 @@ Changes apply at once, rewrite `config.toml` and show up in the CLI
   swiped on past half its width, letting go asks right away.
 - Everything is embedded in the binary: the page is plain HTML, CSS and
   JavaScript in `internal/web/static`, with no build step. `DESIGN.md`
-  records its design (colours, type, spacing, layouts).
+  records its design (colours, type, spacing, layouts). The daemon serves
+  the files gzipped and with ETags. Over HTTPS (or on localhost) a
+  service worker keeps the page, script and styles, so the dashboard
+  opens without waiting for the network; after a daemon upgrade it fetches
+  them anew and the page reloads itself (at once if it just opened, else
+  the next time it is in the background).
 - The favicon and the home-screen / install icons (with a web app
   manifest) are drawn from one pixel map in `internal/web/gen_icons.go`;
   `make icons` redraws them, and the results are committed too. Added to
   an iPhone's or iPad's home screen, the dashboard opens full screen with
-  a launch screen (the icon over the FLEET logo): iOS needs one image per
-  screen size and orientation, so `make icons` draws 44 of them into
-  `static/splash/` and writes their links into `index.html`.
+  a launch screen (the FLEET logo of the header, light or dark as the
+  phone is): iOS needs one image per screen size, orientation and colour
+  scheme, so `make icons` draws 88 of them into `static/splash/` and
+  writes their links into `index.html`. iOS keeps the launch screen it
+  got when the app was added: remove and add it again to see a new one.
 
 ### Notifications
 
