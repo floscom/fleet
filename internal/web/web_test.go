@@ -478,6 +478,31 @@ func TestWebSocketSnapshotAndLive(t *testing.T) {
 	}
 }
 
+func TestWebSocketPingsWhenQuiet(t *testing.T) {
+	old := pingEvery
+	pingEvery = 50 * time.Millisecond
+	t.Cleanup(func() { pingEvery = old })
+	ts := startServer(t, newFakeSource())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, wsURL(ts), &websocket.DialOptions{
+		HTTPHeader: http.Header{"Origin": {ts.URL}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	for {
+		var m msg
+		if err := wsjson.Read(ctx, c, &m); err != nil {
+			t.Fatal(err)
+		}
+		if m.Type == "ping" {
+			return
+		}
+	}
+}
+
 func TestEnumNames(t *testing.T) {
 	a := agentOf(&fleetv1.Agent{State: fleetv1.AgentState_AGENT_STATE_NEEDS_INPUT})
 	if a.State != "needs_input" || a.Isolation != "unspecified" || a.Sandbox != "unspecified" {

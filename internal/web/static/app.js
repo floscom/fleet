@@ -7107,6 +7107,8 @@
         S.agents.delete(msg.id);
         invalidate('agents');
         break;
+      case 'ping':
+        break; // the daemon is there (heardAt)
       case 'snapshotDone':
         for (const id of S.unseen || []) S.agents.delete(id);
         S.unseen = null;
@@ -7123,7 +7125,16 @@
   // ---------------------------------------------------------------- socket
 
   let backoff = 500;
-  const BACKOFF_MAX = 10000;
+  const BACKOFF_MAX = 3000;
+  // The daemon sends a "ping" when it has been quiet for PING_MS. A socket
+  // that hears nothing for longer is dead without the browser knowing, as a
+  // phone's is after sleeping or changing networks, and is replaced.
+  const PING_MS = 15000;
+  const STALE_MS = 2 * PING_MS + 5000;
+  // A connection attempt that hangs (host asleep, network just changed) is
+  // given up after this, not after the browser's own TCP timeout.
+  const OPEN_TIMEOUT_MS = 6000;
+  let heardAt = 0;
   // The banner waits this long: a page opening, or coming back to the
   // front, mostly connects before, with what it showed still there.
   const CONN_GRACE_MS = 1500;
@@ -7164,12 +7175,19 @@
       return;
     }
     const sock = ws;
+    const openTimer = setTimeout(() => {
+      if (sock.readyState === WebSocket.CONNECTING) drop(sock, false);
+    }, OPEN_TIMEOUT_MS);
     sock.onopen = () => {
+      clearTimeout(openTimer);
+      heardAt = Date.now();
       backoff = 500;
       setConn('live');
       checkShell();
     };
     sock.onmessage = (ev) => {
+      if (ws !== sock) return;
+      heardAt = Date.now();
       if (typeof ev.data !== 'string') return;
       let msg;
       try {
@@ -7181,6 +7199,7 @@
     };
     sock.onclose = () => {
       sock.onclose = null;
+      clearTimeout(openTimer);
       if (ws !== sock) return;
       ws = null;
       scheduleReconnect();
@@ -7198,11 +7217,40 @@
     reconnectTimer = setTimeout(connect, wait);
   }
 
+  // drop gives up on sock, which hangs or went silent, and connects again
+  // at once (now) or after the backoff.
+  function drop(sock, now) {
+    if (ws !== sock) return;
+    ws = null;
+    sock.onclose = null;
+    try {
+      sock.close();
+    } catch {
+      // closing anyway
+    }
+    if (!now) return scheduleReconnect();
+    setConn('reconnecting');
+    backoff = 500;
+    connect();
+  }
+
+  // checkSocket replaces an open socket that has heard nothing, not even a
+  // ping, for STALE_MS.
+  function checkSocket() {
+    if (ws && ws.readyState === WebSocket.OPEN && Date.now() - heardAt > STALE_MS) drop(ws, false);
+  }
+
   // reconnectNow tries again at once when the page comes back to the front
   // or the network returns: a phone drops the socket of an app in the
-  // background, and the backoff may have grown meanwhile.
+  // background, and the backoff may have grown meanwhile. A socket still
+  // trying, or open but silent past a ping, may be one the browser has not
+  // seen die: starting over costs a snapshot, waiting may cost a minute.
   function reconnectNow() {
-    if (ws || document.hidden) return;
+    if (document.hidden) return;
+    if (ws) {
+      if (ws.readyState === WebSocket.OPEN && Date.now() - heardAt <= PING_MS + 5000) return;
+      return drop(ws, true);
+    }
     backoff = 500;
     connect();
   }
@@ -8122,6 +8170,7 @@
   addEventListener('online', reconnectNow);
   wireLaunchQueue();
   setInterval(tick, 1000);
+  setInterval(checkSocket, 5000);
   setConn('connecting');
   route();
   // A saved token is taken as good until the daemon says otherwise, so the

@@ -57,6 +57,14 @@ const (
 	clientBuffer = 256
 )
 
+// pingEvery is how often an idle socket carries a "ping" message. The
+// browser cannot see WebSocket ping frames, so a plain message is what
+// lets it tell a quiet connection from a dead one (it gives up after a
+// few missed). A var for the tests.
+var pingEvery = 15 * time.Second
+
+var pingMsg = []byte(`{"type":"ping"}`)
+
 const csp = "default-src 'self'; connect-src 'self'; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
 
 // Source is what the dashboard shows; the daemon implements it.
@@ -324,8 +332,9 @@ func firstLabel(name string) string {
 	return label
 }
 
-// serveWS streams the snapshot and then live messages to one browser. The
-// browser never sends; CloseRead handles its close frame.
+// serveWS streams the snapshot and then live messages to one browser, with
+// a "ping" when it has been quiet for pingEvery. The browser never sends;
+// CloseRead handles its close frame.
 func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, nil) // same-origin check stays on
 	if err != nil {
@@ -339,20 +348,27 @@ func (s *Server) serveWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer s.hub.leave(c)
+	ping := time.NewTicker(pingEvery)
+	defer ping.Stop()
 	for {
+		var b []byte
 		select {
-		case b, ok := <-c.send:
+		case m, ok := <-c.send:
 			if !ok { // dropped as slow, or the server stops
 				conn.Close(websocket.StatusGoingAway, c.reason)
 				return
 			}
-			wctx, cancel := context.WithTimeout(ctx, writeTimeout)
-			err := conn.Write(wctx, websocket.MessageText, b)
-			cancel()
-			if err != nil {
-				return
-			}
+			b = m
+			ping.Reset(pingEvery)
+		case <-ping.C:
+			b = pingMsg
 		case <-ctx.Done():
+			return
+		}
+		wctx, cancel := context.WithTimeout(ctx, writeTimeout)
+		err := conn.Write(wctx, websocket.MessageText, b)
+		cancel()
+		if err != nil {
 			return
 		}
 	}
