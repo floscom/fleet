@@ -1789,8 +1789,10 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
 .act-sum .bad { color: var(--red); }
 .step-detail .imgs { margin-top: 2px; }
 
-/* A subagent the session started, live. */
-.sub-call { min-width: 0; }
+/* A subagent the session started, live. Kept to the column so a long "what"
+   ellipsizes; the report row full width, else "Its report" wraps on phones. */
+.sub-call { min-width: 0; max-width: 100%; }
+.act > .sub-report { align-self: stretch; }
 .sub-call .grow { flex: 1; min-width: 0; }
 .sub-call .what { display: block; font-size: 12px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sub-call .what b { font-family: var(--mono); font-weight: 500; color: var(--blue); }

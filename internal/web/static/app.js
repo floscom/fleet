@@ -3702,7 +3702,7 @@
     const status = h('span');
     const what = h('span', 'what');
     const open = h('button', { type: 'button', class: 'btn ghost sm', hidden: true }, 'Open', icon('chevron-right', 'i-xs'));
-    const report = h('div');
+    const report = h('div', 'sub-report');
     const card = h('div', 'sub-call', icon('bot'), h('div', 'grow', h('div', 'trunc', e.text || 'Subagent'), what), status, open);
     const box = timeTitle(h('div', 'act', card, report), e);
     const t = { el: box, name: e.name, call: e, done: false, output: null, error: false };
