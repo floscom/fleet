@@ -971,7 +971,7 @@
 
   // ------------------------------------------------------------ row swipes
   //
-  // On phones a session row swiped to the left uncovers its end action
+  // On phones and tablets a session row swiped to the left uncovers its end action
   // (Archive, or Delete for a finished one), done by a tap. Swiped on past
   // FULL of its width, letting go asks right away. A quick flick opens or
   // closes it whatever the distance. One row is open at a time; a tap
@@ -1036,7 +1036,7 @@
       if (g && g.on) return; // a second finger: the first one leads
       g = null;
       const row = ev.target.closest('.row');
-      if (!admin || !small() || !row || ev.touches.length !== 1) return;
+      if (!admin || !touch() || !row || ev.touches.length !== 1) return;
       if (swipe.open && swipe.open !== row) {
         closeSwipe(swipe.open);
         swipe.open = null;
@@ -8041,7 +8041,7 @@
       const href = linkTo;
       linkTo = null;
       if (href == null || ev.defaultPrevented) return;
-      if (ev.target.parentElement.target === '_blank') window.open(href, '_blank', 'noopener,noreferrer');
+      if (ev.target.parentElement.target === '_blank') openOut(href);
       else location.assign(href);
     });
   }
@@ -8076,6 +8076,13 @@
     document.addEventListener('focusin', fit);
     document.addEventListener('focusout', () => setTimeout(fit, 50));
     fit();
+  }
+
+  // openOut opens href in a new tab. Installed on the home screen, iOS
+  // would show it in a sheet over the app: Safari takes it instead.
+  function openOut(href) {
+    if (standalone() && /^https?:/i.test(href)) location.assign('x-safari-' + href);
+    else window.open(href, '_blank', 'noopener,noreferrer');
   }
 
   function wireTouch() {

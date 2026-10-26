@@ -635,7 +635,7 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
 .mini-bar .done { background: var(--violet-dot); }
 .mini-bar .run { background: var(--violet-dot); opacity: 0.45; animation: pulse 1.4s ease-in-out infinite; }
 
-/* Hover actions of a row (desktop); swipe actions on phones. */
+/* Hover actions of a row (desktop); swipe actions on touch screens. */
 .row-acts {
   position: absolute; z-index: 2; top: 6px; right: 6px;
   display: none; gap: 2px;
