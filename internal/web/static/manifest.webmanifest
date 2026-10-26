@@ -28,7 +28,7 @@
       "title": "title",
       "text": "text",
       "url": "url",
-      "files": [{ "name": "files", "accept": ["image/*", "video/*"] }]
+      "files": [{ "name": "files", "accept": ["image/*", "video/*", "application/pdf", ".pdf"] }]
     }
   }
 }

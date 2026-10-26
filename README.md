@@ -411,8 +411,8 @@ Changes apply at once, rewrite `config.toml`, and show up in the CLI
   cached by a service worker, so the dashboard opens instantly — with the
   sessions and the conversations it showed last, even while the daemon is
   out of reach — and refreshes itself after a daemon upgrade. The app's
-  badge counts the sessions that need you, and on Android images, videos
-  and text can be shared into it as a new session. Everything is embedded
+  badge counts the sessions that need you, and on Android images, videos,
+  PDFs and text can be shared into it as a new session. Everything is embedded
   in the binary — no build step (`internal/web/static`; see `DESIGN.md`).
 
 ### Notifications
@@ -461,10 +461,10 @@ Once a session is open:
 - **Images** — pasted into a message, or returned by a tool (a file read,
   a screenshot), show as thumbnails; the panel's *Media* tab collects them
   all (Claude Code only, for now).
-- **Videos** — attach, paste or drop into a message or a new session's
-  prompt (any agent, up to 5, 4 GB each); large ones upload in the
-  background with progress shown, and the agent gets a `Video: <path>` to
-  open with its own tools.
+- **Videos and PDFs** — attach, paste or drop into a message or a new
+  session's prompt (any agent, up to 5, 4 GB each); they upload in the
+  background with progress shown, and the agent gets a `Video: <path>` or
+  `PDF: <path>` to open with its own tools.
 - **Files** — the panel's *Files* tab lists what the agent wrote and what
   else changed in its folder, newest first, with a search box; click one
   to preview (images/video/audio play, markdown renders, code is

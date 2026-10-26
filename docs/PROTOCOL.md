@@ -974,8 +974,8 @@ effort the adapter does not offer);
 `Agent.title` is what the conversation is about, for clients to list
 sessions by: the title the agent CLI gave it (Claude Code writes one into
 its transcript; the latest counts), else the start of the first message
-(its first sentence, at most 80 characters; slash commands and video lines
-skipped), empty before any message. The daemon reads it from the
+(its first sentence, at most 80 characters; slash commands and upload
+lines, `Video: …` and `PDF: …`, skipped), empty before any message. The daemon reads it from the
 transcript with the pull requests, also from transcripts written before
 it looked. A change comes as an `agent_upserted` event; `updated_at_ms`
 stays as it was.

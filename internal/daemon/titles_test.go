@@ -23,6 +23,7 @@ func TestPromptTitle(t *testing.T) {
 		{"[Image #1] what is wrong with this screen?", "what is wrong with this screen?"},
 		{"\n\nVideo: /srv/uploads/clip.mp4\nlook at   this clip", "look at this clip"},
 		{"Video: /srv/uploads/clip.mp4", ""},
+		{"PDF: /srv/uploads/spec.pdf\nsummarise it", "summarise it"},
 		{"/model opus", ""},
 		{"", ""},
 		{long, strings.TrimSpace(strings.Repeat("word ", 16)) + "…"},

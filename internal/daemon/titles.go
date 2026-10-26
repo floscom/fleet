@@ -47,12 +47,12 @@ var (
 
 // promptTitle makes a title of a message: its first line that says
 // something, without image placeholders, cut after its first sentence or
-// at a word near titleMax runes. A slash command or video paths alone make
+// at a word near titleMax runes. A slash command or upload paths alone make
 // none ("").
 func promptTitle(text string) string {
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(spaceRun.ReplaceAllString(imageRef.ReplaceAllString(line, ""), " "))
-		if line == "" || strings.HasPrefix(line, "Video: ") {
+		if line == "" || strings.HasPrefix(line, "Video: ") || strings.HasPrefix(line, "PDF: ") {
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
