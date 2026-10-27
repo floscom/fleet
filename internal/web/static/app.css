@@ -817,7 +817,8 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
 .banner.limit .btn { color: var(--orange); border-color: var(--orange-line); background: transparent; }
 .banner.locked { background: var(--bg-surface); color: var(--fg-2); border-color: var(--line); }
 
-.cscroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-padding-bottom: 24px; }
+.cscroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scroll-padding-bottom: calc(var(--dock-h, 0px) + 24px); }
+.cscroll > .col { padding-bottom: calc(var(--dock-h, 0px) + 28px); }
 .col {
   max-width: var(--col); margin: 0 auto;
   padding: 28px 24px 28px;
@@ -1027,8 +1028,16 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
 
 /* ----------------------------------------------------- dock, composer */
 
-.dock { flex: none; padding: 0 24px calc(14px + env(safe-area-inset-bottom)); }
-.dock-in { max-width: var(--col); margin: 0 auto; display: flex; flex-direction: column; gap: 8px; }
+/* The dock floats over the conversation's end: it scrolls on under it,
+   fading out above the composer. */
+.view.chat { position: relative; }
+.dock {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 2;
+  padding: 28px 24px calc(22px + env(safe-area-inset-bottom));
+  background: linear-gradient(to bottom, transparent, var(--bg) 28px);
+  pointer-events: none;
+}
+.dock-in { max-width: var(--col); margin: 0 auto; display: flex; flex-direction: column; gap: 8px; pointer-events: auto; }
 
 .composer {
   border: 1px solid var(--line);
@@ -1218,7 +1227,7 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
   .col { padding: 20px 16px 24px; gap: 16px; }
   .bubble, .md { font-size: 16px; }
   .md table { font-size: 14px; }
-  .dock { padding: 0 10px calc(10px + env(safe-area-inset-bottom)); }
+  .dock { padding: 20px 10px calc(14px + env(safe-area-inset-bottom)); background: linear-gradient(to bottom, transparent, var(--bg) 20px); }
   .composer { border-radius: 20px; padding: 10px 6px 6px 14px; }
   .composer textarea { font-size: 16px; }
   .cpick { height: 40px; padding: 0 9px; font-size: 14px; }
@@ -1985,7 +1994,7 @@ html, body { overscroll-behavior: none; }
 
   /* A question leaves some of the conversation in view. */
   .ask-body { max-height: min(46svh, calc(100svh - 420px)); min-height: 120px; }
-  .dock { max-height: 78svh; overflow-y: auto; overscroll-behavior: contain; }
+  .dock { max-height: 78svh; overflow-y: auto; overscroll-behavior: contain; pointer-events: auto; }
   .dock-in:has(.ask) .dock-status:empty { display: none; }
 
   /* iOS zooms into a field with text under 16px. */

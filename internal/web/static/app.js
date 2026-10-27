@@ -1997,7 +1997,6 @@
     C.banners = h('div');
     C.log = h('div', { class: 'col', role: 'log', 'aria-label': 'Conversation', 'aria-live': 'polite' });
     C.scroll = h('div', 'cscroll', C.log);
-    stickToBottom(C.scroll);
     C.ask = h('div');
     C.dlg = h('div');
     C.keys = h('div');
@@ -2006,7 +2005,9 @@
     C.compBox = h('div');
     C.status = h('div', { class: 'dock-status', role: 'status', 'aria-live': 'polite' });
     C.comp = null;
-    C.root = h('div', 'view chat', C.head, C.banners, C.scroll, h('div', 'dock', h('div', 'dock-in', C.ask, C.dlg, C.keys, C.queue, C.compBox, C.status)));
+    const dock = h('div', 'dock', h('div', 'dock-in', C.ask, C.dlg, C.keys, C.queue, C.compBox, C.status));
+    stickToBottom(C.scroll, dock);
+    C.root = h('div', 'view chat', C.head, C.banners, C.scroll, dock);
     fill($('main'), C.root);
     wireChatDrop(C.root);
   }
@@ -3154,8 +3155,9 @@
   // stickToBottom keeps a conversation at its end, when it was there, as
   // it gets shorter (a question or a dialog opens under it, a keyboard) or
   // its content taller (images load). Not right after a click or a key in
-  // it: what that unfolded stays in view.
-  function stickToBottom(scroller) {
+  // it: what that unfolded stays in view. A dock floats over the
+  // scroller's end; the conversation makes room for it (--dock-h).
+  function stickToBottom(scroller, dock) {
     let end = true;
     let touched = 0;
     scroller.addEventListener('scroll', () => {
@@ -3163,10 +3165,12 @@
     }, { passive: true });
     for (const type of ['pointerdown', 'keydown']) scroller.addEventListener(type, () => (touched = Date.now()), { passive: true });
     const ro = new ResizeObserver(() => {
+      if (dock) scroller.style.setProperty('--dock-h', dock.offsetHeight + 'px');
       if (end && Date.now() - touched > 600) scroller.scrollTop = scroller.scrollHeight;
     });
     ro.observe(scroller);
     if (scroller.firstElementChild) ro.observe(scroller.firstElementChild);
+    if (dock) ro.observe(dock);
   }
 
   // feedHead is what goes above the entries: "load earlier", or a note
