@@ -1907,6 +1907,7 @@
     insp.tab = '';
     insp.open = insp.open && !small();
     buildChatView();
+    let firstReply = true;
     chat.feed = newFeed({
       scroller: C.scroll,
       log: C.log,
@@ -1921,10 +1922,16 @@
         chatModel(r.model);
         chatAsks(r.asks);
         // The media follow: in full at first, then with each image; so do
-        // the files, a moment after some were written.
+        // the files (read when the session opens, a shell has no chat), a
+        // moment after some were written.
         if (r.reset || (r.entries || []).some((e) => e.images && e.images.length)) loadMedia();
-        if (r.reset) loadFiles();
-        else if ((r.entries || []).some((e) => e.files && e.files.length)) filesSoon(1500);
+        if (r.reset) {
+          if (!firstReply) loadFiles();
+          firstReply = false;
+        } else if ((r.entries || []).some((e) => e.files && e.files.length)) {
+          filesSoon(1500);
+          treeSoon(1500);
+        }
       },
       onStatus: renderChatStatus,
       cacheKey: agentKey(host, id),
@@ -1934,6 +1941,7 @@
     renderBanners();
     renderDock();
     startFeed(chat.feed);
+    loadFiles();
     wfLoop(chat.seq);
     refreshGit(chat.seq);
     if (chat.agent) markSeen(host, chat.agent);
@@ -4434,11 +4442,15 @@
         loadFiles();
       }
     });
-    const reload = iconBtn('refresh', 'Look again', () => loadFiles());
+    const reload = iconBtn('refresh', 'Look again', () => {
+      loadFiles();
+      if (files.view === 'tree') refreshTree();
+    });
+    const fmode = h('div', { class: 'seg files-mode', role: 'group', 'aria-label': 'Which files' });
     const flist = h('div', { class: 'insp-body flush', 'aria-live': 'polite' });
-    const browse = h('div', 'insp-pane', h('div', 'files-search', h('div', 'pop-row', h('label', 'search grow', icon('search', 'i-sm'), q), reload)), flist);
+    const browse = h('div', 'insp-pane', h('div', 'files-search', fmode, h('div', 'pop-row', h('label', 'search grow', icon('search', 'i-sm'), q), reload)), flist);
     const fview = h('div', { class: 'insp-pane', hidden: true });
-    p.files = { el: h('div', 'insp-pane', browse, fview), q, reload, list: flist, browse, view: fview };
+    p.files = { el: h('div', 'insp-pane', browse, fview), q, reload, mode: fmode, list: flist, browse, view: fview };
     // media
     const grid = h('div', 'media-grid');
     p.media = { el: h('div', 'insp-pane', h('div', 'insp-body', grid)), grid };
@@ -5007,6 +5019,7 @@
     seq: 0, // file reads: only the latest is shown
     url: '', // object URL of the video or audio shown
     sendNote: null, // {text, kind} of the last send
+    view: load('fleet.filesView', 'changed'), // 'changed', or 'tree': the whole folder
   };
 
   // Images shown from a data: URL (in an <img> an SVG runs no script).
@@ -5030,6 +5043,7 @@
     revokeFileURL();
     Object.assign(files, { list: [], found: [], q: '', dir: '', total: 0, partial: false, loaded: false, error: '', missing: false, busy: false, again: false, open: null, shown: null, sendNote: null });
     files.seq++;
+    resetTree();
   }
 
   function filesSoon(ms) {
@@ -5079,9 +5093,14 @@
     p.view.hidden = !files.open;
     if (files.open) return;
     p.q.placeholder = files.dir ? `Search files in ${baseName(files.dir) || '/'}` : 'Search the files written';
+    renderFilesMode(p);
     const sec = (text, n) => h('div', 'files-sec', text, n != null ? h('span', 'muted num', ` · ${n}`) : null);
     if (!files.loaded) return fill(p.list, h('p', 'empty-note', 'Loading…'));
     if (files.error) return fill(p.list, h('p', 'empty-note', files.missing ? 'This fleet cannot list files: update it.' : files.error));
+    const asTree = !!files.dir && files.view === 'tree';
+    // A tree read out whole each time a folder unfolds says too much.
+    p.list.setAttribute('aria-live', asTree ? 'off' : 'polite');
+    if (asTree) return renderTree(p.list, sec);
     const out = [];
     if (files.q) {
       if (files.list.length) out.push(sec('Written or changed by the agent', files.list.length), fileRows(files.list));
@@ -5096,11 +5115,15 @@
     fill(p.list, out);
   }
 
-  function fileBadge(name) {
+  const fileExt = (name) => {
     const dot = name.lastIndexOf('.');
-    const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
-    const kind = FILE_KINDS.find(([re]) => re.test(ext));
-    return h('span', 'file-badge' + (kind ? ' ' + kind[1] : ''), ext.slice(0, 4) || '—');
+    return dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+  };
+  const fileKind = (name) => (FILE_KINDS.find(([re]) => re.test(fileExt(name))) || [])[1] || '';
+
+  function fileBadge(name) {
+    const kind = fileKind(name);
+    return h('span', 'file-badge' + (kind ? ' ' + kind : ''), fileExt(name).slice(0, 4) || '—');
   }
 
   function fileRows(list) {
@@ -5112,6 +5135,277 @@
         h('div', 'grow', h('div', 'file-name', name), h('div', 'file-dir', shortPath(where) || './')),
         h('div', 'file-meta', f.gone ? 'deleted' : fmtSize(f.size), f.mtimeMs ? h('div', null, relTime(f.mtimeMs)) : null));
     });
+  }
+
+  // ---- files: the session's folder as a tree
+  //
+  // GET .../dir lists one folder, read when it is unfolded: its folders
+  // first, then its files, each with its git status (M, A, D, R, U, I) and
+  // a folder whether something inside changed; a chain of folders that
+  // each hold only the next comes as one ("src/main/java"). With a search,
+  // the tree shows the files that match, in their folders.
+
+  const tree = {
+    dirs: new Map(), // folder ('' the agent's) → {entries, partial, error, busy}
+    open: new Set(), // the folders unfolded
+    root: '', // the agent's folder, as the server names it
+    missing: false, // the fleet has no dir route
+    focus: '', // the row that takes the focus
+    typed: '', // type-ahead: the letters typed lately
+    typedAt: 0,
+    timer: 0,
+  };
+
+  const GIT_TEXT = { M: 'modified', A: 'added', D: 'deleted', R: 'renamed', U: 'untracked', I: 'ignored by git' };
+
+  function resetTree() {
+    clearTimeout(tree.timer);
+    Object.assign(tree, { dirs: new Map(), open: new Set(), root: '', missing: false, focus: '', typed: '' });
+  }
+
+  function setFilesView(v) {
+    if (files.view === v) return;
+    files.view = v;
+    save('fleet.filesView', v);
+    renderFiles();
+  }
+
+  function renderFilesMode(p) {
+    p.mode.hidden = !files.dir || tree.missing;
+    if (p.mode.hidden) return;
+    const opt = (v, text, extra) => h('button', { type: 'button', 'aria-pressed': String(files.view === v), onclick: () => setFilesView(v) }, text, extra);
+    fill(p.mode, opt('changed', 'Changed', files.total ? h('span', 'muted num', String(files.total)) : null), opt('tree', 'Folder'));
+  }
+
+  async function loadDir(key) {
+    const seq = chat.seq;
+    const d = tree.dirs.get(key) || {};
+    tree.dirs.set(key, d);
+    d.busy = true;
+    try {
+      const r = await api('GET', chatAPI('dir' + (key ? '?' + new URLSearchParams({ path: key }) : '')));
+      if (seq !== chat.seq) return;
+      Object.assign(d, { entries: r.entries || [], partial: !!r.partial, error: '' });
+      if (!key) tree.root = r.path;
+    } catch (e) {
+      if (seq !== chat.seq) return;
+      // A fleet without the route answers no JSON.
+      if (!key && e.status === 404 && /^request failed/.test(e.message)) tree.missing = true;
+      Object.assign(d, { error: e.message });
+      if (key) tree.open.delete(key);
+    } finally {
+      if (seq === chat.seq) d.busy = false;
+    }
+    if (tree.missing) files.view = 'changed';
+    if (insp.open && insp.tab === 'files') renderFiles();
+  }
+
+  // refreshTree reads the folders shown again; those gone are left out.
+  function refreshTree() {
+    clearTimeout(tree.timer);
+    if (!tree.dirs.has('')) return;
+    for (const key of tree.dirs.keys()) {
+      if (key && !tree.open.has(key)) tree.dirs.delete(key);
+      else if (!tree.dirs.get(key).busy) loadDir(key);
+    }
+  }
+
+  function treeSoon(ms) {
+    if (files.view !== 'tree' || !tree.dirs.has('')) return;
+    clearTimeout(tree.timer);
+    tree.timer = setTimeout(refreshTree, ms);
+  }
+
+  function toggleDir(e) {
+    if (!e.dir || e.empty || e.gone) return;
+    if (tree.open.has(e.path)) tree.open.delete(e.path);
+    else {
+      tree.open.add(e.path);
+      if (!tree.dirs.has(e.path)) loadDir(e.path);
+    }
+    tree.focus = e.path;
+    renderFiles();
+  }
+
+  function treeOpenFile(e) {
+    if (e.gone) return;
+    tree.focus = e.path;
+    const rel = tree.root && e.path.startsWith(tree.root + '/') ? e.path.slice(tree.root.length + 1) : '';
+    openFile({ path: e.path, rel, size: e.size || 0, mtimeMs: e.mtimeMs || 0 });
+  }
+
+  // treeRows are the rows to show: {e, depth, parent} for an entry, {note,
+  // depth} for a line in its place.
+  function treeRows() {
+    const rows = [];
+    const walk = (key, depth) => {
+      const d = tree.dirs.get(key);
+      if (!d || !d.entries) {
+        rows.push({ note: d && d.error ? d.error : 'Loading…', depth });
+        return;
+      }
+      if (!d.entries.length) rows.push({ note: 'Nothing in it', depth });
+      for (const e of d.entries) {
+        rows.push({ e, depth, parent: key, open: tree.open.has(e.path) });
+        if (e.dir && tree.open.has(e.path)) walk(e.path, depth + 1);
+      }
+      if (d.partial) rows.push({ note: `Only the first ${d.entries.length} are listed.`, depth });
+    };
+    walk('', 0);
+    return rows;
+  }
+
+  // matchRows are the rows of a search: the files found in the folder, in
+  // their folders, all unfolded.
+  function matchRows(list) {
+    const top = { kids: new Map() };
+    for (const f of list) {
+      if (!f.rel) continue;
+      const parts = f.rel.split('/');
+      let n = top;
+      parts.slice(0, -1).forEach((name, i) => {
+        if (!n.kids.has(name + '/')) n.kids.set(name + '/', { name, dir: true, path: files.dir + '/' + parts.slice(0, i + 1).join('/'), kids: new Map() });
+        n = n.kids.get(name + '/');
+      });
+      n.kids.set(parts.at(-1), { name: parts.at(-1), path: f.path, size: f.size, mtimeMs: f.mtimeMs, gone: f.gone, changed: f.written });
+    }
+    const rows = [];
+    const walk = (n, depth, parent) => {
+      const kids = [...n.kids.values()].sort((a, b) => (b.dir ? 1 : 0) - (a.dir ? 1 : 0) || a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+      for (let k of kids) {
+        let name = k.name;
+        while (k.dir && k.kids.size === 1 && [...k.kids.values()][0].dir) {
+          k = [...k.kids.values()][0];
+          name += '/' + k.name;
+        }
+        rows.push({ e: { ...k, name }, depth, parent, open: true, fixed: true });
+        if (k.dir) walk(k, depth + 1, k.path);
+      }
+    };
+    walk(top, 0, '');
+    return rows;
+  }
+
+  function renderTree(list, sec) {
+    const rows = [];
+    const out = [];
+    if (files.q) {
+      const all = [...files.list, ...files.found];
+      rows.push(...matchRows(all));
+      const outside = files.list.filter((f) => !f.rel);
+      if (!rows.length && !outside.length) out.push(h('p', 'empty-note', `No file matches “${files.q}”.`));
+      if (outside.length) out.push(sec('Outside the folder', outside.length), fileRows(outside));
+      if (files.partial) out.push(h('p', 'note-line', 'Not everything is listed: the folder is large.'));
+    } else {
+      if (!tree.dirs.has('')) loadDir('');
+      rows.push(...treeRows());
+    }
+    const items = rows.filter((r) => r.e);
+    if (!items.some((r) => r.e.path === tree.focus)) tree.focus = items.length ? items[0].e.path : '';
+    const had = list.contains(document.activeElement) && document.activeElement.matches('.tree-row');
+    const el = rows.length ? h('div', { class: 'tree', role: 'tree', 'aria-label': files.q ? 'Files that match' : `Files in ${baseName(files.dir) || '/'}`, onkeydown: (ev) => treeKey(ev, el, rows), onfocusin: treeFocus }, rows.map(treeRow)) : null;
+    fill(list, el, out);
+    if (had && el) {
+      const row = el.querySelector(`.tree-row[data-path="${CSS.escape(tree.focus)}"]`);
+      if (row) row.focus({ preventScroll: true });
+    }
+  }
+
+  function treeRow(row) {
+    // Set from script: the page's policy allows no style attribute.
+    const deep = (el) => {
+      el.style.setProperty('--d', row.depth);
+      return el;
+    };
+    if (row.note) return deep(h('div', { class: 'tree-note', role: 'none' }, row.note));
+    const e = row.e;
+    const parts = e.name.split('/');
+    const last = parts.pop();
+    const kind = e.dir ? '' : fileKind(last);
+    const said = [e.git ? GIT_TEXT[e.git] : '', e.changed ? (e.dir ? 'changes inside' : 'written by the agent') : '', e.link ? 'a link' : ''].filter(Boolean).join(', ');
+    return deep(h('div', {
+      class: 'tree-row' + (e.gone ? ' gone' : '') + (e.git === 'I' ? ' ignored' : ''),
+      role: 'treeitem',
+      tabindex: e.path === tree.focus ? '0' : '-1',
+      'aria-level': String(row.depth + 1),
+      'aria-expanded': e.dir && !e.empty && !e.gone ? String(row.open) : null,
+      'aria-disabled': e.gone ? 'true' : null,
+      'aria-description': said || null,
+      'data-path': e.path,
+      title: (e.gone ? e.path : shortPath(e.path)) + (said ? '\n' + said : '') + (!e.dir && !e.gone ? `\n${fmtSize(e.size || 0)}` : ''),
+      onclick: () => {
+        if (e.dir) {
+          if (!row.fixed) toggleDir(e);
+        } else treeOpenFile(e);
+      },
+    },
+      e.dir && !e.empty && !e.gone ? icon('chevron-right', 'chev') : h('span', 'chev'),
+      icon(e.dir ? 'folder' : 'file', 'ti' + (kind ? ' ' + kind : '')),
+      h('span', 'tree-name', parts.length ? h('span', 'tree-pre', parts.join('/') + '/') : null, last),
+      e.git && e.git !== 'I' ? h('span', { class: 'git g-' + e.git, 'aria-hidden': 'true' }, e.git) : e.changed ? h('span', { class: 'git-dot', 'aria-hidden': 'true' }) : null));
+  }
+
+  // treeFocus makes the row focused, by a tap or Tab, the one keys move from.
+  function treeFocus(ev) {
+    const row = ev.target.closest('.tree-row');
+    if (!row || row.dataset.path === tree.focus) return;
+    tree.focus = row.dataset.path;
+    for (const n of ev.currentTarget.querySelectorAll('.tree-row')) n.tabIndex = n === row ? 0 : -1;
+  }
+
+  // treeKey moves through the tree from the keyboard: arrows, Home, End,
+  // Enter or Space, and letters typed to jump to a name.
+  function treeKey(ev, el, rows) {
+    const items = rows.filter((r) => r.e);
+    const at = Math.max(0, items.findIndex((r) => r.e.path === tree.focus));
+    const r = items[at];
+    if (!r) return;
+    const go = (i) => {
+      const to = items[Math.max(0, Math.min(items.length - 1, i))];
+      tree.focus = to.e.path;
+      for (const n of el.querySelectorAll('.tree-row')) n.tabIndex = n.dataset.path === tree.focus ? 0 : -1;
+      const n = el.querySelector(`.tree-row[data-path="${CSS.escape(tree.focus)}"]`);
+      if (n) {
+        n.focus();
+        n.scrollIntoView({ block: 'nearest' });
+      }
+    };
+    const foldable = r.e.dir && !r.e.empty && !r.e.gone && !r.fixed;
+    switch (ev.key) {
+      case 'ArrowDown': go(at + 1); break;
+      case 'ArrowUp': go(at - 1); break;
+      case 'Home': go(0); break;
+      case 'End': go(items.length - 1); break;
+      case 'ArrowRight':
+        if (foldable && !r.open) toggleDir(r.e);
+        else if (r.e.dir && r.open && items[at + 1] && items[at + 1].parent === r.e.path) go(at + 1);
+        break;
+      case 'ArrowLeft':
+        if (foldable && r.open) toggleDir(r.e);
+        else if (r.parent) go(items.findIndex((x) => x.e.path === r.parent));
+        break;
+      case 'Enter':
+      case ' ':
+        if (r.e.dir) {
+          if (foldable) toggleDir(r.e);
+        } else treeOpenFile(r.e);
+        break;
+      default: {
+        if (ev.key.length !== 1 || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        const now = Date.now();
+        tree.typed = (now - tree.typedAt < 700 ? tree.typed : '') + ev.key.toLowerCase();
+        tree.typedAt = now;
+        const from = tree.typed.length > 1 ? at : at + 1;
+        for (let k = 0; k < items.length; k++) {
+          const i = (from + k) % items.length;
+          if (items[i].e.name.toLowerCase().startsWith(tree.typed)) {
+            go(i);
+            break;
+          }
+        }
+      }
+    }
+    ev.preventDefault();
   }
 
   async function openFile(f) {

@@ -4,6 +4,7 @@ package web
 //
 //	GET /api/agents/{id}/files         what it wrote and changed (see apiFiles)
 //	GET /api/agents/{id}/file?path=P   one of them, its content (see apiFile)
+//	GET /api/agents/{id}/dir?path=P    one folder, for the tree (see dir.go)
 //
 // An agent's files are those its tool calls wrote (transcript.Entry.Files,
 // wherever they are) and those of its folder changed since its session

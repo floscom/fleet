@@ -1930,6 +1930,38 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
 .file-badge.doc { color: var(--amber); }
 .file-row.gone .file-name { text-decoration: line-through; color: var(--fg-3); }
 .file-row:disabled { cursor: default; }
+
+/* The Files tab: what changed, or the whole folder as a tree. */
+.files-mode { display: flex; margin-bottom: 8px; }
+.files-mode[hidden] { display: none; }
+.files-mode button { flex: 1; justify-content: center; }
+.files-mode .num { font-weight: 500; font-variant-numeric: tabular-nums; }
+.tree { padding: 2px 0 12px; }
+.tree-row {
+  display: flex; align-items: center; gap: 6px;
+  min-height: 30px; padding: 0 14px 0 calc(8px + var(--d, 0) * 14px);
+  font-size: 13px; cursor: pointer;
+}
+@media (hover: hover) { .tree-row:hover { background: var(--bg-hover); } }
+.tree-row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.tree-row .chev { flex: none; width: 14px; height: 14px; color: var(--fg-3); transition: rotate 0.12s var(--ease); }
+.tree-row[aria-expanded="true"] .chev { rotate: 90deg; }
+.tree-row .ti { flex: none; width: 16px; height: 16px; color: var(--fg-3); }
+.tree-row .ti.img { color: var(--blue); }
+.tree-row .ti.av { color: var(--violet); }
+.tree-row .ti.doc { color: var(--amber); }
+.tree-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-pre { color: var(--fg-3); }
+.tree-row.ignored { color: var(--fg-3); }
+.tree-row.gone { cursor: default; }
+.tree-row.gone .tree-name { text-decoration: line-through; color: var(--fg-3); }
+.tree-row .git { flex: none; width: 14px; text-align: center; font: 600 11px var(--mono); }
+.tree-row .g-M { color: var(--amber); }
+.tree-row .g-A, .tree-row .g-U { color: var(--green); }
+.tree-row .g-D { color: var(--red); }
+.tree-row .g-R { color: var(--blue); }
+.tree-row .git-dot { flex: none; width: 6px; height: 6px; margin: 0 4px; border-radius: 50%; background: var(--amber-dot); }
+.tree-note { padding: 5px 14px 5px calc(30px + var(--d, 0) * 14px); font-size: 12px; color: var(--fg-3); }
 .file-body { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; }
 .file-body .md { padding: 14px; }
 .file-body .codev { margin: 10px; }
@@ -1976,7 +2008,7 @@ html, body { overscroll-behavior: none; }
 /* The app's chrome is no text to select, and a long press on a session
    opens no link preview. */
 :is(.side-head, .topbar, .insp-h, .row, .attn-item, .tab, .btn, .icon-btn, .cpick, .ctx-chip, .mi, .key, .send,
-  .start-btn, .stop-btn, .newbar, .seg, .act-sum, .step-row, .grp-h, .devstrip, .side-foot, .file-row, .recent-chip) {
+  .start-btn, .stop-btn, .newbar, .seg, .act-sum, .step-row, .grp-h, .devstrip, .side-foot, .file-row, .tree-row, .recent-chip) {
   -webkit-user-select: none; user-select: none;
   -webkit-touch-callout: none;
 }
@@ -2010,6 +2042,7 @@ html, body { overscroll-behavior: none; }
   .grp-toggle { height: 40px; }
   .step-row { min-height: 44px; }
   .btn.sm, .seg button, .recent-chip { min-height: 40px; }
+  .tree-row { min-height: 40px; }
   .codev-h .btn { height: 32px; padding: 0 12px; }
   .switch::before { content: ""; position: absolute; inset: -11px -4px; }
   .meta-btn .muted { display: none; }

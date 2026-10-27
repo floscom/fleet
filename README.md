@@ -466,9 +466,14 @@ Once a session is open:
   background with progress shown, and the agent gets a `Video: <path>` or
   `PDF: <path>` to open with its own tools.
 - **Files** — the panel's *Files* tab lists what the agent wrote and what
-  else changed in its folder, newest first, with a search box; click one
-  to preview (images/video/audio play, markdown renders, code is
-  highlighted), save it, or send it to another machine in the fleet.
+  else changed in its folder, newest first, with a search box; *Folder*
+  shows the whole folder as a tree instead, read a folder at a time as you
+  unfold it, with git status letters (M, A, D, R, U) on files, a dot on
+  folders with changes inside, ignored files dimmed, and single-folder
+  chains folded into one row (`src/main/java`); arrow keys, Home/End and
+  typing a name move through it. Click a file to preview it (images/video/audio
+  play, markdown renders, code is highlighted), save it, or send it to
+  another machine in the fleet.
 - **Questions** — Claude's AskUserQuestion shows as a form above the
   message box: pick an option (or several, where allowed), type your own,
   add a note. Sending a chat message instead has Claude read it, same as
