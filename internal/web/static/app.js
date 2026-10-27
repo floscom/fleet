@@ -2220,8 +2220,8 @@
     const ta = h('textarea', { id: 'chat-input', rows: 1, spellcheck: 'true' });
     ta.value = loadDraft(chat.host, chat.id);
     const thumbs = h('div', 'attach-list');
-    const file = h('input', { type: 'file', accept: 'image/*,video/*,application/pdf,.pdf', multiple: true, hidden: true, tabindex: '-1', 'aria-hidden': 'true' });
-    const attach = h('button', { type: 'button', class: 'cpick icon-only', 'aria-label': 'Attach images, videos or PDFs', title: 'Attach images, videos or PDFs (or paste, or drop them)', onclick: () => file.click() }, icon('clip'));
+    const file = h('input', { type: 'file', multiple: true, hidden: true, tabindex: '-1', 'aria-hidden': 'true' });
+    const attach = h('button', { type: 'button', class: 'cpick icon-only', 'aria-label': 'Attach images or files', title: 'Attach images or files (or paste, or drop them)', onclick: () => file.click() }, icon('clip'));
     const modelBtn = h('button', { type: 'button', class: 'cpick model', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => chatModelMenu(ev.currentTarget) });
     const effortBtn = h('button', { type: 'button', class: 'cpick effort', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => chatEffortMenu(ev.currentTarget) });
     const keysBtn = h('button', { type: 'button', class: 'cpick icon-only', 'aria-label': 'Terminal keys', title: 'Keys for the agent’s own dialogs', 'aria-pressed': 'false', onclick: () => { chat.keys = !chat.keys; renderKeys(); api_.update(); } }, icon('keyboard'));
@@ -2752,22 +2752,23 @@
     return ok;
   }
 
-  // ---- images, videos and PDFs sent with a message
+  // ---- images and other files sent with a message
   //
   // Images: the daemon pastes each into the agent's prompt, where Claude and
   // Codex show it as [Image #n]. Big photos are scaled down here (the models
   // shrink them anyway) to keep requests small; formats the agents cannot
-  // read (HEIC, …) are re-encoded as JPEG. Videos and PDFs do not go with a
-  // message: each is uploaded to the agent's machine as soon as it is
+  // read (HEIC, …) are re-encoded as JPEG. Any other file (a video, a PDF,
+  // an archive, …), and an image this browser cannot read, does not go with
+  // a message: each is uploaded to the agent's machine as soon as it is
   // picked (POST .../uploads, streamed), and the message gets a line with
   // its path there, for the agent to open with its own tools. They share
-  // the videos list; a PDF's entry has pdf set.
+  // the videos list; an entry's kind says what it is.
 
   const MAX_IMAGES = 10;
   const IMAGE_SIDE = 2000; // longest side, px
   const IMAGE_BYTES = 3.5 * 1024 * 1024; // the daemon's limit per image
   const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
-  const MAX_VIDEOS = 5;
+  const MAX_VIDEOS = 10;
   const VIDEO_BYTES = 4 * 1024 ** 3; // the daemon's limit per file
   const VIDEO_EXT = /\.(?:mp4|m4v|mov|webm|mkv|avi|3gp|mpe?g|ogv|wmv|flv)$/i;
 
@@ -2776,18 +2777,22 @@
   const isVideo = (f) => f.type.startsWith('video/') || (!f.type && VIDEO_EXT.test(f.name || ''));
   const isPDF = (f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name || '');
   // isUpload: a file that goes up to the agent's machine (addVideos).
-  const isUpload = (f) => isVideo(f) || isPDF(f);
-  // mediaFiles is the image, video and PDF files pasted or dropped, if any.
-  const mediaFiles = (dt) => [...(dt ? dt.files : [])].filter((f) => isImage(f) || isUpload(f));
+  const isUpload = (f) => !isImage(f);
+  // uploadKind names what f is in the line the message gets for it.
+  const uploadKind = (f) => (isVideo(f) ? 'Video' : isPDF(f) ? 'PDF' : 'File');
+  const UPLOAD_NAME = { Video: 'video', PDF: 'document.pdf', File: 'file' };
+  // mediaFiles is the files pasted or dropped, if any.
+  const mediaFiles = (dt) => [...(dt ? dt.files : [])];
   const chatUploads = () => (chat.host ? `/api/hosts/${encodeURIComponent(chat.host)}/uploads` : '/api/uploads');
 
   async function addChatFiles(files) {
     if (!chatLive() || chat.sending || askShown()) return;
     const seq = chat.seq;
-    addVideos(files, chat.videos, chatUploads(), chat.host ? hostName(chat.host) : '', () => {
+    const upload = (fs) => addVideos(fs, chat.videos, chatUploads(), chat.host ? hostName(chat.host) : '', () => {
       if (seq === chat.seq) C.comp?.paint();
     });
-    await readImages(files, chat.images, () => seq === chat.seq, () => C.comp?.paint());
+    upload(files);
+    await readImages(files, chat.images, () => seq === chat.seq, () => C.comp?.paint(), upload);
   }
 
   // A file dropped anywhere on the chat goes with the next message; it
@@ -2806,8 +2811,9 @@
   // readImages adds the image files among files to images, up to
   // MAX_IMAGES in all: each at once, without data while it is read (and
   // perhaps scaled down), then ready to send. changed() runs after each
-  // step. It stops once alive() is false: the message they were for is gone.
-  async function readImages(files, images, alive, changed) {
+  // step; upload([f]) takes an image this browser cannot read. It stops
+  // once alive() is false: the message they were for is gone.
+  async function readImages(files, images, alive, changed, upload) {
     const picked = [];
     for (const f of [...files].filter(isImage)) {
       if (images.length >= MAX_IMAGES) {
@@ -2829,7 +2835,8 @@
         if (!alive()) return;
         const i = images.indexOf(im);
         if (i >= 0) images.splice(i, 1);
-        toast(`${im.name}: ${e.message}`, 'error');
+        if (e.unreadable && upload) upload([im.file]);
+        else toast(`${im.name}: ${e.message}`, 'error');
       }
       im.file = null;
       changed();
@@ -2871,7 +2878,7 @@
     try {
       bmp = await createImageBitmap(f);
     } catch {
-      throw new Error('this browser cannot read the image');
+      throw Object.assign(new Error('this browser cannot read the image'), { unreadable: true });
     }
     try {
       const scale = Math.min(1, IMAGE_SIDE / Math.max(bmp.width, bmp.height));
@@ -2901,23 +2908,28 @@
     });
   }
 
-  // addVideos starts uploading the videos and PDFs among files to url, the
-  // uploads route of the agent's machine (dest names it if it is another
-  // one), adding each to videos as {name, size, sent, path, error, xhr,
-  // dest, pdf}; changed() runs when one is added, done or failed.
-  function addVideos(files, videos, url, dest, changed) {
+  // addVideos starts uploading the files among files that are no images
+  // (all of them if all) to url, the uploads route of the agent's machine
+  // (dest names it if it is another one), adding each to videos as {name,
+  // size, sent, path, error, xhr, dest, kind}; changed() runs when one is
+  // added, done or failed.
+  function addVideos(files, videos, url, dest, changed, all = false) {
     let added = false;
-    for (const f of [...files].filter(isUpload)) {
-      const pdf = !isVideo(f);
+    for (const f of [...files].filter((f) => all || isUpload(f))) {
+      const kind = uploadKind(f);
       if (videos.length >= MAX_VIDEOS) {
-        toast(`At most ${MAX_VIDEOS} videos and PDFs per message`, 'warn');
+        toast(`At most ${MAX_VIDEOS} files per message`, 'warn');
         break;
       }
       if (f.size > VIDEO_BYTES) {
-        toast(`${f.name || (pdf ? 'PDF' : 'video')}: too large (at most 4 GB)`, 'error');
+        toast(`${f.name || UPLOAD_NAME[kind]}: too large (at most 4 GB)`, 'error');
         continue;
       }
-      const v = { name: f.name || (pdf ? 'document.pdf' : 'video'), size: f.size, sent: 0, path: '', error: '', xhr: null, dest, pdf };
+      if (!f.size) {
+        toast(`${f.name || UPLOAD_NAME[kind]}: empty, or a folder`, 'error');
+        continue;
+      }
+      const v = { name: f.name || UPLOAD_NAME[kind], size: f.size, sent: 0, path: '', error: '', xhr: null, dest, kind };
       v.xhr = uploadFile(url, f, (sent) => {
         v.sent = sent;
         paintVideo(v);
@@ -2937,7 +2949,7 @@
   // done gets an error message, or '' and the decoded reply.
   function uploadFile(url, file, progress, done) {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', url + '?' + new URLSearchParams({ name: file.name || (isPDF(file) ? 'document.pdf' : 'video') }));
+    xhr.open('POST', url + '?' + new URLSearchParams({ name: file.name || UPLOAD_NAME[uploadKind(file)] }));
     const token = getToken();
     if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
     xhr.upload.onprogress = (ev) => progress(ev.loaded);
@@ -2958,7 +2970,7 @@
     return xhr;
   }
 
-  // dropVideos stops the uploads of videos and PDFs still on their way and returns
+  // dropVideos stops the uploads of files still on their way and returns
   // an empty list. What has arrived stays on the machine until pruned.
   function dropVideos(videos) {
     for (const v of videos || []) if (v.xhr) v.xhr.abort();
@@ -2971,14 +2983,14 @@
     return '';
   }
 
-  // withVideos is text with a line for each video's and PDF's path appended.
+  // withVideos is text with a line for each uploaded file's path appended.
   function withVideos(text, videos) {
     if (!videos.length) return text;
-    const lines = videos.map((v) => `${v.pdf ? 'PDF' : 'Video'}: ${v.path}`).join('\n');
+    const lines = videos.map((v) => `${v.kind}: ${v.path}`).join('\n');
     return text.trim() ? text.trimEnd() + '\n\n' + lines : lines;
   }
 
-  // renderThumbs shows the images, videos and PDFs to send in box, each with a
+  // renderThumbs shows the images and other files to send in box, each with a
   // button to remove it (data-image or data-video is its index).
   function renderThumbs(box, images, videos = []) {
     box.hidden = !images.length && !videos.length;
@@ -2988,13 +3000,13 @@
       videos.map((v, i) => {
         v.statusEl = h('span', 'st');
         v.barEl = h('span');
-        const el = h('div', { class: 'att video', title: v.path || v.name }, h('span', 'nm', (v.pdf ? '▤ ' : '▶ ') + v.name), v.statusEl, h('span', 'bar', v.barEl), remove('video', i, v.name));
+        const el = h('div', { class: 'att video', title: v.path || v.name }, h('span', 'nm', (v.kind === 'Video' ? '▶ ' : '▤ ') + v.name), v.statusEl, h('span', 'bar', v.barEl), remove('video', i, v.name));
         paintVideo(v);
         return el;
       }));
   }
 
-  // paintVideo shows how far v's upload (a video or PDF) is.
+  // paintVideo shows how far v's upload (a file other than an image) is.
   function paintVideo(v) {
     if (!v.statusEl) return;
     const pct = v.path ? 100 : v.size ? Math.min(99, Math.floor((v.sent / v.size) * 100)) : 0;
@@ -5503,15 +5515,12 @@
     if (launch.busy) return;
     const gen = launch.gen;
     const alive = () => gen === launch.gen && U.view !== 'chat';
-    addVideos(files, launch.videos, launchAPI('uploads'), launch.host ? hostName(launch.host) : '', () => {
+    // An agent that takes no images at start gets them as files.
+    const upload = (fs, all = !launchImages()) => addVideos(fs, launch.videos, launchAPI('uploads'), launch.host ? hostName(launch.host) : '', () => {
       if (alive()) renderLaunch();
-    });
-    if (![...files].some(isImage)) return;
-    if (!launchImages()) {
-      toast(`${launch.adapter || 'This agent'} takes no images at start`, 'warn');
-      return;
-    }
-    await readImages(files, launch.images, alive, renderLaunch);
+    }, all);
+    upload(files);
+    if (launchImages()) await readImages(files, launch.images, alive, renderLaunch, (fs) => upload(fs, true));
   }
 
   // Last successfully used provider, per machine and root folder. Session
@@ -5591,7 +5600,7 @@
     N.ta.placeholder = shell ? 'A shell takes no prompt: type into its terminal once it starts'
       : keyboard() ? `What should the agent do? · ${MOD}+Enter starts` : 'What should the agent do?';
     N.attach.disabled = launch.busy || shell;
-    N.attach.title = launchImages() || !launch.adapter ? 'Attach images, videos or PDFs (or paste, or drop them)' : `Attach videos or PDFs (${launch.adapter} takes no images at start)`;
+    N.attach.title = launchImages() || !launch.adapter ? 'Attach images or files (or paste, or drop them)' : `Attach files (${launch.adapter} takes no images at start: they go as files)`;
     renderThumbs(N.thumbs, launch.images, launch.videos);
     // what is in the way, or the keys
     const problem = launchImagesProblem();
@@ -6047,8 +6056,8 @@
     N.ta.value = load('fleet.launch.prompt', '') || '';
     N.ctx = h('div', 'ctx');
     N.thumbs = h('div', 'attach-list');
-    N.file = h('input', { type: 'file', accept: 'image/*,video/*,application/pdf,.pdf', multiple: true, hidden: true, tabindex: '-1', 'aria-hidden': 'true' });
-    N.attach = h('button', { type: 'button', class: 'cpick icon-only', 'aria-label': 'Attach images, videos or PDFs', onclick: () => N.file.click() }, icon('clip'));
+    N.file = h('input', { type: 'file', multiple: true, hidden: true, tabindex: '-1', 'aria-hidden': 'true' });
+    N.attach = h('button', { type: 'button', class: 'cpick icon-only', 'aria-label': 'Attach images or files', onclick: () => N.file.click() }, icon('clip'));
     N.agentBtn = h('button', { type: 'button', class: 'cpick agent', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => agentMenu(ev.currentTarget) });
     N.modelBtn = h('button', { type: 'button', class: 'cpick model', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => launchModelMenu(ev.currentTarget) });
     N.effortBtn = h('button', { type: 'button', class: 'cpick effort', 'aria-haspopup': 'menu', 'aria-expanded': 'false', onclick: (ev) => launchEffortMenu(ev.currentTarget) });
@@ -7727,7 +7736,7 @@
   }
 
   // takeShare opens a new session with what another app shared with fleet
-  // (sw.js keeps it): the text as the prompt, images, videos and PDFs attached.
+  // (sw.js keeps it): the text as the prompt, images and other files attached.
   let sharing = false;
   async function takeShare() {
     if (!CACHES_OK || sharing) return;

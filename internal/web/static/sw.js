@@ -74,7 +74,7 @@ async function image(req) {
 }
 
 // takeShare keeps what was shared and opens a new session with it: the
-// text as its prompt, images, videos and PDFs attached.
+// text as its prompt, images and other files attached.
 async function takeShare(req) {
   try {
     const form = await req.formData();

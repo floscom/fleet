@@ -52,7 +52,7 @@ var (
 func promptTitle(text string) string {
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(spaceRun.ReplaceAllString(imageRef.ReplaceAllString(line, ""), " "))
-		if line == "" || strings.HasPrefix(line, "Video: ") || strings.HasPrefix(line, "PDF: ") {
+		if line == "" || strings.HasPrefix(line, "Video: ") || strings.HasPrefix(line, "PDF: ") || strings.HasPrefix(line, "File: ") {
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
