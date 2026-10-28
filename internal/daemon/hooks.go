@@ -125,7 +125,7 @@ func (a *agentRec) applyHook(upd adapter.StateUpdate) bool {
 			a.OwnState, a.OwnDetail = upd.State, upd.Detail
 		}
 	}
-	a.dialogGone = 0
+	a.dialogGone, a.workGone = 0, 0
 	return a.showDialogs()
 }
 

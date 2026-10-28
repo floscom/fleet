@@ -1837,6 +1837,7 @@
     held: false, // the last message went into a dialog, without Enter
     model: null, // {model, name, effort, switch, models, efforts}; null: the agent offers no choice
     switching: false, // a model switch is in flight
+    busyLine: null, // what the working agent is busy with, at the end of the conversation (see renderBusyLine)
     switchedAt: 0, // when the last one ended: replies read before it are stale
     interrupting: false,
     queueing: false, // a message is being queued
@@ -2162,9 +2163,26 @@
     else if (askShown()) t = 'A message sent now answers none of the questions: the agent reads it instead.';
     else if (chat.interrupting) t = 'Interrupting…';
     else if (chatDialog()) t = 'In a dialog, Send types your text without pressing Enter: Enter picks the highlighted option.';
-    else if (a.state === 'working') t = 'Working… replies show as the agent writes them' + (keyboard() ? ' · Ctrl+C interrupts' : '');
+    else if (a.state === 'working') t = (a.stateDetail ? a.stateDetail + '…' : 'Working… replies show as the agent writes them') + (keyboard() ? ' · Ctrl+C interrupts' : '');
     else if (a.state === 'starting') t = 'Starting the agent…';
     st.textContent = t;
+    renderBusyLine();
+  }
+
+  // renderBusyLine shows what a working agent is busy with, when it says
+  // (it compacts its conversation), at the end of the conversation.
+  function renderBusyLine() {
+    const f = chat.feed;
+    const a = chat.agent;
+    const text = f && a && chatLive() && a.state === 'working' ? a.stateDetail || '' : '';
+    if (!text) {
+      if (chat.busyLine) chat.busyLine.remove();
+      chat.busyLine = null;
+      return;
+    }
+    if (!chat.busyLine) chat.busyLine = h('div', { class: 'meta-line busy', role: 'status' });
+    fill(chat.busyLine, h('span', 'spin'), text);
+    if (f.log.lastElementChild !== chat.busyLine) f.log.append(chat.busyLine);
   }
 
   // The keys of the agent's own dialogs (permissions, trust, menus).
@@ -3132,13 +3150,15 @@
       group: null, // the group the next tool call joins
       groups: [], // every group shown
       day: '', // the day of the last message shown
+      last: null, // {el, ts} of the newest message shown, which stamp marks
+      stamp: null, // the time under it
       catchup: false, // a copy shows: the next request asks for what came after it, without waiting
     }, o);
   }
 
   function startFeed(f) {
     stopFeed(f);
-    Object.assign(f, { file: '', start: 0, end: 0, loaded: false, earlier: false, error: '', group: null, groups: [], day: '', catchup: false });
+    Object.assign(f, { file: '', start: 0, end: 0, loaded: false, earlier: false, error: '', group: null, groups: [], day: '', last: null, catchup: false });
     fill(f.log, h('p', 'empty-note wait', 'Loading…'));
     feedLoop(f, f.seq);
   }
@@ -3218,8 +3238,9 @@
       f.tools.clear();
       f.orphans.clear();
       f.watch.clear();
-      Object.assign(f, { group: null, groups: [], day: '' });
+      Object.assign(f, { group: null, groups: [], day: '', last: null });
       fill(log, feedHead(f), entryNodes(f, r.entries));
+      stampLast(f);
       if (f.onStatus) f.onStatus();
       scroller.scrollTop = scroller.scrollHeight;
       return;
@@ -3229,8 +3250,24 @@
       log.querySelector('[data-empty]')?.remove();
       log.append(...nodes);
     }
+    stampLast(f);
     if (f.onStatus) f.onStatus();
     if (atBottom) scroller.scrollTop = scroller.scrollHeight;
+  }
+
+  // stampLast puts when the newest message arrived under it.
+  function stampLast(f) {
+    const l = f.last;
+    if (!l || !l.ts) {
+      if (f.stamp) f.stamp.remove();
+      return;
+    }
+    if (!f.stamp || Number(f.stamp.dataset.ts) !== l.ts) {
+      if (f.stamp) f.stamp.remove();
+      f.stamp = relTime(l.ts, 'msg-time', true);
+    }
+    f.stamp.classList.toggle('mine', l.el.classList.contains('msg-user'));
+    if (l.el.nextElementSibling !== f.stamp) l.el.after(f.stamp);
   }
 
   // stickToBottom keeps a conversation at its end, when it was there, as
@@ -3290,7 +3327,7 @@
     // The page gets its own groups and days; results in it attach to the
     // calls in it; later results whose call is in it already showed on
     // their own.
-    const keep = { tools: f.tools, group: f.group, day: f.day };
+    const keep = { tools: f.tools, group: f.group, day: f.day, last: f.last };
     Object.assign(f, { tools: new Map(), group: null, day: '' });
     const nodes = entryNodes(f, r.entries);
     if (f.group) f.group.closed = true;
@@ -3306,7 +3343,9 @@
     f.group = keep.group;
     const lastDay = [...nodes].reverse().find((n) => n.classList && n.classList.contains('day'));
     f.day = keep.day;
+    f.last = keep.last || f.last;
     btn.replaceWith(...feedHead(f), ...nodes);
+    stampLast(f);
     // The page's last day and the next one shown may be the same.
     if (lastDay) {
       let n = lastDay.nextElementSibling;
@@ -3344,6 +3383,9 @@
     if (d.toDateString() === new Date(today.getTime() - DAY).toDateString()) return 'Yesterday';
     return d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
   }
+
+  // The notes that mark a point in the conversation, drawn as a rule.
+  const MARKS = { interrupted: 'Interrupted', compacted: 'Conversation compacted' };
 
   function entryNode(f, e) {
     const main = f === chat.feed;
@@ -3389,20 +3431,27 @@
             out.push(h('div', 'day', day));
           }
         }
-        out.push(timeTitle(h('div', 'msg-user',
+        const el = timeTitle(h('div', 'msg-user',
           e.images && e.images.length ? imagesNode(f, e.images) : null,
-          e.text ? h('div', 'bubble', e.text) : null), e));
+          e.text ? h('div', 'bubble', e.text) : null), e);
+        f.last = { el, ts: e.ts };
+        out.push(el);
         return out;
       }
-      case 'assistant':
+      case 'assistant': {
         closeGroup(f);
-        return [timeTitle(md(e.text || ''), e)];
+        const el = timeTitle(md(e.text || ''), e);
+        f.last = { el, ts: e.ts };
+        return [el];
+      }
       case 'task':
         closeGroup(f);
         return [taskEndNode(f, e)];
-      default:
+      default: {
         closeGroup(f);
-        return [timeTitle(h('div', e.text === 'interrupted' ? 'meta-line' : 'note-line', e.text === 'interrupted' ? 'Interrupted' : e.text || ''), e)];
+        const mark = MARKS[e.text];
+        return [timeTitle(h('div', mark ? 'meta-line' : 'note-line', mark || e.text || ''), e)];
+      }
     }
   }
 

@@ -15,6 +15,7 @@ type payload struct {
 	SessionID        string          `json:"session_id"`
 	TranscriptPath   string          `json:"transcript_path"`
 	Source           string          `json:"source"`
+	Trigger          string          `json:"trigger"` // compaction: manual or auto
 	Message          string          `json:"message"`
 	NotificationType string          `json:"notification_type"`
 	ToolName         string          `json:"tool_name"`
@@ -23,6 +24,10 @@ type payload struct {
 	IsInterrupt      bool            `json:"is_interrupt"`
 	AgentID          string          `json:"agent_id"` // set inside subagents
 }
+
+// compacting is the detail of an agent compacting its conversation, which
+// takes a minute or more.
+const compacting = "Compacting the conversation"
 
 // HandleHook maps Claude Code hook events to agent states:
 //
@@ -36,6 +41,8 @@ type payload struct {
 //	PostToolUseFailure is_interrupt   -> IDLE (Esc: no Stop hook follows)
 //	PostToolUseFailure, PermissionDenied -> WORKING (the turn goes on)
 //	SubagentStop                      -> WORKING, from that subagent
+//	PreCompact                        -> WORKING (compacting as detail)
+//	PostCompact                       -> WORKING; IDLE after /compact
 //
 // Informational notifications (auth_success, elicitation results) are ignored,
 // and so is permission_prompt: PermissionRequest reports the same dialog
@@ -87,6 +94,15 @@ func (c *claude) HandleHook(ev adapter.HookEvent) (adapter.StateUpdate, bool) {
 			return adapter.StateUpdate{}, false
 		}
 		u.State = fleetv1.AgentState_AGENT_STATE_WORKING
+	case "PreCompact":
+		u.State, u.Detail = fleetv1.AgentState_AGENT_STATE_WORKING, compacting
+	case "PostCompact":
+		// /compact ends without a Stop hook; an automatic compaction
+		// goes on with the turn.
+		u.State = fleetv1.AgentState_AGENT_STATE_WORKING
+		if p.Trigger == "manual" {
+			u.State = fleetv1.AgentState_AGENT_STATE_IDLE
+		}
 	case "Stop":
 		u.State = fleetv1.AgentState_AGENT_STATE_IDLE
 	case "StopFailure":

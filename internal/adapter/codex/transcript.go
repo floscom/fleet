@@ -253,7 +253,7 @@ func itemEntries(raw json.RawMessage) []transcript.Entry {
 	case "ImageView":
 		return []transcript.Entry{{Kind: transcript.Tool, Name: "view_image", Text: hookcmd.Truncate(filePath(it.Path))}}
 	case "ContextCompaction":
-		return note("context compacted")
+		return note(transcript.Compacted)
 	case "SubAgentActivity":
 		// "completed" follows every turn the subagent was given, not only
 		// its first; "interacted" (a message to it) is left out.

@@ -24,9 +24,11 @@ var (
 const interruptKey = "Escape"
 
 // interrupt interrupts the turn a live agent is working on, as Esc in its
-// terminal does, and reports whether its transcript recorded that. No hook
-// reports a turn interrupted while the model writes, so the agent is made
-// idle here once the transcript shows it.
+// terminal does, and reports whether its transcript recorded that, or the
+// agent went idle meanwhile (a cancelled compaction records nothing; see
+// adapter.WorkDetector). No hook reports a turn interrupted while the
+// model writes, so the agent is made idle here once the transcript shows
+// it.
 //
 // The agent must be working or wait on a dialog: Esc twice at an idle
 // Claude prompt opens its rewind menu.
@@ -73,7 +75,7 @@ func (m *manager) interrupt(ctx context.Context, ref string) (*fleetv1.Agent, bo
 		ad, _ := m.d.opts.Adapters.Get(a.Adapter)
 		m.applyHookLocked(a, ad, adapter.StateUpdate{State: stateIdle})
 	}
-	return a.proto(), done, nil
+	return a.proto(), done || a.State == stateIdle, nil
 }
 
 // interrupted waits, at most interruptWait, for the transcript at path to

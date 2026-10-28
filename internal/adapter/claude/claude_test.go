@@ -236,6 +236,12 @@ func TestHandleHook(t *testing.T) {
 		{"SubagentStop", `{"session_id":"` + sid + `","hook_event_name":"SubagentStop","agent_id":"a98756a7d8eaf74a5","agent_type":"general-purpose","stop_hook_active":false}`,
 			true, fleetv1.AgentState_AGENT_STATE_WORKING, "", sid},
 		{"SubagentStop", `{"session_id":"` + sid + `","hook_event_name":"SubagentStop"}`, false, 0, "", ""},
+		{"PreCompact", `{"session_id":"` + sid + `","hook_event_name":"PreCompact","trigger":"auto","custom_instructions":null}`,
+			true, fleetv1.AgentState_AGENT_STATE_WORKING, compacting, sid},
+		{"PostCompact", `{"session_id":"` + sid + `","hook_event_name":"PostCompact","trigger":"auto","compact_summary":"..."}`,
+			true, fleetv1.AgentState_AGENT_STATE_WORKING, "", sid},
+		{"PostCompact", `{"session_id":"` + sid + `","hook_event_name":"PostCompact","trigger":"manual","compact_summary":"..."}`,
+			true, fleetv1.AgentState_AGENT_STATE_IDLE, "", sid},
 		{"SessionEnd", `{}`, false, 0, "", ""},
 	}
 	a := New("", nil)
@@ -560,5 +566,24 @@ func TestAsk(t *testing.T) {
 	out, _ = c.AnswerOutput(ev, ask.Answer{Decline: "what for?"})
 	if !strings.Contains(string(out), `"behavior":"deny"`) || !strings.Contains(string(out), `what for?`) {
 		t.Fatalf("decline: %s", out)
+	}
+}
+
+func TestWorkGone(t *testing.T) {
+	a := New("", nil).(*claude)
+	compactingScreen := "❯ /compact\n✽ Compacting conversation…\n  ▰▰▱▱▱▱ 4%\n────\n❯ \n────\n  ⏸ manual mode on"
+	idleScreen := "❯ /compact\n────\n❯ /compact\n────\n  ⏸ manual mode on"
+	for _, tt := range []struct {
+		detail, screen string
+		want           bool
+	}{
+		{compacting, compactingScreen, false},
+		{compacting, idleScreen, true},
+		{"", idleScreen, false},
+		{"Bash: ls", idleScreen, false},
+	} {
+		if got := a.WorkGone(tt.detail, tt.screen); got != tt.want {
+			t.Errorf("WorkGone(%q, %q) = %v, want %v", tt.detail, tt.screen, got, tt.want)
+		}
 	}
 }

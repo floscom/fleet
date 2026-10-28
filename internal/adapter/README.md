@@ -89,7 +89,12 @@ Shared helpers:
    press Enter after text typed from the dashboard, and drops dialogs
    hooks reported once the screen no longer shows one. Set
    `StateUpdate.Subagent` and `Call` so dialogs close on the right hooks.
-11. Register it in `cmd/fleet`. Test argv construction, generated files
+11. Work that ends without a hook (optional): if a hook reports work with
+   a `Detail` that can be cancelled silently, implement
+   `adapter.WorkDetector`. `WorkGone` gets the detail and the visible
+   screen, and reports when the screen no longer shows that work; three
+   such screens in a row make the agent idle.
+12. Register it in `cmd/fleet`. Test argv construction, generated files
     (parse them back), and `HandleHook` with payloads captured from the
     real CLI.
 
@@ -118,6 +123,12 @@ Shared helpers:
   `idle_prompt` later), so the daemon checks the screen for the dialog
   (`DialogDetector`). `SubagentStop` tells when a subagent is gone (it
   also fires for Claude's internal helper agents).
+- `/compact` fires `PreCompact` and then `PostCompact` (`trigger`
+  `manual`; `auto` when Claude compacts mid-turn), and no
+  `UserPromptSubmit` or `Stop`. Esc while it compacts cancels it and fires
+  no hook either; the spinner line "Compacting conversation…" goes away
+  (`WorkDetector`). The transcript's `compact_boundary` line comes before
+  the `/compact` command line.
 - `PermissionRequest` has no `tool_use_id`; its `tool_name` and
   `tool_input` match the call's `PreToolUse` / `PostToolUse`.
 - On first launch in an untrusted directory, Claude shows a trust dialog

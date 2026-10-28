@@ -194,6 +194,21 @@ func (c *claude) DialogOpen(screen string) bool {
 	return footer(strings.Split(screen, "\n"), dialogHint) >= 0
 }
 
+// WorkGone implements adapter.WorkDetector: while Claude compacts its
+// conversation, its spinner says "Compacting conversation"; Esc cancels
+// that without a hook.
+func (c *claude) WorkGone(detail, screen string) bool {
+	if detail != compacting {
+		return false
+	}
+	for _, l := range strings.Split(screen, "\n") {
+		if strings.Contains(column(l), "Compacting conversation") {
+			return false
+		}
+	}
+	return true
+}
+
 // column returns the text of a screen line in Claude's own column. In a
 // wide terminal, a session that changed files shows them and their diff
 // in a sidebar, on the same lines to the right, down to the bottom of

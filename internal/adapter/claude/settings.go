@@ -20,6 +20,8 @@ var HookEvents = []string{
 	"Stop",               // turn finished
 	"StopFailure",        // turn ended by an API error
 	"SubagentStop",       // a subagent finished: its dialogs are gone
+	"PreCompact",         // compacting the conversation
+	"PostCompact",        // compacted
 }
 
 // hookTimeout (seconds) bounds a `fleet hook` run; the default is 60.

@@ -31,13 +31,15 @@ import (
 // $TEST_TRUST_DIR set to LaunchRequest.TrustDir and $TEST_IMAGES to its
 // Images, one per line. Its DetectPrompt matches
 // testDialog on the screen, DetectLogin testLogin, and DialogOpen
-// testQuestion.
+// testQuestion; the work of a "working" hook with detail testWork is gone
+// once the screen does not show testWork.
 type testAdapter struct{}
 
 const (
 	testDialog   = "fleet-test-dialog"
 	testQuestion = "fleet-test-question"
 	testLogin    = "fleet-test-login"
+	testWork     = "fleet-test-work"
 )
 
 func (testAdapter) ID() string          { return "test" }
@@ -78,6 +80,10 @@ func (testAdapter) DetectLogin(screen string) (adapter.Login, bool) {
 // TranscriptDir is transcripts/ in FLEET_HOME, or .test/transcripts in a
 // sandbox home.
 func (testAdapter) DialogOpen(screen string) bool { return strings.Contains(screen, testQuestion) }
+
+func (testAdapter) WorkGone(detail, screen string) bool {
+	return detail == testWork && !strings.Contains(screen, testWork)
+}
 
 func (testAdapter) TranscriptDir(home string) string {
 	if home != "" {

@@ -30,6 +30,11 @@ const (
 	// before the dialogs hooks reported count as closed. One is not enough:
 	// a hook arrives just before its dialog is drawn.
 	dialogGoneAfter = 2
+	// workGoneAfter is how many screens in a row must not show the work a
+	// hook reported (adapter.WorkDetector) before the agent counts as
+	// idle: the spinner is drawn a moment after the hook, and hooks that
+	// run show their own.
+	workGoneAfter = 3
 )
 
 // loop reconciles the registry with tmux until ctx is cancelled.
@@ -230,13 +235,15 @@ func (m *manager) reconcile(ctx context.Context) {
 //
 // It also checks that the dialogs hooks reported are still on screen: some
 // close without a hook (a refused permission fires none). Once the screen
-// shows no dialog dialogGoneAfter times in a row, they are dropped.
+// shows no dialog dialogGoneAfter times in a row, they are dropped. So is
+// the work a hook reported (adapter.WorkDetector), after workGoneAfter.
 func (m *manager) watchPrompts(ctx context.Context, bySession map[string]tmux.PaneStatus, snap uint64) {
 	type watch struct {
 		a      *agentRec
 		prompt adapter.PromptDetector // nil: no startup dialog to look for
 		login  adapter.Loginer        // nil: no sign-in to look for
 		dialog adapter.DialogDetector // nil: no hook dialogs to check
+		work   adapter.WorkDetector   // nil: no work to check
 	}
 	var ws []watch
 	now := time.Now()
@@ -260,7 +267,10 @@ func (m *manager) watchPrompts(ctx context.Context, bySession map[string]tmux.Pa
 		if det, ok := ad.(adapter.DialogDetector); ok && len(a.Dialogs) > 0 {
 			w.dialog = det
 		}
-		if w.prompt != nil || w.login != nil || w.dialog != nil {
+		if det, ok := ad.(adapter.WorkDetector); ok && a.State == stateWorking && a.StateDetail != "" {
+			w.work = det
+		}
+		if w.prompt != nil || w.login != nil || w.dialog != nil || w.work != nil {
 			ws = append(ws, w)
 		}
 	}
@@ -289,6 +299,9 @@ func (m *manager) watchPrompts(ctx context.Context, bySession map[string]tmux.Pa
 			}
 			if w.dialog != nil {
 				m.dialogsOnScreenLocked(a, w.dialog.DialogOpen(screen))
+			}
+			if w.work != nil {
+				m.workOnScreenLocked(a, w.work.WorkGone(a.StateDetail, screen))
 			}
 		}
 		m.mu.Unlock()
@@ -341,6 +354,21 @@ func (m *manager) dialogsOnScreenLocked(a *agentRec, open bool) {
 	} else {
 		m.saveLocked()
 	}
+}
+
+// workOnScreenLocked makes a working agent idle once its screen has not
+// shown the work its hooks reported workGoneAfter times in a row.
+func (m *manager) workOnScreenLocked(a *agentRec, gone bool) {
+	if !gone || a.State != stateWorking {
+		a.workGone = 0
+		return
+	}
+	if a.workGone++; a.workGone < workGoneAfter {
+		return
+	}
+	a.workGone = 0
+	ad, _ := m.d.opts.Adapters.Get(a.Adapter)
+	m.applyHookLocked(a, ad, adapter.StateUpdate{State: stateIdle})
 }
 
 func stateName(s fleetv1.AgentState) string {

@@ -738,3 +738,27 @@ func TestScreenPromptAndTrustDir(t *testing.T) {
 		return a.GetState() == stateIdle && a.GetStateDetail() == ""
 	})
 }
+
+// Work a hook reported that ends without a hook (a compaction cancelled
+// with Esc) makes the agent idle once its screen no longer shows it.
+func TestWorkGoneFromScreen(t *testing.T) {
+	e := newEnv(t)
+	c := e.dialUnix()
+	e.mkdir("plain")
+	a := c.run(&fleetv1.RunAgentRequest{Root: "code", Path: "plain", Isolation: isoPinned,
+		ExtraArgs: []string{"printf '" + testWork + "'; read x; clear; sleep 60"}})
+	c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_Hook{Hook: &fleetv1.HookEvent{
+		AgentId: a.GetId(), Adapter: "test", Event: "working", Payload: []byte(testWork),
+	}}})
+	c.waitAgent(a.GetId(), "working", func(a *fleetv1.Agent) bool {
+		return a.GetState() == stateWorking && a.GetStateDetail() == testWork
+	})
+	time.Sleep(time.Duration(workGoneAfter+1) * reconcileInterval)
+	if got := c.agent(a.GetId()); got.GetState() != stateWorking {
+		t.Fatalf("with the work on screen: %v, want working", got.GetState())
+	}
+	c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_SendText{SendText: &fleetv1.SendTextRequest{Agent: a.GetId(), Text: "y", Submit: true}}})
+	c.waitAgent(a.GetId(), "idle", func(a *fleetv1.Agent) bool {
+		return a.GetState() == stateIdle && a.GetStateDetail() == ""
+	})
+}

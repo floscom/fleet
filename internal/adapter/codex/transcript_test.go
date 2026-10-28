@@ -90,7 +90,7 @@ func TestParseTranscript(t *testing.T) {
 		{"view image", completed(`{"type":"ImageView","id":"exec-6","path":"file:///w/shot.png"}`), tool(transcript.Entry{Name: "view_image", Text: "/w/shot.png"})},
 
 		// notes
-		{"compaction", completed(`{"type":"ContextCompaction","id":"x"}`), noteAt("context compacted")},
+		{"compaction", completed(`{"type":"ContextCompaction","id":"x"}`), noteAt(transcript.Compacted)},
 		{"subagent started", completed(`{"type":"SubAgentActivity","id":"call_1","kind":"started","agent_thread_id":"t2","agent_path":"/root/server"}`), noteAt("started subagent /root/server")},
 		{"subagent finished", completed(`{"type":"SubAgentActivity","id":"call_1","kind":"completed","agent_thread_id":"t2","agent_path":"/root/server"}`), noteAt("subagent /root/server finished")},
 		{"subagent interacted", completed(`{"type":"SubAgentActivity","id":"call_1","kind":"interacted","agent_thread_id":"t2","agent_path":"/root/server"}`), nil},

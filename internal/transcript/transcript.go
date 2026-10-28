@@ -47,6 +47,9 @@ const (
 // Interrupted is the Text of the Note a turn the user interrupted leaves.
 const Interrupted = "interrupted"
 
+// Compacted is the Text of the Note a compacted conversation leaves.
+const Compacted = "compacted"
+
 // Entry is one item of a chat.
 type Entry struct {
 	Kind string `json:"kind"`

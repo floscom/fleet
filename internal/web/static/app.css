@@ -952,6 +952,9 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
 
 .meta-line { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--fg-3); }
 .meta-line::before, .meta-line::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.meta-line.busy { color: var(--fg-2); }
+.msg-time { align-self: flex-start; margin-top: -12px; font-size: 11px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.msg-time.mine { align-self: flex-end; }
 
 .answered {
   align-self: flex-end; max-width: min(85%, 600px);

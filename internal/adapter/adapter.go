@@ -103,6 +103,16 @@ type DialogDetector interface {
 	DialogOpen(screen string) bool
 }
 
+// WorkDetector is implemented by adapters whose hooks report work with a
+// detail that can end without a hook: Claude compacting its conversation,
+// cancelled with Esc. The daemon makes the agent idle once its screen no
+// longer shows the work.
+type WorkDetector interface {
+	// WorkGone reports whether screen no longer shows the work of a
+	// WORKING state with detail; false if detail names no such work.
+	WorkGone(detail, screen string) bool
+}
+
 // Asker is implemented by adapters whose CLI asks the user questions with
 // choices in a dialog and whose hook can answer them: the hook runs
 // `fleet hook --wait` (hookcmd.WaitCommand), the dashboard shows the

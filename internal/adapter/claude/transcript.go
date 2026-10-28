@@ -8,6 +8,7 @@ import (
 	"html"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -270,7 +271,9 @@ func userText(s string) []transcript.Entry {
 			name, _ = inner(s, "command-message")
 		}
 		cmd := strings.TrimSpace(strings.TrimSpace(name) + " " + strings.TrimSpace(args))
-		if cmd == "" {
+		if cmd == "" || strings.TrimSpace(name) == "/compact" {
+			// /compact is written as typed when it starts, and again
+			// after the compaction it did.
 			return nil
 		}
 		return []transcript.Entry{{Kind: transcript.User, Text: transcript.Clip(cmd, transcript.MaxText)}}
@@ -313,15 +316,21 @@ func taskEnd(s string) []transcript.Entry {
 	return []transcript.Entry{e}
 }
 
-// output makes a note of the non-empty contents of the given tags.
+// sgr matches a terminal color or style escape.
+var sgr = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// output makes a note of the non-empty contents of the given tags, without
+// their terminal colors. /compact's output is left out: the compaction has
+// a note of its own.
 func output(s string, tags ...string) []transcript.Entry {
 	var parts []string
 	for _, t := range tags {
-		if v, _ := inner(s, t); strings.TrimSpace(v) != "" {
+		v, _ := inner(s, t)
+		if v = sgr.ReplaceAllString(v, ""); strings.TrimSpace(v) != "" {
 			parts = append(parts, strings.Trim(v, "\r\n"))
 		}
 	}
-	if len(parts) == 0 {
+	if len(parts) == 0 || strings.HasPrefix(parts[0], "Compacted (ctrl+o") {
 		return nil
 	}
 	return []transcript.Entry{{Kind: transcript.Note, Text: transcript.Clip(strings.Join(parts, "\n"), transcript.MaxOutput)}}
@@ -445,7 +454,7 @@ func systemLine(r record) []transcript.Entry {
 	_ = json.Unmarshal(r.Content, &content)
 	switch r.Subtype {
 	case "compact_boundary":
-		return note("conversation compacted")
+		return note(transcript.Compacted)
 	case "api_error":
 		var e struct {
 			Formatted string `json:"formatted"`

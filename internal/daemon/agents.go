@@ -110,6 +110,9 @@ type agentRec struct {
 	// dialogGone counts the screens in a row that showed none of Dialogs
 	// (see watchPrompts).
 	dialogGone int
+	// workGone counts the screens in a row that did not show the work of
+	// StateDetail (see watchPrompts).
+	workGone int
 	// loginWatch is until when watchPrompts looks for a sign-in step on
 	// the screen after input (/login).
 	loginWatch time.Time
