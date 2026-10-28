@@ -781,10 +781,12 @@
   }
 
   // groupsOf puts the sessions into the sidebar's groups, the groups and
-  // their sessions the most recent first (by status: in the order below).
+  // their sessions the newest first (by status: in the order below). It
+  // goes by when a session was created, not by its last change: busy
+  // sessions would otherwise keep swapping places.
   function groupsOf(list) {
-    const recent = (x, y) => (y.a.updatedAtMs || 0) - (x.a.updatedAtMs || 0);
-    if (U.groupBy === 'none') return [{ key: 'all', label: 'Recent', items: list.sort(recent) }];
+    const newest = (x, y) => y.a.createdAtMs - x.a.createdAtMs || x.a.id.localeCompare(y.a.id);
+    if (U.groupBy === 'none') return [{ key: 'all', label: 'Sessions', items: list.sort(newest) }];
     const map = new Map();
     const put = (key, text, x, extra) => {
       if (!map.has(key)) map.set(key, { key, label: text, items: [], ...extra });
@@ -803,9 +805,9 @@
       }
     }
     const groups = [...map.values()];
-    for (const g of groups) g.items.sort(recent);
+    for (const g of groups) g.items.sort(newest);
     if (U.groupBy === 'status') groups.sort((x, y) => x.key.localeCompare(y.key));
-    else groups.sort((x, y) => (y.items[0].a.updatedAtMs || 0) - (x.items[0].a.updatedAtMs || 0));
+    else groups.sort((x, y) => newest(x.items[0], y.items[0]));
     return groups;
   }
 
