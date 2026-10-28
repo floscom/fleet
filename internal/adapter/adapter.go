@@ -12,6 +12,7 @@
 //   - initial prompt, resume: advertise them in Capabilities.
 //   - startup dialogs no hook reports (folder trust): implement
 //     PromptDetector, and honour LaunchRequest.TrustDir to skip them.
+//   - signing in from the dashboard: implement Loginer.
 //   - sandboxes: honour LaunchRequest.Sandbox and LaunchRequest.Home.
 //   - chat view: implement Transcripter, and report the transcript file in
 //     StateUpdate.Transcript.
@@ -64,6 +65,33 @@ type Adapter interface {
 // NEEDS_INPUT with the returned detail while it matches.
 type PromptDetector interface {
 	DetectPrompt(screen string) (detail string, ok bool)
+}
+
+// Loginer is implemented by adapters whose CLI signs the user in from its
+// own terminal: it shows the address of a sign-in page, and may wait for a
+// code that page gives. The daemon watches for it at startup and after
+// input from the dashboard (/login); the dashboard shows the step as a link
+// and a code field instead of a terminal full of wrapped text.
+type Loginer interface {
+	// DetectLogin reads the sign-in step the bottom of the screen shows,
+	// ok=false if it shows none.
+	DetectLogin(screen string) (l Login, ok bool)
+}
+
+// Login is a sign-in step a Loginer reads off the screen.
+type Login struct {
+	// Detail says what the CLI waits for, e.g. "Claude asks how to sign in".
+	Detail string `json:"detail"`
+	// URL is the sign-in page to open; "" while the CLI asks how to sign in.
+	URL string `json:"url,omitempty"`
+	// Code is a one-time code to enter on that page (device sign-in).
+	Code string `json:"code,omitempty"`
+	// Paste: the CLI waits for a code the page shows, typed into its
+	// terminal.
+	Paste bool `json:"paste,omitempty"`
+	// Local: the page hands the sign-in to a server on the agent's own
+	// machine (localhost), so only a browser on that machine completes it.
+	Local bool `json:"local,omitempty"`
 }
 
 // DialogDetector is implemented by adapters that can tell from the screen

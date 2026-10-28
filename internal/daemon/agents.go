@@ -110,6 +110,9 @@ type agentRec struct {
 	// dialogGone counts the screens in a row that showed none of Dialogs
 	// (see watchPrompts).
 	dialogGone int
+	// loginWatch is until when watchPrompts looks for a sign-in step on
+	// the screen after input (/login).
+	loginWatch time.Time
 	// busy is set while RunAgent or KillAgent is working on the agent
 	// outside the lock; reconcile leaves busy agents alone.
 	busy bool

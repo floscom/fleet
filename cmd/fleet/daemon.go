@@ -21,6 +21,7 @@ import (
 	"fleet/internal/adapter"
 	"fleet/internal/adapter/claude"
 	"fleet/internal/adapter/codex"
+	"fleet/internal/adapter/gemini"
 	"fleet/internal/adapter/shell"
 	"fleet/internal/client"
 	"fleet/internal/config"
@@ -124,6 +125,7 @@ func registry(cfg *config.Config) *adapter.Registry {
 	return adapter.NewRegistry(
 		claude.New(ac(claude.ID).Binary, nil),
 		codex.New(ac(codex.ID).Binary, nil),
+		gemini.New(ac(gemini.ID).Binary, nil),
 		shell.New(ac(shell.ID).Binary),
 	)
 }

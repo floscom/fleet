@@ -145,15 +145,25 @@ func (m *manager) liveSession(ref string) (session, adapterID string, err error)
 	return a.TmuxSession, a.Adapter, nil
 }
 
-// screen returns the visible screen of a live agent.
-func (m *manager) screen(ctx context.Context, ref string) (string, error) {
-	session, _, err := m.liveSession(ref)
+// screenLogin returns the visible screen of a live agent, and the step of
+// signing in it shows, if its adapter reads one (adapter.Loginer).
+func (m *manager) screenLogin(ctx context.Context, ref string) (string, *adapter.Login, error) {
+	session, adapterID, err := m.liveSession(ref)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	ctx, cancel := context.WithTimeout(ctx, screenTimeout)
 	defer cancel()
-	return m.d.tmux.Screen(ctx, session)
+	screen, err := m.d.tmux.Screen(ctx, session)
+	if err != nil {
+		return "", nil, err
+	}
+	ad, _ := m.d.opts.Adapters.Get(adapterID)
+	det, _ := ad.(adapter.Loginer)
+	if l, ok := detectLogin(det, screen); ok {
+		return screen, &l, nil
+	}
+	return screen, nil, nil
 }
 
 // sendInput types text into a live agent (then Enter if submit) and presses
@@ -168,12 +178,23 @@ func (m *manager) sendInput(ctx context.Context, ref, text string, submit, guard
 	if guard && submit && text != "" && m.dialogOpen(ctx, session, adapterID) {
 		submit, held = false, true
 	}
+	m.watchLogin(ref)
 	if text != "" || submit {
 		if err := m.d.tmux.SendText(ctx, session, text, submit); err != nil {
 			return false, err
 		}
 	}
 	return held, m.d.tmux.SendKeys(ctx, session, keys...)
+}
+
+// watchLogin has watchPrompts look for a sign-in step on the agent's
+// screen for a while: input may have opened one (/login).
+func (m *manager) watchLogin(ref string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if a, err := m.find(ref); err == nil {
+		a.loginWatch = time.Now().Add(promptWatch)
+	}
 }
 
 // dialogOpen reports whether the agent's screen shows a dialog, as far as

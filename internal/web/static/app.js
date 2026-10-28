@@ -94,7 +94,9 @@
     return s;
   }
   const icon = (name, cls) => svgUse('#i-' + name, 'i' + (cls ? ' ' + cls : ''));
-  const LOGOS = { claude: 'claude', codex: 'codex', shell: 'shell' };
+  const LOGOS = { claude: 'claude', codex: 'codex', gemini: 'gemini', shell: 'shell' };
+  // AGENT_NAMES are the agent CLIs' short names, for sentences.
+  const AGENT_NAMES = { claude: 'Claude', codex: 'Codex', gemini: 'Gemini' };
   const logo = (adapter, cls) => svgUse('#logo-' + (LOGOS[adapter] || 'shell'), 'logo logo-' + (LOGOS[adapter] || 'shell') + (cls ? ' ' + cls : ''));
 
   function iconBtn(name, label, onclick, o = {}) {
@@ -2007,6 +2009,8 @@
     C.scroll = h('div', 'cscroll', C.log);
     C.ask = h('div');
     C.dlg = h('div');
+    // The dialog card of the chat shown before went with its view.
+    C.dlgPre = C.dlgLogin = null;
     C.keys = h('div');
     C.queue = h('div');
     C.queueKey = '';
@@ -2189,7 +2193,7 @@
     if (!dialogShown()) {
       if (C.dlgPre) {
         fill(C.dlg);
-        C.dlgPre = null;
+        C.dlgPre = C.dlgLogin = null;
         screenNeeded();
       }
       return;
@@ -2197,17 +2201,86 @@
     if (!C.dlgPre) {
       C.dlgPre = h('pre', { 'aria-label': 'The bottom of the terminal' }, screen.text || 'Reading the terminal…');
       C.dlgDetail = h('span', 'grow trunc');
+      C.dlgLogin = h('div', 'login');
       fill(C.dlg, h('section', { class: 'dlgcard', 'aria-label': 'The agent waits in its terminal' },
         h('div', 'dlgcard-h', icon('alert'), C.dlgDetail,
           h('button', { type: 'button', class: 'btn sm', onclick: () => openInsp('terminal') }, 'Terminal')),
-        C.dlgPre, keysStrip()));
+        C.dlgLogin, C.dlgPre, keysStrip()));
+      paintLogin();
       // The dialog is at the bottom of the screen.
       C.dlgPre.scrollTop = C.dlgPre.scrollHeight;
       screenNeeded();
     }
+    paintDialogDetail();
+  }
+
+  function paintDialogDetail() {
     const a = chat.agent;
     C.dlgDetail.textContent = chat.held && !chatDialog() ? 'Your text went into a dialog: answer it with the keys'
-      : `${a.adapter === 'claude' ? 'Claude' : a.adapter === 'codex' ? 'Codex' : 'The agent'} waits in its terminal${a.stateDetail ? ': ' + a.stateDetail : ''}`;
+      : loginStep() ? loginStep().detail
+        : `${AGENT_NAMES[a.adapter] || 'The agent'} waits in its terminal${a.stateDetail ? ': ' + a.stateDetail : ''}`;
+  }
+
+  // paintLogin shows the step of signing in the terminal shows (the
+  // screen's login): the sign-in page as a button, its one-time code, and
+  // a field for the code the page gives back, instead of a URL wrapped over
+  // the terminal's lines.
+  const loginStep = () => (screen.login && screen.loginSeq === chat.seq ? screen.login : null);
+
+  function paintLogin() {
+    if (!C.dlgLogin) return;
+    const l = loginStep();
+    const key = l ? JSON.stringify(l) : '';
+    if (C.dlgLogin.dataset.key === key) return;
+    C.dlgLogin.dataset.key = key;
+    paintDialogDetail();
+    const url = l && /^https:\/\//.test(l.url || '') ? l.url : '';
+    // Hidden, the terminal lost its place at the bottom.
+    if (C.dlgPre.hidden && !url) {
+      C.dlgPre.hidden = false;
+      C.dlgPre.scrollTop = C.dlgPre.scrollHeight;
+    } else C.dlgPre.hidden = !!url;
+    if (!l || (!url && !l.code && !l.paste)) return fill(C.dlgLogin);
+    const machine = chat.host ? hostName(chat.host) : (S.server && S.server.name) || 'this machine';
+    const rows = [];
+    if (url) {
+      rows.push(h('div', 'login-row',
+        h('button', { type: 'button', class: 'btn primary sm', onclick: () => openOut(url) }, icon('external'), 'Open the sign-in page'),
+        h('button', { type: 'button', class: 'btn sm', onclick: (ev) => copyText(url, ev.currentTarget) }, 'Copy link')));
+    }
+    if (l.local) rows.push(h('p', 'login-note', `This page finishes the sign-in on ${machine} itself, so open it in a browser there. From another device, press Esc and choose Sign in with Device Code.`));
+    if (l.code) {
+      rows.push(h('div', 'login-row', h('span', 'login-l', 'Code'), h('code', 'login-code', l.code),
+        h('button', { type: 'button', class: 'btn sm', onclick: (ev) => copyText(l.code, ev.currentTarget) }, 'Copy')));
+    }
+    if (l.paste) {
+      const inp = h('input', { class: 'input mono', type: 'text', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', placeholder: url ? 'Paste the code the page shows' : 'Paste it here', 'aria-label': url ? 'Code from the sign-in page' : 'Answer' });
+      const btn = h('button', { type: 'submit', class: 'btn primary sm' }, 'Send');
+      rows.push(h('form', { class: 'login-row', novalidate: true, onsubmit: (ev) => {
+        ev.preventDefault();
+        if (inp.value.trim()) sendLoginCode(inp.value.trim(), btn);
+      } }, inp, btn));
+    }
+    fill(C.dlgLogin, rows);
+  }
+
+  // sendLoginCode types the code a sign-in page gave into the terminal and
+  // presses Enter. The sign-in step counts as a dialog, where a message's
+  // Enter is held back, so Enter goes as a key of its own.
+  async function sendLoginCode(text, btn) {
+    btn.disabled = true;
+    try {
+      await api('POST', chatAPI('input'), { text });
+      await new Promise((r) => setTimeout(r, 300));
+      await api('POST', chatAPI('input'), { keys: ['enter'] });
+    } catch (e) {
+      toast(`Could not send the code: ${e.message}`, 'error');
+      btn.disabled = false;
+      return;
+    }
+    chat.held = false;
+    renderDock();
+    setTimeout(refreshScreen, 500);
   }
 
   // ---- the message box
@@ -2294,7 +2367,7 @@
         const a = chat.agent || {};
         const live = chatLive();
         const shell = a.adapter === 'shell';
-        const short = a.adapter === 'claude' ? 'Claude' : a.adapter === 'codex' ? 'Codex' : 'the agent';
+        const short = AGENT_NAMES[a.adapter] || 'the agent';
         ta.disabled = !live || shell;
         ta.setAttribute('aria-label', 'Message ' + short);
         ta.placeholder = shell ? 'A shell takes input in its terminal'
@@ -2540,7 +2613,7 @@
       fill(C.queue);
       return;
     }
-    const short = a.adapter === 'claude' ? 'Claude' : a.adapter === 'codex' ? 'Codex' : 'the agent';
+    const short = AGENT_NAMES[a.adapter] || 'the agent';
     const resume = a.queuePaused ? h('button', { type: 'button', class: 'btn sm', title: 'Stop pauses the queue: go on sending it', onclick: () => editQueue({ paused: false }) }, icon('play'), 'Resume') : null;
     fill(C.queue, h('section', { class: 'queue' + (a.queuePaused ? ' paused' : ''), 'aria-label': 'Queued messages' },
       h('div', 'queue-h', icon('queue'),
@@ -5532,7 +5605,7 @@
   // or the chat's dialog card shows it
 
   const SCREEN_POLL_MS = 1500;
-  const screen = { timer: 0, text: '', busy: false };
+  const screen = { timer: 0, text: '', busy: false, login: null, loginSeq: 0 };
 
   // screenNeeded starts or stops the polling as the screen shows or not.
   function screenNeeded() {
@@ -5552,15 +5625,20 @@
     const seq = chat.seq;
     screen.busy = true;
     let text;
+    let login = null;
     try {
       const r = await api('GET', chatAPI('screen'));
       text = (r && r.screen) || '';
+      login = (r && r.login) || null;
     } catch (e) {
       text = e.message;
     }
     screen.busy = false;
     if (seq !== chat.seq) return;
     screen.text = text;
+    screen.login = login;
+    screen.loginSeq = seq;
+    paintLogin();
     for (const pre of [C.dlgPre, insp.panes && insp.tab === 'terminal' ? insp.panes.terminal.pre : null]) {
       if (!pre || !pre.isConnected) continue;
       // Dialogs and the prompt are at the bottom: stay there, unless
@@ -5868,7 +5946,7 @@
     }
     const ok = (id) => list.some((a) => a.id === id && a.available);
     if (ok(launch.adapter)) return;
-    launch.adapter = ['claude', 'codex'].find(ok) || (list.find((a) => a.available) || {}).id || '';
+    launch.adapter = ['claude', 'codex', 'gemini'].find(ok) || (list.find((a) => a.available) || {}).id || '';
   }
 
   function renderLaunch() {

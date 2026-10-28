@@ -30,12 +30,14 @@ import (
 // testAdapter runs `sh -c <extra args joined>` (default: sleep 60), with
 // $TEST_TRUST_DIR set to LaunchRequest.TrustDir and $TEST_IMAGES to its
 // Images, one per line. Its DetectPrompt matches
-// testDialog on the screen, and DialogOpen testQuestion.
+// testDialog on the screen, DetectLogin testLogin, and DialogOpen
+// testQuestion.
 type testAdapter struct{}
 
 const (
 	testDialog   = "fleet-test-dialog"
 	testQuestion = "fleet-test-question"
+	testLogin    = "fleet-test-login"
 )
 
 func (testAdapter) ID() string          { return "test" }
@@ -64,6 +66,13 @@ func (testAdapter) DetectPrompt(screen string) (string, bool) {
 		return "test dialog", true
 	}
 	return "", false
+}
+
+func (testAdapter) DetectLogin(screen string) (adapter.Login, bool) {
+	if strings.Contains(screen, testLogin) {
+		return adapter.Login{Detail: "test login", URL: "https://example.com/login", Paste: true}, true
+	}
+	return adapter.Login{}, false
 }
 
 // TranscriptDir is transcripts/ in FLEET_HOME, or .test/transcripts in a

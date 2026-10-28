@@ -117,7 +117,7 @@ type Source interface {
 	// transcript recorded the interruption (the agent is idle then).
 	Interrupt(ctx context.Context, agent string) (a *fleetv1.Agent, interrupted bool, err error)
 	// Screen is the visible terminal screen of a live agent.
-	Screen(ctx context.Context, agent string) (string, error)
+	Screen(ctx context.Context, agent string) (Screen, error)
 	// Chat finds an agent's transcript.
 	Chat(agent string) (Chat, error)
 	// Workflows returns an agent and the workflow runs of its session.

@@ -30,11 +30,13 @@ type fakeSource struct {
 	id string
 	// uploadDir is UploadDir, "" by default (no uploads).
 	uploadDir string
-	events    chan *fleetv1.Event
-	mu        sync.Mutex
-	devs      []Device
-	added     []*fleetv1.AddRootRequest
-	updated   []fakeRootUpdate
+	// login is the sign-in step the screen shows.
+	login   *Login
+	events  chan *fleetv1.Event
+	mu      sync.Mutex
+	devs    []Device
+	added   []*fleetv1.AddRootRequest
+	updated []fakeRootUpdate
 	// These errors are returned by their corresponding root operations.
 	addErr, updateErr, removeErr error
 	removed                      []string
@@ -182,11 +184,13 @@ func (s *fakeSource) SendInput(_ context.Context, agent, text string, submit boo
 	return s.dialog && submit && text != "", nil
 }
 
-func (s *fakeSource) Screen(_ context.Context, agent string) (string, error) {
+func (s *fakeSource) Screen(_ context.Context, agent string) (Screen, error) {
 	if agent != "a1" {
-		return "", &Error{Status: 404, Msg: "no agent " + agent}
+		return Screen{}, &Error{Status: 404, Msg: "no agent " + agent}
 	}
-	return "> hello\n\n", nil
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return Screen{Text: "> hello\n\n", Login: s.login}, nil
 }
 
 func (s *fakeSource) Workflows(agent string) (*fleetv1.Agent, []workflow.Run, error) {

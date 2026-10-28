@@ -12,7 +12,7 @@ RUN apt-get update \
       ca-certificates curl git gh jq less openssh-client procps python3 ripgrep \
  && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code @openai/codex \
+RUN npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli \
  && npm cache clean --force
 
 RUN userdel -r node \

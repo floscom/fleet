@@ -10,7 +10,7 @@
 agents in formation // lan // tmux
 ```
 
-fleet runs coding agents (Claude Code, Codex, a plain shell, and more
+fleet runs coding agents (Claude Code, Codex, Gemini CLI, a plain shell, and more
 through adapters) in tmux sessions on a server, and lets your other
 machines on the same LAN start, watch, stop and type into them.
 
@@ -242,7 +242,7 @@ The container runs as your uid:gid with all capabilities dropped. Your
 git name and email, and the env vars in `[sandbox] env` (default
 `CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`), are passed in.
 Folder trust prompts are skipped, since a sandbox's own settings stay in
-the container. The image ships Claude Code, Codex, git, gh, ripgrep, Node
+the container. The image ships Claude Code, Codex, Gemini CLI, git, gh, ripgrep, Node
 and Python; `fleet sandbox dockerfile` prints its Dockerfile to build your
 own `FROM fleet-agent`. Update agent CLIs with `fleet sandbox build --pull`.
 
@@ -316,7 +316,7 @@ path = "/home/flo/code"          # stored symlink-resolved
 adapters = ["claude", "codex"]   # optional; empty or missing = all adapters
 trust = true                     # optional; pre-answer folder trust prompts (see below)
 
-# Per-adapter overrides (claude, codex, shell).
+# Per-adapter overrides (claude, codex, gemini, shell).
 [adapter.claude]
 binary = "/home/flo/.local/bin/claude"   # default: PATH, then well-known dirs such as ~/.local/bin
 args = ["--model", "opus"]               # added to every launch, before `fleet run ... -- args`
@@ -376,7 +376,7 @@ from the link; the same key unlocks every machine in the fleet, no
   and trusts a folder in one step. A folder's ✎ edits its name, agent
   restrictions and trust; roots can also be removed. None of this affects
   agents already running.
-- **Run sessions** — start Claude Code, Codex or a shell, chat with it,
+- **Run sessions** — start Claude Code, Codex, Gemini CLI or a shell, chat with it,
   answer it, type into it and archive it, on this machine or any other in
   the fleet (see [Sessions in the browser](#sessions-in-the-browser)).
 - **See plan usage and host health** — Devices lists, per machine, whether
@@ -446,7 +446,7 @@ never reacted to, or 4 limits within an hour.
 Click a session in the sidebar to open its chat; ones waiting on you are
 listed on top under *Needs you*. *New session* (**N**, Ctrl/⌘+K, or a
 folder/machine's **+**) opens the starter: machine (if more than one),
-folder, checkout mode, agent (Claude Code, Codex or shell) with its model
+folder, checkout mode, agent (Claude Code, Codex, Gemini CLI or shell) with its model
 and effort, then **Start**; *Options* folds sandbox, post-start action,
 name and branch. *New folder* in the folder picker creates and trusts a
 folder anywhere on the machine. Ctrl/⌘+Enter starts; Ctrl/⌘+Shift+Enter
@@ -583,12 +583,14 @@ the session routes are forwarded.
 
 ## Folder trust
 
-Claude Code and Codex ask "Do you trust this folder?" the first time they
-start in a project. Nothing reports that prompt through hooks, so fleet
-watches the screen of a starting agent: while the prompt is up the agent
-is `needs input` with a note saying so, until it's answered in the
-terminal (`fleet attach`). Codex's "Hooks need review" prompt is handled
-the same way.
+Claude Code, Codex and Gemini CLI ask "Do you trust this folder?" the
+first time they start in a project. Nothing reports that prompt through
+hooks, so fleet watches the screen of a starting agent: while the prompt
+is up the agent is `needs input` with a note saying so, until it's
+answered with the keys under the chat or in the terminal (`fleet attach`).
+Codex's "Hooks need review" prompt is handled the same way. Gemini runs
+the initial prompt while it asks, and once the folder is trusted it
+restarts and runs it again; trust such roots up front.
 
 A root added with `--trust` (`trust = true` in `config.toml`) skips the
 prompt — before starting an agent there, fleet records the trust the way
@@ -599,6 +601,9 @@ the CLI would if you'd answered yes yourself:
   lock Claude uses, so running sessions keep their changes.
 - **Codex**: fleet passes `-c projects={"<folder>"={trust_level="trusted"}}`
   for that launch only; `~/.codex/config.toml` is never changed.
+- **Gemini CLI**: fleet passes `--skip-trust`, for that launch only;
+  `~/.gemini/trustedFolders.json` is never changed. Gemini trusts a folder
+  with everything below it, git or not.
 
 Trust follows the git repository (the main checkout, covering its
 worktrees) or, outside git, the agent's folder — not the root above it,
@@ -606,6 +611,27 @@ since neither CLI looks further up. A trusted project can run its own
 hooks, MCP servers and settings, so only use `--trust` for roots you
 actually trust. Existing roots can be edited in the dashboard or in
 `config.toml` (then restart the daemon).
+
+## Signing in
+
+When an agent CLI is not logged in, it signs in from its own terminal: at
+its first start, or after `/login` (Claude Code) or `/auth` (Gemini CLI).
+fleet watches for that at startup and for two minutes after you send
+something, and the session shows `needs input`. Under the chat, a card
+opens the sign-in page (the URL the terminal breaks over several lines,
+joined back), shows the one-time code to enter there, or takes the code
+the page gives you and types it into the terminal with Enter. Menus (the
+login method, Claude's first-run text style) are answered with the keys.
+
+- **Claude Code** — *Claude account with subscription*; the page shows a
+  code to paste back.
+- **Codex** — choose *Sign in with Device Code*: open the page on any
+  device and enter the code shown. *Sign in with ChatGPT* redirects to a
+  server Codex runs on the agent's machine, so it only works from a
+  browser on that machine.
+- **Gemini CLI** — *Sign in with Google*; Gemini restarts, then the page
+  shows a code to paste back. On a machine with a display, Gemini offers to
+  open a browser there instead.
 
 ## Security model
 
@@ -678,10 +704,17 @@ Honest limits:
 
 An adapter tells fleet how to launch one agent CLI and how to turn its hook
 events into agent states. v1 ships `claude` (Claude Code), `codex` (Codex
-CLI) and `shell` (your login shell, no status). See
+CLI), `gemini` (Gemini CLI) and `shell` (your login shell, no status). See
 [internal/adapter/README.md](internal/adapter/README.md) for how to write
-one, and for what was verified about the Claude Code and Codex hook
-behaviour.
+one, and for what was verified about the Claude Code, Codex and Gemini
+hook behaviour.
+
+Gemini CLI has no per-launch way to add hooks, so fleet installs an
+extension, `~/.gemini/extensions/fleet`, the first time it starts Gemini.
+Its hooks report to fleet only in sessions fleet started (they read the
+agent id fleet puts in the environment) and do nothing in your own Gemini
+sessions. Delete the folder to remove it; fleet puts it back on the next
+Gemini launch.
 
 ## Status: v0
 
@@ -692,9 +725,14 @@ restart with re-adoption. Known gaps:
 - **Codex "Hooks need review".** If you have untrusted hooks of your own,
   Codex shows this dialog at startup, also in trusted roots. The agent shows
   `needs input` until it is answered in the terminal.
-- **Prompt detection reads the screen.** The trust and hook-review dialogs
-  are recognized by their text (Claude Code 2.1.280, Codex 0.154.0). If a
-  CLI rewords them, the agent shows `running` while it waits, as before.
+- **Prompt detection reads the screen.** The trust, hook-review and
+  sign-in dialogs are recognized by their text (Claude Code 2.1.280, Codex
+  0.160.1, Gemini CLI 0.66.0). If a CLI rewords them, the agent shows
+  `running` while it waits, as before.
+- **A refused permission leaves the agent `working`.** Refusing a tool
+  call with Esc fires no hook in Claude Code or Gemini CLI, so the agent
+  shows `working` until its next turn. Stop in the chat (or Esc there)
+  works: it waits for the transcript to record the interruption.
 - **Pairing uses a short code with a fingerprint check, not a PAKE.** See
   the security section. A PAKE needs protocol v2.
 - **Shared tmux socket.** Two `FLEET_HOME`s that set the *same*

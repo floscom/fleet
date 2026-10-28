@@ -31,7 +31,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"fleet/internal/adapter"
 	"fleet/internal/adapter/detect"
@@ -116,11 +115,14 @@ func TrustOverride(dir string) string {
 
 // DetectPrompt recognizes the startup dialogs that block Codex before any
 // hook runs.
+// They are drawn at the bottom of the screen; text higher up, or within a
+// line, is conversation.
 func (c *codex) DetectPrompt(screen string) (string, bool) {
+	bottom := adapter.BottomLines(screen, loginLines)
 	switch {
-	case strings.Contains(screen, "Do you trust the contents of this directory?"):
+	case adapter.LineStarting(bottom, "Do you trust the contents of this directory?") >= 0:
 		return "Codex asks whether to trust this directory; answer in its terminal", true
-	case strings.Contains(screen, "Hooks need review"):
+	case adapter.LineStarting(bottom, "Hooks need review") >= 0:
 		return "Codex asks to review hooks; answer in its terminal", true
 	}
 	return "", false

@@ -203,9 +203,16 @@ func (s *webSource) Interrupt(ctx context.Context, agent string) (*fleetv1.Agent
 	return a, done, webError(err)
 }
 
-func (s *webSource) Screen(ctx context.Context, agent string) (string, error) {
-	screen, err := s.d.agents.screen(ctx, agent)
-	return screen, webError(err)
+func (s *webSource) Screen(ctx context.Context, agent string) (web.Screen, error) {
+	screen, login, err := s.d.agents.screenLogin(ctx, agent)
+	if err != nil {
+		return web.Screen{}, webError(err)
+	}
+	out := web.Screen{Text: screen}
+	if login != nil {
+		out.Login = &web.Login{Detail: login.Detail, URL: login.URL, Code: login.Code, Paste: login.Paste, Local: login.Local}
+	}
+	return out, nil
 }
 
 func (s *webSource) Chat(agent string) (web.Chat, error) {

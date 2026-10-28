@@ -101,9 +101,18 @@ func TestRunStopInput(t *testing.T) {
 		t.Fatalf("input to unknown agent: %d %+v", code, e)
 	}
 
-	var screen struct{ Screen string }
-	if code := api(t, ts, "GET", "/api/agents/a1/screen", tok, "", &screen); code != 200 || screen.Screen != "> hello" {
-		t.Fatalf("screen: %d %q", code, screen.Screen)
+	var screen struct {
+		Screen string
+		Login  *Login
+	}
+	if code := api(t, ts, "GET", "/api/agents/a1/screen", tok, "", &screen); code != 200 || screen.Screen != "> hello" || screen.Login != nil {
+		t.Fatalf("screen: %d %+v", code, screen)
+	}
+	src.mu.Lock()
+	src.login = &Login{Detail: "Sign in", URL: "https://example.com/a", Paste: true}
+	src.mu.Unlock()
+	if code := api(t, ts, "GET", "/api/agents/a1/screen", tok, "", &screen); code != 200 || screen.Login == nil || *screen.Login != *src.login {
+		t.Fatalf("screen with a sign-in: %d %+v", code, screen)
 	}
 
 	var stop struct {

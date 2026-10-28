@@ -1,0 +1,12 @@
+{"sessionId":"ca6078b0-11bd-4a7b-be59-cc672ac90abd","projectHash":"61678dc92392e5d4e7d023d765f9447479b62bf7e544fd26114bff37f88f64b1","startTime":"2026-10-27T21:59:09.913Z","lastUpdated":"2026-10-27T21:59:09.913Z","kind":"main"}
+{"id":"d04923d38bb0f6017037e74183378ef4","timestamp":"2026-10-27T21:59:09.914Z","type":"user","content":[{"text":"<session_context>\nThis is the Gemini CLI. We are setting up the context for our chat.\nToday's date is Tuesday, October 27, 2026 (formatted according to the user's locale).\nMy operating system is: linux\nThe project's temporary directory is: /tmp/lt/g/.gemini/tmp/gt\n- **Workspace Directories:**\n  - /tmp/lt/gt\n- **Directory Structure:**\n\nShowing up to 200 items (files + folders).\n\n/tmp/lt/gt/\n\n\n\n</session_context>"}]}
+{"$set":{"lastUpdated":"2026-10-27T21:59:09.914Z"}}
+{"id":"59d884ed-9415-493c-95e1-4101c2d01ae5","timestamp":"2026-10-27T21:59:10.025Z","type":"user","content":[{"text":"make e.txt"}]}
+{"$set":{"lastUpdated":"2026-10-27T21:59:10.025Z"}}
+{"id":"e8347c51-60c8-4813-8449-6a02ecdd7718","timestamp":"2026-10-27T21:59:10.058Z","type":"gemini","content":"I will create the file.","thoughts":[],"tokens":{"input":10,"output":5,"cached":0,"thoughts":0,"tool":0,"total":15},"model":"gemini-2.5-flash"}
+{"$set":{"lastUpdated":"2026-10-27T21:59:10.058Z"}}
+{"id":"e8347c51-60c8-4813-8449-6a02ecdd7718","timestamp":"2026-10-27T21:59:10.058Z","type":"gemini","content":"I will create the file.","thoughts":[],"tokens":{"input":10,"output":5,"cached":0,"thoughts":0,"tool":0,"total":15},"model":"gemini-2.5-flash","toolCalls":[{"id":"run_shell_command__run_shell_command_1793138350032_0","name":"run_shell_command","args":{"command":"touch /tmp/lt/proj/c.txt","description":"Create c.txt"},"result":[{"functionResponse":{"id":"run_shell_command__run_shell_command_1793138350032_0","name":"run_shell_command","response":{"error":"[Operation Cancelled] Reason: User denied execution."}}}],"status":"cancelled","timestamp":"2026-10-27T21:59:25.222Z","description":"touch /tmp/lt/proj/c.txt","displayName":"Shell","renderOutputAsMarkdown":false}]}
+{"id":"7c555560-c59f-41b7-b2a8-e2ad86bbc7cc","timestamp":"2026-10-27T21:59:25.222Z","type":"info","content":"Request cancelled."}
+{"$set":{"lastUpdated":"2026-10-27T21:59:25.223Z"}}
+{"$rewindTo":"e8347c51-60c8-4813-8449-6a02ecdd7718"}
+{"$set":{"lastUpdated":"2026-10-27T21:59:25.223Z"}}

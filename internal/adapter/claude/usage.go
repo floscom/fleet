@@ -33,7 +33,7 @@ func (c *claude) Usage(ctx context.Context) (*adapter.Usage, error) {
 		raw, err = readKeychain(ctx, keychainService())
 	}
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, errors.New("not logged in")
+		return nil, errors.New("not logged in: start a Claude session to sign in")
 	}
 	if err != nil {
 		return nil, err

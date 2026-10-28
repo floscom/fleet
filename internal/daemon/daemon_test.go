@@ -711,13 +711,30 @@ func TestScreenPromptAndTrustDir(t *testing.T) {
 		return a.GetState() == stateRunning && a.GetStateDetail() == ""
 	})
 
-	// Once a hook has reported state, the screen is not watched any more.
+	// At startup a dialog on the screen counts even once hooks report a
+	// turn: Gemini runs its initial prompt while it asks for trust.
 	c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_Hook{Hook: &fleetv1.HookEvent{
 		AgentId: a.GetId(), Adapter: "test", Event: "working", Payload: []byte("busy"),
 	}}})
 	c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_SendText{SendText: &fleetv1.SendTextRequest{Agent: a.GetId(), Text: "y", Submit: true}}})
-	time.Sleep(3 * reconcileInterval)
-	if got := c.agent(a.GetId()); got.GetState() != stateWorking {
-		t.Fatalf("after a hook the screen changed the state: %v", got)
-	}
+	c.waitAgent(a.GetId(), "asking while working", func(a *fleetv1.Agent) bool {
+		return a.GetState() == stateNeedsInput && a.GetStateDetail() == "test dialog"
+	})
+
+	// Input (/login) that brings up a sign-in makes an idle agent
+	// NEEDS_INPUT until it goes; then it is idle again.
+	b := c.run(&fleetv1.RunAgentRequest{Root: "code", Path: "plain", Isolation: isoPinned,
+		ExtraArgs: []string{"read x; printf '" + testLogin + "'; read x; clear; sleep 60"}})
+	c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_Hook{Hook: &fleetv1.HookEvent{
+		AgentId: b.GetId(), Adapter: "test", Event: "idle",
+	}}})
+	c.waitAgent(b.GetId(), "idle", func(a *fleetv1.Agent) bool { return a.GetState() == stateIdle })
+	c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_SendText{SendText: &fleetv1.SendTextRequest{Agent: b.GetId(), Text: "/login", Submit: true}}})
+	c.waitAgent(b.GetId(), "signing in", func(a *fleetv1.Agent) bool {
+		return a.GetState() == stateNeedsInput && a.GetStateDetail() == "test login"
+	})
+	c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_SendText{SendText: &fleetv1.SendTextRequest{Agent: b.GetId(), Text: "code", Submit: true}}})
+	c.waitAgent(b.GetId(), "idle again", func(a *fleetv1.Agent) bool {
+		return a.GetState() == stateIdle && a.GetStateDetail() == ""
+	})
 }

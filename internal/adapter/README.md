@@ -9,6 +9,7 @@ process itself.
 |----------|-------------|----------------------------------------------------|
 | `claude` | Claude Code | hooks in a generated `--settings` file             |
 | `codex`  | Codex CLI   | hooks passed as `-c hooks.<Event>=...` overrides   |
+| `gemini` | Gemini CLI  | hooks of an extension fleet installs in `~/.gemini` |
 | `shell`  | `$SHELL -l` | none (the simplest example)                        |
 
 Shared helpers:
@@ -64,7 +65,16 @@ Shared helpers:
    hook runs, implement `adapter.PromptDetector`. `DetectPrompt` gets the
    visible screen of a starting agent and returns a short detail while the
    prompt is up. Match text that only the dialog shows.
-8. Chat view (optional): if the CLI writes its conversation to a JSONL
+8. Signing in (optional): if the CLI signs in from its own terminal,
+   implement `adapter.Loginer`. `DetectLogin` reads the step off the
+   bottom of the screen: the sign-in page's URL (`adapter.ScreenURL` joins
+   the lines the TUI wrapped it over), a one-time code to enter there, or
+   whether the CLI waits for a code pasted back. The daemon looks for it at
+   startup and for two minutes after input from the dashboard (`/login`),
+   and makes the agent NEEDS_INPUT while it shows. Match lines that start
+   with the CLI's own text (`adapter.LineStarting`), so code or chat that
+   mentions it does not count.
+9. Chat view (optional): if the CLI writes its conversation to a JSONL
    transcript, implement `adapter.Transcripter`: `TranscriptDir` (where
    the CLI keeps transcripts for a home directory; fleet reads nothing
    outside it), `FindTranscript` (by session id, for agents whose hooks
@@ -73,17 +83,17 @@ Shared helpers:
    `StateUpdate.Transcript` from the hook payload's `transcript_path`.
    Give a tool entry an `ID` only when its output follows in a separate
    result entry.
-9. Dialogs (optional): implement `adapter.DialogDetector`. `DialogOpen`
+10. Dialogs (optional): implement `adapter.DialogDetector`. `DialogOpen`
    gets the visible screen and reports whether the CLI shows a dialog,
    where Enter picks the highlighted option. The daemon then does not
    press Enter after text typed from the dashboard, and drops dialogs
    hooks reported once the screen no longer shows one. Set
    `StateUpdate.Subagent` and `Call` so dialogs close on the right hooks.
-10. Register it in `cmd/fleet`. Test argv construction, generated files
+11. Register it in `cmd/fleet`. Test argv construction, generated files
     (parse them back), and `HandleHook` with payloads captured from the
     real CLI.
 
-## Verified agent behaviour (claude 2.1.280, codex 0.154.0)
+## Verified agent behaviour (claude 2.1.280, codex 0.154.0, gemini 0.66.0)
 
 ### Claude Code
 
@@ -142,3 +152,28 @@ Shared helpers:
   `-c 'projects."<dir>".trust_level="trusted"'` has no effect.
 - `check_for_update_on_startup=false` suppresses the blocking update
   prompt.
+
+### Gemini CLI
+
+- Hooks from settings files run only in trusted folders, and a system
+  settings file (`GEMINI_CLI_SYSTEM_SETTINGS_PATH`) is skipped unless root
+  owns it. Hooks of an extension (`~/.gemini/extensions/<name>/`, a
+  `gemini-extension.json` and `hooks/hooks.json`) load without an install
+  step and run in every folder. Hook lists from all sources run.
+- A hook's stdout, else its stderr, is shown in the terminal; it must
+  print nothing and exit 0. Timeouts are in milliseconds.
+- Every payload has `session_id`, `transcript_path` and `cwd`.
+  `BeforeAgent` starts a turn, `AfterAgent` ends it. `Notification` with
+  `notification_type` `ToolPermission` comes before an approval dialog;
+  it names no tool call (`details` has a title and the command or file).
+  Refusing it with Esc fires no hook.
+- On `--resume`, `SessionStart`'s `transcript_path` names a file that is
+  never written; later hooks name the right one.
+- Gemini restarts itself with the same arguments after the folder is
+  trusted and after signing in with Google. The restarted process refuses
+  a `--session-id` the first one already created, so fleet sets none.
+- With `--prompt-interactive`, the prompt runs while the trust dialog is
+  up; hooks report the turn before anyone answers it.
+- Transcripts are JSONL in `~/.gemini/tmp/<project>/chats/`. A record
+  whose `id` was written before replaces it: an answer is written once
+  with its text, then again as each tool call finishes.

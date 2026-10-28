@@ -26,7 +26,7 @@ var usageClient = &http.Client{Timeout: 8 * time.Second}
 func (c *codex) Usage(ctx context.Context) (*adapter.Usage, error) {
 	raw, err := os.ReadFile(c.AuthFile(""))
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, errors.New("not logged in (or the login is in the OS keyring)")
+		return nil, errors.New("not logged in (or the login is in the OS keyring): start a Codex session to sign in")
 	}
 	if err != nil {
 		return nil, err

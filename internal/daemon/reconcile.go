@@ -220,11 +220,13 @@ func (m *manager) reconcile(ctx context.Context) {
 }
 
 // watchPrompts looks at the screens of agents that may sit in a startup
-// dialog no hook reports, such as a folder trust prompt: RUNNING agents (no
-// hook has arrived yet) for promptWatch after they start, and agents already
-// showing such a dialog, until it goes away. While the adapter recognizes a
-// dialog the agent is NEEDS_INPUT; afterwards it is RUNNING until hooks
-// report more.
+// dialog no hook reports, such as a folder trust prompt: agents for
+// promptWatch after they start (hooks may already report a turn: Gemini
+// runs the initial prompt while it asks for trust), and agents already
+// showing such a dialog, until it goes away. It also looks for the steps of
+// signing in (adapter.Loginer), at startup and for promptWatch after input
+// (/login). While the adapter recognizes a dialog the agent is NEEDS_INPUT;
+// afterwards it is back in the state its hooks reported, or RUNNING.
 //
 // It also checks that the dialogs hooks reported are still on screen: some
 // close without a hook (a refused permission fires none). Once the screen
@@ -233,6 +235,7 @@ func (m *manager) watchPrompts(ctx context.Context, bySession map[string]tmux.Pa
 	type watch struct {
 		a      *agentRec
 		prompt adapter.PromptDetector // nil: no startup dialog to look for
+		login  adapter.Loginer        // nil: no sign-in to look for
 		dialog adapter.DialogDetector // nil: no hook dialogs to check
 	}
 	var ws []watch
@@ -247,14 +250,17 @@ func (m *manager) watchPrompts(ctx context.Context, bySession map[string]tmux.Pa
 		}
 		ad, _ := m.d.opts.Adapters.Get(a.Adapter)
 		w := watch{a: a}
-		starting := a.State == stateRunning && now.Sub(time.UnixMilli(a.StartedAtMs)) < promptWatch
+		starting := now.Sub(time.UnixMilli(a.StartedAtMs)) < promptWatch
 		if det, ok := ad.(adapter.PromptDetector); ok && (starting || a.ScreenPrompt) {
 			w.prompt = det
+		}
+		if det, ok := ad.(adapter.Loginer); ok && (starting || a.ScreenPrompt || now.Before(a.loginWatch)) {
+			w.login = det
 		}
 		if det, ok := ad.(adapter.DialogDetector); ok && len(a.Dialogs) > 0 {
 			w.dialog = det
 		}
-		if w.prompt != nil || w.dialog != nil {
+		if w.prompt != nil || w.login != nil || w.dialog != nil {
 			ws = append(ws, w)
 		}
 	}
@@ -267,11 +273,19 @@ func (m *manager) watchPrompts(ctx context.Context, bySession map[string]tmux.Pa
 		if err != nil {
 			continue
 		}
+		var detail string
+		found := false
+		if w.prompt != nil {
+			detail, found = w.prompt.DetectPrompt(screen)
+		}
+		if l, ok := detectLogin(w.login, screen); ok && !found {
+			detail, found = l.Detail, true
+		}
 		m.mu.Lock()
 		a := w.a
 		if a.live() && !a.busy {
-			if w.prompt != nil {
-				m.screenPromptLocked(a, w.prompt, screen)
+			if w.prompt != nil || w.login != nil {
+				m.screenPromptLocked(a, detail, found)
 			}
 			if w.dialog != nil {
 				m.dialogsOnScreenLocked(a, w.dialog.DialogOpen(screen))
@@ -281,18 +295,32 @@ func (m *manager) watchPrompts(ctx context.Context, bySession map[string]tmux.Pa
 	}
 }
 
-// screenPromptLocked applies a startup dialog seen, or no longer seen, on
-// the agent's screen.
-func (m *manager) screenPromptLocked(a *agentRec, det adapter.PromptDetector, screen string) {
-	detail, found := det.DetectPrompt(screen)
+// detectLogin asks det, if any, for the sign-in step screen shows.
+func detectLogin(det adapter.Loginer, screen string) (adapter.Login, bool) {
+	if det == nil {
+		return adapter.Login{}, false
+	}
+	return det.DetectLogin(screen)
+}
+
+// screenPromptLocked applies a dialog seen (found, with its detail), or no
+// longer seen, on the agent's screen. At startup and after /login it also
+// takes over from the state hooks reported; dialogs hooks reported are left
+// alone.
+func (m *manager) screenPromptLocked(a *agentRec, detail string, found bool) {
+	now := time.Now()
+	watched := now.Sub(time.UnixMilli(a.StartedAtMs)) < promptWatch || now.Before(a.loginWatch)
 	switch {
-	case found && (a.State == stateRunning || a.ScreenPrompt):
+	case found && (a.State == stateRunning || a.ScreenPrompt || (len(a.Dialogs) == 0 && watched)):
 		if a.State != stateNeedsInput || a.StateDetail != detail || !a.ScreenPrompt {
 			a.State, a.StateDetail, a.ScreenPrompt = stateNeedsInput, detail, true
 			m.changedLocked(a)
 		}
 	case !found && a.ScreenPrompt:
-		a.State, a.StateDetail, a.ScreenPrompt = stateRunning, "", false
+		a.ScreenPrompt = false
+		if !a.showDialogs() {
+			a.State, a.StateDetail = stateRunning, ""
+		}
 		m.changedLocked(a)
 	}
 }

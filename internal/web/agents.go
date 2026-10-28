@@ -7,7 +7,7 @@ package web
 //	GET  /api/agents                  every agent, finished ones included
 //	POST /api/agents                  start one, images attached to its prompt
 //	GET  /api/agents/{id}/chat        its conversation (see serveChat)
-//	GET  /api/agents/{id}/screen      its terminal screen, as text
+//	GET  /api/agents/{id}/screen      its terminal screen, as text, and a sign-in step on it
 //	POST /api/agents/{id}/input       attach images, type text and/or press keys (see apiInput)
 //	POST /api/agents/{id}/interrupt   interrupt the turn it works on, as Esc does
 //	GET  /api/agents/{id}/image       an image of its conversation
@@ -64,6 +64,27 @@ const (
 	// its hooks.
 	gitTimeout = 200 * time.Second
 )
+
+// Screen is the visible terminal screen of a live agent (Source.Screen).
+type Screen struct {
+	Text string
+	// Login is the step of signing in the screen shows, nil if none.
+	Login *Login
+}
+
+// Login is a step of signing in to an agent CLI, read off its screen.
+type Login struct {
+	// Detail says what the CLI waits for.
+	Detail string `json:"detail"`
+	// URL is the sign-in page to open, if the step has one.
+	URL string `json:"url,omitempty"`
+	// Code is a one-time code to enter on that page.
+	Code string `json:"code,omitempty"`
+	// Paste: the CLI waits for a code (or key) typed into its terminal.
+	Paste bool `json:"paste,omitempty"`
+	// Local: only a browser on the agent's machine completes the sign-in.
+	Local bool `json:"local,omitempty"`
+}
 
 // Chat is where an agent's conversation is (Source.Chat).
 type Chat struct {
@@ -438,17 +459,20 @@ func (s *Server) apiGit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiScreen(w http.ResponseWriter, r *http.Request) {
-	screen, err := s.opts.Source.Screen(r.Context(), r.PathValue("id"))
+	scr, err := s.opts.Source.Screen(r.Context(), r.PathValue("id"))
 	if err != nil {
 		s.writeSourceError(w, err)
 		return
 	}
 	// Rows are padded to the terminal width; the page needs none of that.
-	lines := strings.Split(screen, "\n")
+	lines := strings.Split(scr.Text, "\n")
 	for i, l := range lines {
 		lines[i] = strings.TrimRight(l, " ")
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"screen": strings.TrimRight(strings.Join(lines, "\n"), "\n")})
+	writeJSON(w, http.StatusOK, struct {
+		Screen string `json:"screen"`
+		Login  *Login `json:"login,omitempty"`
+	}{strings.TrimRight(strings.Join(lines, "\n"), "\n"), scr.Login})
 }
 
 // chatReply is the answer of GET /api/agents/{id}/chat.

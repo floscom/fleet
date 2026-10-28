@@ -146,12 +146,33 @@ func (c *claude) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapte
 	}, nil
 }
 
-// DetectPrompt recognizes the folder trust dialog.
+// DetectPrompt recognizes the folder trust dialog, and the first-run setup
+// Claude shows before signing in (a text style) and after it.
+// They are drawn at the bottom of the screen (the text style's heading
+// above a preview); text higher up, or within a line, is conversation.
 func (c *claude) DetectPrompt(screen string) (string, bool) {
-	if strings.Contains(screen, "Yes, I trust this folder") {
+	bottom := adapter.BottomLines(screen, setupLines)
+	if adapter.LineStarting(bottom, "Yes, I trust this folder") >= 0 {
 		return "Claude asks whether to trust this folder; answer in its terminal", true
 	}
+	for _, p := range setupPrompts {
+		if adapter.LineStarting(bottom, p.text) >= 0 {
+			return p.detail, true
+		}
+	}
 	return "", false
+}
+
+// setupLines is how many non-blank lines at the bottom of the screen
+// DetectPrompt looks at.
+const setupLines = 24
+
+// setupPrompts are the steps of Claude's first-run setup, besides signing
+// in (2.1.280).
+var setupPrompts = []struct{ text, detail string }{
+	{"Choose the text style that looks best with your terminal", "Claude's first-run setup asks for a text style: Enter takes the default"},
+	{"Security notes:", "Claude's first-run setup shows its security notes: press Enter to continue"},
+	{"Use Claude Code's terminal setup?", "Claude's first-run setup offers to set up the terminal: answer with the keys"},
 }
 
 // dialogHint is one of the " · "-separated hints on the last line of every

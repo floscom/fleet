@@ -160,6 +160,7 @@ kbd {
 
 .logo { width: 18px; height: 18px; flex: none; }
 .logo-claude { fill: #d97757; }
+.logo-gemini { fill: #3186ff; }
 .logo .fill { fill: currentColor; }
 svg.logo-shell { fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
@@ -1845,6 +1846,14 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
   font: 11.5px/1.4 var(--mono); white-space: pre;
 }
 .dlgcard .keys { padding: 8px 10px; }
+/* A step of signing in: the page, a one-time code, a field for the code. */
+.dlgcard .login:empty { display: none; }
+.dlgcard .login { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.login-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.login-row .input { flex: 1; min-width: 0; height: 32px; }
+.login-l { font-size: 12.5px; color: var(--fg-3); }
+.login-code { font: 600 17px/1.2 var(--mono); letter-spacing: 0.06em; color: var(--fg); user-select: all; }
+.login-note { margin: 0; font-size: 12.5px; color: var(--fg-2); }
 
 /* Attachments: a video uploading. */
 .att.video { width: 168px; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 6px 28px 6px 10px; }
