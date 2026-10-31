@@ -26,10 +26,12 @@
 //   - how much of the account's plan limits is used: implement Usager.
 //   - resuming sessions stopped by a usage limit once it resets: implement
 //     Limiter.
+//   - skills shared across the fleet: implement SkillDirer.
 package adapter
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -146,6 +148,31 @@ type AuthProvider interface {
 	// LockAuth takes the lock the CLI holds while writing file, if it uses
 	// one, so a sync never interleaves with the CLI's own write.
 	LockAuth(ctx context.Context, file string) (unlock func(), err error)
+}
+
+// SkillDirer is implemented by adapters whose CLI loads skills (folders
+// with a SKILL.md) from a folder of the user's. The daemon links the skills
+// the fleet shares (package skills) into it.
+type SkillDirer interface {
+	// SkillsDir is the daemon user's skills folder, honouring the CLI's
+	// config dir variable; "" if there is none.
+	SkillsDir() string
+}
+
+// SkillDirs returns the skills folders of the adapters in r whose CLI is
+// installed, without duplicates (Codex and Gemini CLI share one).
+func SkillDirs(ctx context.Context, r *Registry) []string {
+	var out []string
+	for _, a := range r.All() {
+		sd, ok := a.(SkillDirer)
+		if !ok {
+			continue
+		}
+		if dir := sd.SkillsDir(); dir != "" && !slices.Contains(out, dir) && a.Detect(ctx).Available {
+			out = append(out, dir)
+		}
+	}
+	return out
 }
 
 // Transcripter is implemented by adapters whose CLI writes the conversation

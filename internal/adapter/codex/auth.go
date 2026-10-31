@@ -27,3 +27,13 @@ func (c *codex) AuthFile(home string) string {
 
 // LockAuth implements adapter.AuthProvider; Codex uses no lock.
 func (c *codex) LockAuth(context.Context, string) (func(), error) { return func() {}, nil }
+
+// SkillsDir implements adapter.SkillDirer: Codex loads user skills from
+// ~/.agents/skills ($CODEX_HOME/skills too, but that one is deprecated).
+func (c *codex) SkillsDir() string {
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(h, ".agents", "skills")
+}

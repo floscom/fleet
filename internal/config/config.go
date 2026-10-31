@@ -15,6 +15,8 @@
 //	worktrees/         git worktrees created for agents
 //	clones/            repositories cloned for agents (CLONE isolation)
 //	sandbox/           what Docker sandboxes mount ([sandbox] dir, see SandboxConfig)
+//	skills/            skills shared with the fleet, linked into each agent CLI (package skills)
+//	skills.json        what is known of each shared skill, deleted ones included
 package config
 
 import (

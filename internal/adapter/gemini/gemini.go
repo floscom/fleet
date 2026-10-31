@@ -123,3 +123,14 @@ func geminiDir(home string) string {
 	}
 	return filepath.Join(home, ".gemini")
 }
+
+// SkillsDir implements adapter.SkillDirer: Gemini CLI loads user skills
+// from ~/.gemini/skills and ~/.agents/skills, the latter winning on equal
+// names. That is the folder Codex reads too, so one link serves both.
+func (g *gemini) SkillsDir() string {
+	dir := geminiDir("")
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(dir), ".agents", "skills")
+}

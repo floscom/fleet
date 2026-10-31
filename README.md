@@ -25,6 +25,8 @@ machines on the same LAN start, watch, stop and type into them.
   phone: conversations, images, files, workflows and questions, all live.
 - **LAN pairing** — mDNS discovery, a one-time code, certificate pinning;
   or join several daemons into one fleet with a shared key.
+- **Shared skills** — drop a skill into `~/.fleet/skills` and every machine
+  of the fleet has it, for Claude Code, Codex and Gemini CLI alike.
 - **Git-aware isolation** — each agent gets its own worktree by default, or
   runs pinned in a shared folder; `--clone` spins up a fresh checkout from
   any repo.
@@ -148,6 +150,7 @@ address. Without it, commands talk to the local daemon.
 | `fleet kill <agent>... [--rm-worktree] [--force] [--forget]` | Stop agents; optionally remove their worktree or clone and history entry. |
 | `fleet queue add\|ls\|rm\|pause\|resume <agent> ...` | Queue messages for an agent; the daemon sends the next one each time it finishes a turn. |
 | `fleet note <agent> [text...] [-d]` | Leave a note on an agent (e.g. why it must stay open), shown on its dashboard row and in `fleet ls`; without text prints it, `-d` removes it. |
+| `fleet skill [ls]` / `skill add <folder> [--link]` / `skill rm <name>` | List, share or delete the [skills shared](#shared-skills) with every machine of the fleet. |
 | `fleet sandbox build [--pull] [--tag T]` / `sandbox dockerfile` | Build the Docker image sandboxed agents run in (on the server) / print its Dockerfile. |
 | `fleet watch` | Print agent state changes as they happen. |
 | `fleet prs [agent] [-a] [--json]` | List the GitHub pull requests agents created, open ones unless `-a`. |
@@ -274,6 +277,8 @@ Everything lives in `FLEET_HOME` (default `~/.fleet`, mode 0700):
 | `worktrees/` | git worktrees created for agents |
 | `clones/` | repositories cloned for agents (`--clone`) |
 | `sandbox/` | default `[sandbox] dir`: worktrees, clones, state and home of sandboxed agents |
+| `skills/` | [skills shared](#shared-skills) with the fleet, linked into each agent CLI's skills folder |
+| `skills.json` | what this machine knows of each shared skill: content hash, version, deletions |
 
 `config.toml`, with every key:
 
@@ -558,6 +563,38 @@ the session routes are forwarded.
   all of them.
 - Inter-daemon requests are signed but sent over plain HTTP, so folder
   listings, conversations and what you type can be read on the wire.
+
+### Shared skills
+
+A skill (a folder with a `SKILL.md` and whatever it brings along: scripts,
+references, assets) put into `~/.fleet/skills` is on every machine holding
+the fleet key a few seconds later, and each daemon links it into the
+agent CLIs' own skills folders: `~/.claude/skills` for Claude Code,
+`~/.agents/skills` for Codex and Gemini CLI. Drop folders in by hand, or:
+
+```
+fleet skill add ~/.claude/skills/deploy        # moved in, linked back
+fleet skill add ~/src/team-skills/review       # copied in
+fleet skill add --link ~/src/team-skills/lint  # stays in your repo, linked in
+fleet skill                                    # what is shared, and where it is linked
+fleet skill rm deploy                          # deleted on every machine
+```
+
+- Changing or deleting a skill on one machine changes or deletes it on all
+  of them. When two machines change the same skill, the later change wins,
+  as a whole: nothing is merged. Each daemon pulls from the others every
+  minute, and right away when one says its skills changed, so a machine
+  that was off catches up when it comes back.
+- Left out: folders not named like a skill (letters, digits, `-` and `_`,
+  so backups like `deploy.bak.2026` stay local), ones without a
+  `SKILL.md`, and inside a skill `.git`, `node_modules`, caches, links and
+  editor or OS litter. A skill is at most 16 MiB.
+- A skill of your own with the same name in a CLI's folder is never
+  replaced; `fleet skill` shows the clash.
+- A skill can bring scripts that agents run, so whoever holds the fleet
+  key can put code on every machine; that is no more than the key already
+  allows (it can start a shell on all of them).
+- Sandboxed agents don't see shared skills yet.
 
 ## How tmux is used, and how cleanup works
 

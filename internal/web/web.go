@@ -41,6 +41,7 @@ import (
 	"fleet/internal/ask"
 	"fleet/internal/config"
 	"fleet/internal/discovery"
+	"fleet/internal/skills"
 	"fleet/internal/workflow"
 )
 
@@ -166,7 +167,10 @@ type Options struct {
 	// subscriptions) enable Web Push (push.go). Empty disables it.
 	PushKeyPath  string
 	PushSubsPath string
-	Log          *slog.Logger
+	// Skills is this machine's shared skills, kept the same as the other
+	// daemons' holding the fleet key (skills.go). Nil shares none.
+	Skills *skills.Store
+	Log    *slog.Logger
 	// Browse defaults to discovery.BrowseAll on this dashboard's port and
 	// the default one. Tests replace it.
 	Browse BrowseFunc
@@ -191,6 +195,8 @@ type Server struct {
 	written writtenCache
 	// webPort is the port Serve listens on, for the hello.
 	webPort int
+	// skillKick asks skillLoop for a round now.
+	skillKick chan struct{}
 }
 
 // webPorts are the dashboard ports to look for on the tailnet: this
@@ -229,7 +235,7 @@ func New(opts Options) (*Server, error) {
 			return discovery.BrowseAll(ctx, timeout, ports)
 		}
 	}
-	s := &Server{opts: opts, host: strings.ToLower(host), peerHTTP: newPeerClient()}
+	s := &Server{opts: opts, host: strings.ToLower(host), peerHTTP: newPeerClient(), skillKick: make(chan struct{}, 1)}
 	if hn, err := os.Hostname(); err == nil {
 		s.hostname = firstLabel(hn)
 	}
@@ -271,6 +277,13 @@ func (s *Server) start(ctx context.Context) {
 		defer s.wg.Done()
 		s.hub.run(ctx)
 	}()
+	if s.opts.Skills != nil && s.opts.KeyPath != "" {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.skillLoop(ctx)
+		}()
+	}
 }
 
 // handler routes /ws, /api/ and the static files, behind the Host check

@@ -22,6 +22,7 @@ import (
 	"fleet/internal/discovery"
 	"fleet/internal/identity"
 	"fleet/internal/sandbox"
+	"fleet/internal/skills"
 	"fleet/internal/tmux"
 	"fleet/internal/web"
 )
@@ -145,11 +146,20 @@ func Run(ctx context.Context, opts Options) error {
 	if d.server, err = identity.LoadOrCreateServer(home, cfg.Name); err != nil {
 		return err
 	}
+	sk, err := skills.Open(skills.Options{
+		Dir: config.Path("skills"), State: config.Path("skills.json"), ID: d.server.ID, Name: cfg.Name,
+		LinkDirs: func(ctx context.Context) []string { return adapter.SkillDirs(ctx, opts.Adapters) },
+		Log:      d.log,
+	})
+	if err != nil {
+		d.log.Warn("shared skills disabled", "err", err)
+		sk = nil
+	}
 	var ws *web.Server
 	wsrc := &webSource{d: d}
 	if webAddr != "off" {
 		ws, err = web.New(web.Options{
-			Addr: webAddr, Source: wsrc, Log: d.log,
+			Addr: webAddr, Source: wsrc, Log: d.log, Skills: sk,
 			TokenPath: config.Path("web-token"), KeyPath: config.Path("fleet-key"),
 			PushKeyPath: config.Path("push-key"), PushSubsPath: config.Path("push.json"),
 		})
@@ -257,6 +267,13 @@ func Run(ctx context.Context, opts Options) error {
 		defer bg.Done()
 		d.updateLoop(ctx)
 	}()
+	if sk != nil {
+		bg.Add(1)
+		go func() {
+			defer bg.Done()
+			sk.Run(ctx)
+		}()
+	}
 	for i, ln := range lns {
 		bg.Add(1)
 		go func(ln net.Listener, local bool) {

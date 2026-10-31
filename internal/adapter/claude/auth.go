@@ -35,3 +35,17 @@ func (c *claude) LockAuth(ctx context.Context, file string) (func(), error) {
 	}
 	return lockFile(ctx, filepath.Join(dir, ".storage-write.lock"))
 }
+
+// SkillsDir implements adapter.SkillDirer: Claude Code loads user skills
+// from <config dir>/skills.
+func (c *claude) SkillsDir() string {
+	dir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if dir == "" {
+		h, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		dir = filepath.Join(h, ".claude")
+	}
+	return filepath.Join(dir, "skills")
+}
