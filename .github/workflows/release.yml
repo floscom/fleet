@@ -38,3 +38,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
+      - name: Notify ReleaseBot
+        if: success()
+        run: |
+          curl -fsS -X POST "$GROKBOT_WEBHOOK_URL" \
+            -H "Authorization: $GROKBOT_WEBHOOK_AUTH" \
+            -H "Content-Type: application/json" \
+            -d "{\"action\":\"published\",\"repository\":{\"full_name\":\"${{ github.repository }}\"},\"release\":{\"tag_name\":\"${{ github.ref_name }}\"}}"
+        env:
+          GROKBOT_WEBHOOK_URL: ${{ secrets.GROKBOT_WEBHOOK_URL }}
+          GROKBOT_WEBHOOK_AUTH: ${{ secrets.GROKBOT_WEBHOOK_AUTH }}
