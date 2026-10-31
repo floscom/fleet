@@ -8515,9 +8515,10 @@
   }
 
   // openOut opens href in a new tab. Installed on the home screen, iOS
-  // would show it in a sheet over the app: Safari takes it instead.
+  // would show it in a sheet over the app: Safari takes it instead. Only
+  // https: iOS knows no x-safari-http, plain http stays in the sheet.
   function openOut(href) {
-    if (standalone() && /^https?:/i.test(href)) location.assign('x-safari-' + href);
+    if (standalone() && /^https:/i.test(href)) location.assign('x-safari-' + href);
     else window.open(href, '_blank', 'noopener,noreferrer');
   }
 
