@@ -1,8 +1,9 @@
 # Teams: sharing skills with other people's fleets
 
-Status: `internal/team` (crypto and protocol) and `fleet hub` (the server)
-are built and tested; the gateway (daemon side, `fleet team ...`), the
-skill-store integration and the dashboard are not yet.
+Status: `internal/team` (crypto and protocol), `fleet hub` (the server),
+the skill-store integration and the gateway (`internal/gateway`, the
+daemon side, with `fleet team ...` and the admin API under `/api/teams`)
+are built and tested; the dashboard is not yet.
 
 A fleet is one person's machines, joined by the fleet key, and the fleet key
 is full trust: peers run agents on each other, read files and unlock admin.
@@ -264,7 +265,8 @@ the skill store, and from there the fleet sync spreads it. Defaults:
 - the dashboard always shows who published a skill, because a skill's
   scripts run with the agent's rights;
 - a bundle whose signature does not verify against the roster is refused
-  and logged; a bundle whose owner has left the roster is dropped.
+  and logged; a skill whose publisher has left the roster stays installed,
+  marked so, and no longer updates.
 
 ## Installing into the skill store
 
@@ -281,6 +283,71 @@ the skill store, and from there the fleet sync spreads it. Defaults:
   own, stops updating and shows "forked from flo/git-commit".
 - A skill you published and also have locally is the same skill; it is
   never installed a second time.
+
+## The gateway
+
+`internal/gateway` is the daemon side; its package doc is the reference.
+What it decides beyond the flows above:
+
+- **State.** Per team, `<FLEET_HOME>/teams/<team id>/` (0700) holds
+  `member-key.json` and `state.json` (0600, written atomically): the
+  trusted roster head, the team keys held, open invite secrets, what this
+  member publishes (skill name → bundle id, last published hash and
+  head), subscriptions, pins, every bundle's highest version, and the
+  event cursor. Updates held back by a pin are kept decrypted in
+  `pending/<bundle>.tar.gz`.
+- **Loop.** One per team: it long-polls the events and acts on them, and
+  syncs in full (rosters, key, joins, heads, own skills) on start, on a
+  `reset`, after any error and every 10 minutes. A failed hub call backs
+  off from 2 s to 5 minutes; the state stands meanwhile. A joiner asks
+  every 15 s whether a roster lists it yet. A member whose requests the
+  hub refuses (403) after it was one is marked removed: the roster that
+  dropped it is out of its reach, as the hub revokes it with that roster.
+- **Keys.** Besides the current epoch's key a member keeps an old one
+  while some head it knows is still wrapped under it: its own (to
+  re-wrap them) and others' not re-wrapped yet, so a subscriber does not
+  lose access in the time between a new epoch and the owners' re-wraps.
+  A key nobody's head needs any more is dropped.
+- **Admin duties.** Only the admin who made an invite holds its secret,
+  so only its gateway approves the joins it brings. The secret is kept
+  until the invite expired and no join request names it; a join that
+  fails `VerifyJoin` is deleted and its invite forgotten (the hub marked
+  it used). Any admin drops a member who left. A roster post that loses a
+  race with another admin (409) fetches the chain and is built again, up
+  to three times. A joiner's display name is cleaned (`/` and control
+  characters go) rather than refused.
+- **Publishing.** Only skills with no `Source` (the user's own, forks
+  included) can be published. The gateway compares the store's manifest
+  every 2 s (the store's change channel has one reader already, the fleet
+  sync) and sends a new version when a published skill's hash differs
+  from the last published one; a skill still changing (`ErrChanging`) is
+  tried again in a few seconds. A published skill deleted from the store,
+  or replaced by a team skill of that name, is withdrawn with a
+  tombstone. After an epoch change the owner re-wraps each live head
+  whose files did not change, or seals a new version when the old key is
+  gone.
+- **Subscribing.** Subscriptions are kept by member id (`<owner>/<name>`
+  or `<owner>/*`), so a member's name can change without breaking them.
+  A bundle is installed or updated when it is subscribed to, or installed
+  already, and not dropped. It is dropped when it is unsubscribed or its
+  skill is deleted from the store anywhere in the fleet (a tombstone
+  with its `Source`); a subscription, by name or wildcard, takes back the
+  dropped skills it matches, but a wildcard that already exists does not.
+  Subscribing also fetches the heads, so what was published since the
+  last sync installs at once.
+- **Pins.** A pinned skill's newer version is downloaded, verified and
+  kept pending; `diff` compares it with the installed files (text files
+  up to 256 KiB, a Myers line diff, with the `name:` rewrite of a skill
+  installed under another name left out); `apply` installs it and keeps
+  the pin; unpinning installs the latest version.
+- **Members who go.** Installed skills of a member who left or was
+  removed stay, marked "publisher left", and no longer update; their
+  pending updates are dropped. A member who leaves forgets the team; what
+  it installed stays as it is.
+- **Admin API.** The routes under `/api/teams` take the dashboard's admin
+  token only: a team lives on its gateway daemon, so requests signed with
+  the fleet key do not reach them and they are not forwarded to other
+  daemons. `fleet team` calls them on loopback.
 
 ## Hub API (JSON over HTTPS)
 
@@ -364,9 +431,9 @@ must be made on purpose, with this document.
 2. `fleet hub`: storage, the API above, quotas, creation codes, and long-poll
    events. Done.
 3. Gateway: `fleet team create|invite|join|ls|members|remove|leave`, the
-   event loop, admin auto-approval of joins, epoch rotation.
+   event loop, admin auto-approval of joins, epoch rotation. Done.
 4. Skills: publish and subscribe, `Source` in the manifest, names, forks,
-   pins.
+   pins. Done.
 5. Dashboard: a Team part in the skills view (publish toggles, team skills,
    subscribe, pending updates with diff, members, invite).
 6. Later: other kinds; member keys shared across one's own fleet (sealed

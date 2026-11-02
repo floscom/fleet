@@ -41,6 +41,7 @@ import (
 	"fleet/internal/ask"
 	"fleet/internal/config"
 	"fleet/internal/discovery"
+	"fleet/internal/gateway"
 	"fleet/internal/skills"
 	"fleet/internal/workflow"
 )
@@ -170,7 +171,9 @@ type Options struct {
 	// Skills is this machine's shared skills, kept the same as the other
 	// daemons' holding the fleet key (skills.go). Nil shares none.
 	Skills *skills.Store
-	Log    *slog.Logger
+	// Teams is this daemon's membership in teams (teams.go). Nil has none.
+	Teams *gateway.Gateway
+	Log   *slog.Logger
 	// Browse defaults to discovery.BrowseAll on this dashboard's port and
 	// the default one. Tests replace it.
 	Browse BrowseFunc

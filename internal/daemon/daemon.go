@@ -20,6 +20,7 @@ import (
 	"fleet/internal/adapter"
 	"fleet/internal/config"
 	"fleet/internal/discovery"
+	"fleet/internal/gateway"
 	"fleet/internal/identity"
 	"fleet/internal/sandbox"
 	"fleet/internal/skills"
@@ -155,11 +156,19 @@ func Run(ctx context.Context, opts Options) error {
 		d.log.Warn("shared skills disabled", "err", err)
 		sk = nil
 	}
+	// Teams share skills, so they need the store.
+	var teams *gateway.Gateway
+	if sk != nil {
+		if teams, err = gateway.Open(gateway.Options{Dir: config.Path("teams"), Skills: sk, Log: d.log}); err != nil {
+			d.log.Warn("teams disabled", "err", err)
+			teams = nil
+		}
+	}
 	var ws *web.Server
 	wsrc := &webSource{d: d}
 	if webAddr != "off" {
 		ws, err = web.New(web.Options{
-			Addr: webAddr, Source: wsrc, Log: d.log, Skills: sk,
+			Addr: webAddr, Source: wsrc, Log: d.log, Skills: sk, Teams: teams,
 			TokenPath: config.Path("web-token"), KeyPath: config.Path("fleet-key"),
 			PushKeyPath: config.Path("push-key"), PushSubsPath: config.Path("push.json"),
 		})
@@ -272,6 +281,13 @@ func Run(ctx context.Context, opts Options) error {
 		go func() {
 			defer bg.Done()
 			sk.Run(ctx)
+		}()
+	}
+	if teams != nil {
+		bg.Add(1)
+		go func() {
+			defer bg.Done()
+			teams.Run(ctx)
 		}()
 	}
 	for i, ln := range lns {
