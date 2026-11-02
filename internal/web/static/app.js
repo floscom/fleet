@@ -832,7 +832,7 @@
       kids.push(h('section', { class: 'attn', 'aria-label': 'Sessions that need you' },
         h('div', 'attn-h', icon('alert'), waiting.length === 1 ? 'Needs you' : `${waiting.length} sessions need you`),
         waiting.map(({ a, host }) => h('a', { class: 'attn-item', href: chatHash(host, a.id) },
-          avatar(a),
+          avatar(a, host),
           h('div', 'row-main', h('div', 'row-name', label(a)), h('div', 'attn-q', a.stateDetail || 'Waiting for you in its terminal')),
           h('span', 'attn-go', 'Answer')))));
     }
@@ -874,9 +874,15 @@
     $('new-btn')?.setAttribute('aria-current', U.view === 'new' || (U.view === 'home' && !small()) ? 'page' : 'false');
   }
 
-  function avatar(a) {
-    const k = stateKey(a);
-    const badge = ['working', 'starting', 'needs_input', 'failed', 'limit'].includes(k) ? h('span', 'badge ' + k) : null;
+  // avatar is a session's logo, its state a badge on it; an idle session
+  // whose workflow runs in the background spins as the run does.
+  function avatar(a, host) {
+    let k = stateKey(a);
+    if (!['working', 'starting', 'needs_input', 'failed', 'limit'].includes(k)) {
+      const runs = (admin && S.workflows.get(agentKey(host, a.id))) || [];
+      k = !isFinished(a) && runs.some((r) => r.status === 'running') ? 'wf' : '';
+    }
+    const badge = k ? h('span', 'badge ' + k) : null;
     return h('span', { class: 'av', 'aria-hidden': 'true' }, logo(a.adapter), badge);
   }
 
@@ -906,7 +912,7 @@
   }
 
   function miniBar(bars) {
-    return h('span', { class: 'mini-bar', 'aria-hidden': 'true' }, bars.slice(0, 12).map((s) => h('span', s === 'running' ? 'run' : 'done')));
+    return h('span', { class: 'mini-bar', 'aria-hidden': 'true' }, bars.slice(0, 12).map((s) => h('span', s === 'running' || s === 'failed' ? s : 'done')));
   }
 
   function rowChips(a) {
@@ -929,7 +935,7 @@
       'data-key': key,
       title: a.title ? a.name : null,
     },
-    avatar(a),
+    avatar(a, host),
     h('div', 'row-main',
       h('div', 'row-top', h('span', 'row-name', label(a)), relTime(a.updatedAtMs, 'row-time')),
       h('div', 'row-sub', subLine(a, host), unread ? h('span', 'unread-dot') : null),
