@@ -27,6 +27,12 @@
 // inside a skill links, VCS folders, caches and editor or OS litter (junk).
 // A folder linked in (fleet skill add --link) is followed, and updated in
 // place where it lives.
+//
+// A skill can also come from a team (docs/TEAMS.md, team.go): the gateway
+// daemon installs it with InstallTeam, and its entry carries a Source that
+// travels with the manifest, so every daemon knows where it came from and
+// only the gateway updates it. A change made to it here forks it: it
+// becomes the user's own skill, and the gateway leaves it alone.
 package skills
 
 import (
@@ -80,6 +86,13 @@ type Entry struct {
 	Host string `json:"host,omitempty"`
 	// Deleted marks a tombstone.
 	Deleted bool `json:"deleted,omitempty"`
+	// Source is where a skill installed from a team came from; nil for
+	// the user's own. A tombstone keeps the Source of the team skill it
+	// deleted. Copies of an entry share it: it is replaced, never changed.
+	Source *Source `json:"source,omitempty"`
+	// ForkedFrom is the Source of the team skill this one was until it was
+	// changed here.
+	ForkedFrom *Source `json:"forked_from,omitempty"`
 }
 
 // Newer reports whether e replaces o.
@@ -220,6 +233,14 @@ func (s *Store) Manifest() []Entry {
 	return out
 }
 
+// Entry returns the manifest entry of skill name.
+func (s *Store) Entry(name string) (Entry, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[name]
+	return e, ok
+}
+
 // Want returns the entries of another machine's manifest that replace
 // what this one has.
 func (s *Store) Want(remote []Entry) []Entry {
@@ -299,7 +320,14 @@ func (s *Store) Apply(e Entry, data []byte) (applied bool, err error) {
 	case data == nil:
 		return false, ErrNeedData
 	default:
-		if err := install(path, data, e.Hash); err != nil {
+		err := install(path, func(dir string) error {
+			got, err := unpack(data, dir)
+			if err == nil && got != e.Hash {
+				err = errors.New("the files that came differ from their hash")
+			}
+			return err
+		})
+		if err != nil {
 			return false, fmt.Errorf("skills: %s: %w", e.Name, err)
 		}
 		if files, err := walk(path); err == nil {
@@ -357,16 +385,26 @@ func (s *Store) scanLocked(now bool) bool {
 			continue
 		}
 		s.seen[name] = seen{fp: fp, hash: hash, size: size}
-		if e, ok := s.entries[name]; ok && !e.Deleted && e.Hash == hash {
+		l, ok := s.entries[name]
+		if ok && !l.Deleted && l.Hash == hash {
 			continue
 		}
-		s.entries[name] = s.change(Entry{Name: name, Hash: hash, Size: size})
+		e := Entry{Name: name, Hash: hash, Size: size}
+		if ok && !l.Deleted {
+			e.Source, e.ForkedFrom = l.Source, l.ForkedFrom
+			if e.Source != nil && e.Source.Hash != hash {
+				// Not the files installed: changed here, so forked.
+				e.Source, e.ForkedFrom = nil, e.Source
+				s.opts.Log.Info("skills: team skill forked here", "skill", name, "from", e.ForkedFrom.Ref())
+			}
+		}
+		s.entries[name] = s.change(e)
 		changed = true
 		s.opts.Log.Info("skills: skill changed here", "skill", name)
 	}
 	for name, e := range s.entries {
 		if !present[name] && !e.Deleted {
-			s.entries[name] = s.change(Entry{Name: name, Deleted: true})
+			s.entries[name] = s.change(Entry{Name: name, Deleted: true, Source: e.Source})
 			delete(s.seen, name)
 			changed = true
 			s.opts.Log.Info("skills: skill deleted here", "skill", name)
@@ -422,9 +460,9 @@ func (s *Store) signal() {
 	}
 }
 
-// install replaces the skill folder path with the files in data, which
-// must have content hash hash. A linked folder is replaced where it lives.
-func install(path string, data []byte, hash string) error {
+// install replaces the skill folder path with the files fill puts into an
+// empty folder. A linked folder is replaced where it lives.
+func install(path string, fill func(dir string) error) error {
 	target := path
 	if fi, err := os.Lstat(path); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
 		real, err := filepath.EvalSymlinks(path)
@@ -443,12 +481,8 @@ func install(path string, data []byte, hash string) error {
 		return err
 	}
 	defer os.RemoveAll(tmp) // no-op once renamed
-	got, err := unpack(data, tmp)
-	if err != nil {
+	if err := fill(tmp); err != nil {
 		return err
-	}
-	if got != hash {
-		return errors.New("the files that came differ from their hash")
 	}
 	if err := os.Chmod(tmp, 0o755); err != nil {
 		return err
