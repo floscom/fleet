@@ -630,6 +630,27 @@ fleet skill rm deploy                          # deleted on every machine
   allows (it can start a shell on all of them).
 - Sandboxed agents don't see shared skills yet.
 
+### Running a team hub
+
+Teams (see `docs/TEAMS.md`; the daemon side is still being built) share
+skills between different people's fleets through a hub, a server anyone
+can run with the same binary:
+
+```
+fleet hub --autocert hub.example.com   # HTTPS on :443, Let's Encrypt
+fleet hub --listen 127.0.0.1:7430      # plain HTTP, behind nginx or caddy
+fleet hub code                         # a one-time team creation code
+```
+
+The hub keeps its state in `~/.fleet-hub` (`--data`): per team a JSON
+index and one file per skill bundle. It stores and forwards only
+ciphertext: member names, skill names and skill contents are sealed with a
+team key the hub never has, so an operator sees member ids, public keys,
+sizes and times, and nothing else. Teams are created with a one-time code
+from `fleet hub code` (run on the hub's machine; `--open` lets anyone
+create teams). `--quota` caps each team's storage (1 GiB by default), a
+skill is at most 16 MiB.
+
 ## How tmux is used, and how cleanup works
 
 - The daemon runs its own tmux server, `tmux -L fleet`, never your default
