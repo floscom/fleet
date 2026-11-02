@@ -90,4 +90,6 @@ command -v tmux >/dev/null 2>&1 || say "Note: fleet needs tmux to run agents; in
 command -v git >/dev/null 2>&1 || say "Note: fleet uses git for worktrees; install git."
 if pgrep -x fleet >/dev/null 2>&1; then
   say "A fleet daemon is running; restart it to use the new version: fleet stop && fleet start"
+else
+  say "Start the daemon with: fleet start, or run it as a service that starts at boot: fleet service install"
 fi

@@ -5,7 +5,7 @@
 //	config.toml        user config (roots, listen and web addresses, name)
 //	fleet.sock         local control socket (mode 0600)
 //	daemon.pid         pid of the running daemon
-//	daemon.log         daemon log when started via `fleet start`
+//	daemon.log         daemon log when started via `fleet start` or `fleet service`
 //	identity/          server TLS key+cert, client device key (0600)
 //	devices.json       paired devices (0600)
 //	web-token          web dashboard admin token (0600, see web.LoadOrCreateToken)

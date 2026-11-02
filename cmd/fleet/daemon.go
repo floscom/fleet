@@ -252,11 +252,24 @@ func newStartCmd() *cobra.Command {
 				fmt.Fprintf(out, "fleet daemon is already running%s\n", pidSuffix())
 				return addLocalRoots(ctx, out, roots, f.trust)
 			}
+			logPath := config.Path("daemon.log")
+			if m, st := installedService(); st.Installed {
+				if len(f.args()) > 0 {
+					return fmt.Errorf("the %s runs the daemon with the flags of fleet service install; to change them, run that again with them", m.Kind())
+				}
+				if err := m.Start(); err != nil {
+					return err
+				}
+				if err := waitAlive(ctx, logPath); err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "fleet daemon started by its %s%s, log: %s\n", m.Kind(), pidSuffix(), logPath)
+				return addLocalRoots(ctx, out, roots, f.trust)
+			}
 			exe, err := executable()
 			if err != nil {
 				return err
 			}
-			logPath := config.Path("daemon.log")
 			logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 			if err != nil {
 				return err
@@ -340,41 +353,54 @@ func newStopCmd() *cobra.Command {
 			}
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
-			pid := readPid()
-			_, alive := localAlive(ctx)
-			switch {
-			case pid == 0 && alive:
-				return errors.New("daemon is running but daemon.pid is missing; stop it where it was started")
-			case pid == 0 || !processAlive(pid):
-				// A stale daemon.pid is left alone: the next daemon takes
-				// its lock, and unlinking a file another daemon may be
-				// locking right now would let two daemons run.
-				fmt.Fprintln(out, "fleet daemon is not running")
+			if m, st := installedService(); st.Running {
+				if err := m.Stop(); err != nil {
+					return err
+				}
+				fmt.Fprintf(out, "fleet daemon stopped (%s; it starts again at %s, or now with fleet start)\n", m.Kind(), bootOrLogin(m))
 				return nil
-			case !alive && !force:
-				// A recycled pid must not get a signal meant for the daemon.
-				return fmt.Errorf("pid %d from daemon.pid is alive but no daemon answers on %s; use --force to signal it anyway", pid, config.SocketPath())
 			}
-			if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-				return fmt.Errorf("signal pid %d: %w", pid, err)
-			}
-			deadline := time.Now().Add(stopTimeout)
-			for processAlive(pid) {
-				if time.Now().After(deadline) {
-					return fmt.Errorf("daemon (pid %d) did not exit within %s", pid, stopTimeout)
-				}
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(100 * time.Millisecond):
-				}
-			}
-			fmt.Fprintf(out, "fleet daemon stopped (pid %d)\n", pid)
-			return nil
+			return stopLocal(ctx, out, force)
 		},
 	}
 	cmd.Flags().BoolVar(&force, "force", false, "signal the recorded pid even if the daemon does not answer")
 	return cmd
+}
+
+// stopLocal stops the daemon recorded in daemon.pid with SIGTERM and waits
+// for it to exit. force signals a pid whose daemon does not answer.
+func stopLocal(ctx context.Context, out io.Writer, force bool) error {
+	pid := readPid()
+	_, alive := localAlive(ctx)
+	switch {
+	case pid == 0 && alive:
+		return errors.New("daemon is running but daemon.pid is missing; stop it where it was started")
+	case pid == 0 || !processAlive(pid):
+		// A stale daemon.pid is left alone: the next daemon takes
+		// its lock, and unlinking a file another daemon may be
+		// locking right now would let two daemons run.
+		fmt.Fprintln(out, "fleet daemon is not running")
+		return nil
+	case !alive && !force:
+		// A recycled pid must not get a signal meant for the daemon.
+		return fmt.Errorf("pid %d from daemon.pid is alive but no daemon answers on %s; use --force to signal it anyway", pid, config.SocketPath())
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+		return fmt.Errorf("signal pid %d: %w", pid, err)
+	}
+	deadline := time.Now().Add(stopTimeout)
+	for processAlive(pid) {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("daemon (pid %d) did not exit within %s", pid, stopTimeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	fmt.Fprintf(out, "fleet daemon stopped (pid %d)\n", pid)
+	return nil
 }
 
 func newStatusCmd() *cobra.Command {
@@ -417,6 +443,11 @@ func newStatusCmd() *cobra.Command {
 			fmt.Fprintln(out)
 			if info.StartedAtMs > 0 {
 				fmt.Fprintf(out, "up:        %s\n", age(info.StartedAtMs))
+			}
+			if client.IsLocal(host) {
+				if m, st := installedService(); st.Installed {
+					fmt.Fprintf(out, "service:   %s, %s\n", m.Kind(), serviceSummary(m, st))
+				}
 			}
 			// Daemons before host stats answer with an error: no line.
 			if hs, err := c.GetHostStats(ctx); err == nil {

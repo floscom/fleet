@@ -96,6 +96,39 @@ gofmt), `make proto` (regenerate `gen/fleetv1` with buf), and `make cross`
 Install the same binary on every machine you want to control the server
 from.
 
+### Run it as a service
+
+To have the daemon start at boot and come back after a crash, install it
+as a service instead of using `fleet start`:
+
+```sh
+fleet service install            # takes the same flags as fleet start, e.g. --root ~/code
+fleet service                    # installed? running?
+fleet service uninstall
+```
+
+On Linux that is a systemd user unit (`~/.config/systemd/user/fleet.service`).
+Install turns on lingering for the user (`loginctl enable-linger`), because
+without it systemd stops user services, and with them the agents, at logout.
+If that needs root, it says so; run `sudo loginctl enable-linger $USER`. On
+macOS it is a launchd agent (`~/Library/LaunchAgents/com.floscom.fleet.plist`)
+that starts at login. Run as root, `fleet service install` writes a system unit
+or launch daemon instead.
+
+The service runs `fleet daemon` from where the binary is now, with the
+flags given to install. It gets the `PATH` and locale of the shell you run
+install from, so the daemon finds tmux, git and the agent CLIs as that shell
+does. Run install again to change any of these. It logs to `~/.fleet/daemon.log`,
+like `fleet start`. A daemon started with `fleet start` is stopped first, and
+the service's daemon takes over its agents. Once a service is installed,
+`fleet start` and `fleet stop` start and stop it. Stopping or restarting
+the service never stops the agents; they keep running in tmux.
+Automatic updates work under it: the daemon restarts in place, with the same pid.
+
+Install rewrites the unit file each time, so put your own settings
+(e.g. more environment variables) in a drop-in
+(`systemctl --user edit fleet`).
+
 ## Quick start
 
 On the server:
@@ -133,8 +166,9 @@ address. Without it, commands talk to the local daemon.
 | Command | What it does |
 |---------|--------------|
 | `fleet daemon [--listen ADDR\|off] [--web ADDR\|off] [--no-mdns] [--root DIR]... [--trust] [--join KEY]` | Run the daemon in the foreground (logs to stderr). `--root`: see [Starting in a folder](#starting-in-a-folder). `--join`: see [Several machines](#several-machines-one-dashboard). |
-| `fleet start [--listen ...] [--web ...] [--no-mdns] [--root DIR]... [--trust] [--join KEY]` | Start the daemon in the background. If it already runs, only adds the `--root` folders and stores the `--join` key. |
+| `fleet start [--listen ...] [--web ...] [--no-mdns] [--root DIR]... [--trust] [--join KEY]` | Start the daemon in the background (through its service if one is installed). If it already runs, only adds the `--root` folders and stores the `--join` key. |
 | `fleet stop [--force]` | Stop the daemon. Agents keep running in tmux. |
+| `fleet service [status]` / `service install [--listen ...] [--web ...] [--no-mdns] [--root DIR]... [--trust] [--join KEY]` / `service uninstall` | Run the daemon as a service that starts at boot (systemd on Linux, launchd on macOS); see [Run it as a service](#run-it-as-a-service). |
 | `fleet status` | Daemon version, uptime, a line on the machine's load, memory and disks, server id, agent, root and device counts. |
 | `fleet host [--json]` | The daemon's machine: OS, kernel, CPU, uptime, load, memory, swap and the disks of `/`, the home folder, the roots and `~/.fleet`. A line ends in `!` when the load passes one per CPU or memory, swap or a disk is 90% full. With `-H`, of a paired server. |
 | `fleet version` | Print the version. |
@@ -789,8 +823,11 @@ restart with re-adoption. Known gaps:
   someone opened an extra window in that session, it may be the wrong one.
 - **No resume.** No adapter advertises the `resume` capability yet.
   `fleet run claude -- --continue` works as a manual workaround.
-- **No service files.** There is no systemd unit or launchd plist; use
-  `fleet start` or write your own unit around `fleet daemon`.
+- **The launchd service has not run on a Mac yet.** Its `launchctl`
+  calls follow the man page and its plist is tested, but `fleet service
+  install` was only tried live on Linux. A launchd agent starts at login,
+  so a Mac nobody logs in to needs automatic login or a system install
+  (as root).
 - **Config edits by hand** need a daemon restart.
 - **IPv4 only by default.** The default listen address is `0.0.0.0:7420`.
 - **No native app yet.** The macOS app is the next step; the protocol guide
