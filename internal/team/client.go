@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,13 +36,23 @@ func IsStatus(err error, status int) bool {
 	return errors.As(err, &he) && he.Status == status
 }
 
+// NonceHeader is the response header in which the hub sends the nonce for
+// the client's next signed request, saving the GET /v1/nonce round trip.
+const NonceHeader = "Fleet-Nonce"
+
 // Client talks to a hub as one member of one team: every request is signed
 // with Key. Create and Join are the two calls made before one is a member.
+// Safe for concurrent use.
 type Client struct {
 	Key *MemberKey
-	// HTTP is the client used; NewClient sets one with no proxy from the
-	// environment and a timeout long enough for an events long poll.
+	// HTTP is the client used; NewClient sets one with a timeout long
+	// enough for an events long poll.
 	HTTP *http.Client
+
+	mu sync.Mutex
+	// next is the nonce the hub handed out with the last reply, for the
+	// next request; "" when a GET /v1/nonce is needed.
+	next string
 }
 
 // NewClient returns a client for key's team on key's hub.
@@ -65,13 +76,13 @@ func Create(ctx context.Context, hub, code string, req CreateRequest) error {
 	if code != "" {
 		auth = CreateScheme + code
 	}
-	_, err := do(ctx, newHTTPClient(), http.MethodPost, hub+"/v1/teams", auth, jsonBody(req), jsonType, nil)
+	_, _, err := do(ctx, newHTTPClient(), http.MethodPost, hub+"/v1/teams", auth, jsonBody(req), jsonType, nil)
 	return err
 }
 
 // Join sends a join request with the invite's credential.
 func Join(ctx context.Context, inv *Invite, req JoinRequest) error {
-	_, err := do(ctx, newHTTPClient(), http.MethodPost, inv.Hub+"/v1/teams/"+inv.Team+"/joins", InviteAuthScheme+inv.Credential(), jsonBody(req), jsonType, nil)
+	_, _, err := do(ctx, newHTTPClient(), http.MethodPost, inv.Hub+"/v1/teams/"+inv.Team+"/joins", InviteAuthScheme+inv.Credential(), jsonBody(req), jsonType, nil)
 	return err
 }
 
@@ -179,21 +190,55 @@ func (c *Client) call(ctx context.Context, method, route string, body []byte, ou
 // jsonType is the Content-Type of JSON bodies.
 const jsonType = "application/json"
 
-// raw sends a signed request and returns the reply body.
+// raw sends a signed request and returns the reply body. The nonce is the
+// one the hub sent with the last reply, or a fresh one from GET /v1/nonce;
+// a chained nonce that turned out stale (401, say after a pause longer
+// than the hub's nonce TTL) is replaced once and the request sent again,
+// which is safe: the hub checks the nonce before it does anything.
 func (c *Client) raw(ctx context.Context, method, route string, body []byte, ctype string) ([]byte, error) {
 	base := strings.TrimRight(c.Key.Hub, "/")
-	nonce, err := c.nonce(ctx, base)
-	if err != nil {
-		return nil, err
-	}
 	uri := "/v1/teams/" + c.Key.Team + route
-	auth := c.Key.SignRequest(nonce, method, uri, body)
-	return do(ctx, c.HTTP, method, base+uri, auth, body, ctype, nil)
+	nonce, chained := c.takeNext()
+	if !chained {
+		var err error
+		if nonce, err = c.nonce(ctx, base); err != nil {
+			return nil, err
+		}
+	}
+	for {
+		auth := c.Key.SignRequest(nonce, method, uri, body)
+		reply, hdr, err := do(ctx, c.HTTP, method, base+uri, auth, body, ctype, nil)
+		if next := hdr.Get(NonceHeader); next != "" {
+			c.setNext(next)
+		}
+		if chained && IsStatus(err, http.StatusUnauthorized) {
+			chained = false
+			if nonce, err = c.nonce(ctx, base); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		return reply, err
+	}
+}
+
+func (c *Client) takeNext() (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := c.next
+	c.next = ""
+	return n, n != ""
+}
+
+func (c *Client) setNext(n string) {
+	c.mu.Lock()
+	c.next = n
+	c.mu.Unlock()
 }
 
 func (c *Client) nonce(ctx context.Context, base string) (string, error) {
 	var v NonceReply
-	if _, err := do(ctx, c.HTTP, http.MethodGet, base+"/v1/nonce", "", nil, "", &v); err != nil {
+	if _, _, err := do(ctx, c.HTTP, http.MethodGet, base+"/v1/nonce", "", nil, "", &v); err != nil {
 		return "", err
 	}
 	if v.Nonce == "" {
@@ -202,16 +247,17 @@ func (c *Client) nonce(ctx context.Context, base string) (string, error) {
 	return v.Nonce, nil
 }
 
-// do sends one request. A non-2xx status becomes a HubError with the hub's
-// message. out, if given, receives the decoded JSON reply.
-func do(ctx context.Context, hc *http.Client, method, url, auth string, body []byte, ctype string, out any) ([]byte, error) {
+// do sends one request and returns the reply body and headers. A non-2xx
+// status becomes a HubError with the hub's message. out, if given,
+// receives the decoded JSON reply.
+func do(ctx context.Context, hc *http.Client, method, url, auth string, body []byte, ctype string, out any) ([]byte, http.Header, error) {
 	var rd io.Reader
 	if body != nil {
 		rd = bytes.NewReader(body)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, rd)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if body != nil {
 		req.ContentLength = int64(len(body))
@@ -222,15 +268,15 @@ func do(ctx context.Context, hc *http.Client, method, url, auth string, body []b
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	reply, err := io.ReadAll(io.LimitReader(resp.Body, maxReply+1))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(reply) > maxReply {
-		return nil, errors.New("hub: reply too large")
+		return nil, nil, errors.New("hub: reply too large")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		he := &HubError{Status: resp.StatusCode}
@@ -238,14 +284,14 @@ func do(ctx context.Context, hc *http.Client, method, url, auth string, body []b
 		if json.Unmarshal(reply, &e) == nil {
 			he.Message = e.Error
 		}
-		return nil, he
+		return nil, resp.Header, he
 	}
 	if out != nil {
 		if err := json.Unmarshal(reply, out); err != nil {
-			return nil, fmt.Errorf("hub: bad reply: %w", err)
+			return nil, nil, fmt.Errorf("hub: bad reply: %w", err)
 		}
 	}
-	return reply, nil
+	return reply, resp.Header, nil
 }
 
 // jsonBody marshals v; the types here always marshal.

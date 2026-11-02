@@ -51,6 +51,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request, a *authed)
 		}
 		s.mu.Lock()
 		out, _ = t.eventsAfter(since, a.member)
+		// The nonce issued before the wait may be close to expiry.
+		s.chainNonce(w, r)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

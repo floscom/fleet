@@ -16,15 +16,23 @@ import (
 	"fleet/internal/team"
 )
 
-// nonces are the outstanding single-use nonces of /v1/nonce.
+// nonces are the outstanding single-use nonces, from GET /v1/nonce and
+// from NonceHeader.
 type nonces struct {
-	mu  sync.Mutex
-	m   map[string]time.Time // nonce -> expiry
-	now func() time.Time
+	mu    sync.Mutex
+	m     map[string]nonceRec // nonce -> expiry and issuing address
+	perIP map[string]int      // outstanding nonces per address
+	now   func() time.Time
 }
 
-// issue returns a new nonce, or false when too many are outstanding.
-func (n *nonces) issue() (string, bool) {
+type nonceRec struct {
+	exp time.Time
+	ip  string
+}
+
+// issue returns a new nonce for ip, or false when too many are
+// outstanding, in all or for ip.
+func (n *nonces) issue(ip string) (string, bool) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", false
@@ -33,20 +41,17 @@ func (n *nonces) issue() (string, bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.m == nil {
-		n.m = map[string]time.Time{}
+		n.m, n.perIP = map[string]nonceRec{}, map[string]int{}
 	}
-	if len(n.m) >= maxNonces {
-		for k, exp := range n.m {
-			if now.After(exp) {
-				delete(n.m, k)
-			}
-		}
-		if len(n.m) >= maxNonces {
+	if len(n.m) >= maxNonces || n.perIP[ip] >= maxNoncesPerIP {
+		n.pruneLocked(now)
+		if len(n.m) >= maxNonces || n.perIP[ip] >= maxNoncesPerIP {
 			return "", false
 		}
 	}
 	nonce := hex.EncodeToString(b[:])
-	n.m[nonce] = now.Add(nonceTTL)
+	n.m[nonce] = nonceRec{exp: now.Add(nonceTTL), ip: ip}
+	n.perIP[ip]++
 	return nonce, true
 }
 
@@ -54,22 +59,51 @@ func (n *nonces) issue() (string, bool) {
 func (n *nonces) take(nonce string) bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	exp, ok := n.m[nonce]
+	rec, ok := n.m[nonce]
+	if ok {
+		n.forgetLocked(nonce, rec)
+	}
+	return ok && n.now().Before(rec.exp)
+}
+
+// pruneLocked drops expired nonces.
+func (n *nonces) pruneLocked(now time.Time) {
+	for k, rec := range n.m {
+		if now.After(rec.exp) {
+			n.forgetLocked(k, rec)
+		}
+	}
+}
+
+func (n *nonces) forgetLocked(nonce string, rec nonceRec) {
 	delete(n.m, nonce)
-	return ok && n.now().Before(exp)
+	if n.perIP[rec.ip]--; n.perIP[rec.ip] <= 0 {
+		delete(n.perIP, rec.ip)
+	}
 }
 
 func (s *Server) handleNonce(w http.ResponseWriter, r *http.Request) {
-	if !s.limiter.allow(s.clientIP(r)) {
+	ip := s.clientIP(r)
+	if !s.nonceLimiter.allow(ip) {
 		writeError(w, http.StatusTooManyRequests, "too many requests")
 		return
 	}
-	nonce, ok := s.nonces.issue()
+	nonce, ok := s.nonces.issue(ip)
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "too many requests")
 		return
 	}
 	writeJSON(w, http.StatusOK, team.NonceReply{Nonce: nonce})
+}
+
+// chainNonce puts a nonce for the client's next request into the response
+// headers (must be called before the body is written). A member that has
+// just proven itself with a signature is not rate limited here; the
+// per-address cap still bounds what it can hold.
+func (s *Server) chainNonce(w http.ResponseWriter, r *http.Request) {
+	if nonce, ok := s.nonces.issue(s.clientIP(r)); ok {
+		w.Header().Set(NonceHeader, nonce)
+	}
 }
 
 // authed is what a signed request established.
@@ -101,6 +135,7 @@ func (s *Server) member(h handler) http.HandlerFunc {
 			writeError(w, http.StatusForbidden, "not a member")
 			return
 		}
+		s.chainNonce(w, r)
 		h(w, r, a)
 	}
 }
@@ -177,17 +212,18 @@ func (s *Server) clientIP(r *http.Request) string {
 	return host
 }
 
-// rateLimiter allows rateLimit requests per IP per rateWindow (a fixed
+// rateLimiter allows limit requests per IP per rateWindow (a fixed
 // window: simple, and enough to blunt guessing and flooding).
 type rateLimiter struct {
 	mu    sync.Mutex
 	start time.Time
 	count map[string]int
+	limit int
 	now   func() time.Time
 }
 
-func newRateLimiter(now func() time.Time) *rateLimiter {
-	return &rateLimiter{start: now(), count: map[string]int{}, now: now}
+func newRateLimiter(now func() time.Time, limit int) *rateLimiter {
+	return &rateLimiter{start: now(), count: map[string]int{}, limit: limit, now: now}
 }
 
 func (l *rateLimiter) allow(ip string) bool {
@@ -197,7 +233,7 @@ func (l *rateLimiter) allow(ip string) bool {
 		l.start, l.count = now, map[string]int{}
 	}
 	l.count[ip]++
-	return l.count[ip] <= rateLimit
+	return l.count[ip] <= l.limit
 }
 
 // codes are the one-time team creation codes the operator hands out.

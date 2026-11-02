@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,7 +46,10 @@ type testHub struct {
 
 func newTestHub(t *testing.T, opts Options) *testHub {
 	t.Helper()
-	rateLimit = 100000 // the flows here make many calls; the limiter has its own test
+	// Limits are read when the hub is made: a test changes the variables
+	// before newTestHub and gets them reset after.
+	defRate, defNonceRate, defPoll := 60, 600, pollWait
+	t.Cleanup(func() { rateLimit, nonceRateLimit, pollWait = defRate, defNonceRate, defPoll })
 	pollWait = 2 * time.Second
 	c := &clock{t: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)}
 	if opts.DataDir == "" {
@@ -705,9 +709,8 @@ func TestEventsLongPoll(t *testing.T) {
 }
 
 func TestRateLimit(t *testing.T) {
+	nonceRateLimit = 5
 	h := newTestHub(t, Options{})
-	rateLimit = 5
-	defer func() { rateLimit = 100000 }()
 	for i := 0; i < 5; i++ {
 		resp, err := http.Get(h.ts.URL + "/v1/nonce")
 		must(t, err)
@@ -745,5 +748,131 @@ func TestDataDirPermissions(t *testing.T) {
 	must(t, err)
 	if fi.Mode().Perm() != 0o600 {
 		t.Errorf("team.json: mode %o", fi.Mode().Perm())
+	}
+}
+
+// countingHub counts GET /v1/nonce requests in front of a hub.
+func countingHub(t *testing.T, opts Options) (*testHub, *int32) {
+	t.Helper()
+	h := newTestHub(t, opts)
+	var gets int32
+	h.ts.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/nonce" {
+			atomic.AddInt32(&gets, 1)
+		}
+		h.s.ServeHTTP(w, r)
+	})
+	return h, &gets
+}
+
+// TestBurstFromOneIP: many signed requests from one address in a burst all
+// succeed, because the hub hands each reply the nonce for the next
+// request, and the unauthenticated limiter is not involved.
+func TestBurstFromOneIP(t *testing.T) {
+	h, gets := countingHub(t, Options{})
+	ctx := context.Background()
+	a, _, _ := h.founder(t)
+	before := atomic.LoadInt32(gets)
+	for i := 0; i < 200; i++ {
+		if _, err := a.Heads(ctx); err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+	}
+	if n := atomic.LoadInt32(gets) - before; n != 1 {
+		t.Fatalf("200 signed requests took %d nonce GETs, want 1", n)
+	}
+	// After a pause longer than the nonce TTL the chained nonce is stale;
+	// the client gets a fresh one and the request still goes through.
+	h.clock.advance(nonceTTL + time.Second)
+	if _, err := a.Heads(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := atomic.LoadInt32(gets) - before; n != 2 {
+		t.Fatalf("stale nonce took %d extra GETs, want 1", n-1)
+	}
+}
+
+// TestParallelMembersOneIP: several daemons behind one NAT, each with its
+// own client, all at once.
+func TestParallelMembersOneIP(t *testing.T) {
+	h := newTestHub(t, Options{})
+	ctx := context.Background()
+	a, r1, K := h.founder(t)
+	clients := []*team.Client{a}
+	head := r1
+	for i := 0; i < 4; i++ {
+		c, next, _ := h.join(t, a, head, K, "m")
+		clients, head = append(clients, c), next
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, len(clients)*50)
+	for _, c := range clients {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				if _, err := c.Heads(ctx); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+}
+
+// TestNoncePerIP: one address cannot hold more than maxNoncesPerIP unused
+// nonces, and another address is not affected.
+func TestNoncePerIP(t *testing.T) {
+	nonceRateLimit = 100000
+	h := newTestHub(t, Options{TrustForwarded: true})
+	get := func(ip string) int {
+		req, _ := http.NewRequest("GET", h.ts.URL+"/v1/nonce", nil)
+		req.Header.Set("X-Forwarded-For", ip)
+		resp, err := http.DefaultClient.Do(req)
+		must(t, err)
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	for i := 0; i < maxNoncesPerIP; i++ {
+		if st := get("10.0.0.1"); st != 200 {
+			t.Fatalf("nonce %d: %d", i, st)
+		}
+	}
+	if st := get("10.0.0.1"); st != 503 {
+		t.Fatalf("over the per-address cap: %d", st)
+	}
+	if st := get("10.0.0.2"); st != 200 {
+		t.Fatalf("another address: %d", st)
+	}
+	// Once they expire, the address gets nonces again.
+	h.clock.advance(nonceTTL + time.Second)
+	if st := get("10.0.0.1"); st != 200 {
+		t.Fatalf("after expiry: %d", st)
+	}
+}
+
+// TestUnauthenticatedStillLimited: joins (and creates) from one address
+// are limited by rateLimit, and that limit does not touch signed traffic.
+func TestUnauthenticatedStillLimited(t *testing.T) {
+	rateLimit = 5
+	h := newTestHub(t, Options{})
+	ctx := context.Background()
+	a, _, _ := h.founder(t) // one create
+	inv, err := team.NewInvite(h.ts.URL, a.Key.Team, a.Key.ID)
+	must(t, err)
+	for i := 0; i < 4; i++ {
+		// A bad join request: refused, but it counts.
+		wantStatus(t, team.Join(ctx, inv, team.JoinRequest{}), http.StatusBadRequest, "join attempt")
+	}
+	wantStatus(t, team.Join(ctx, inv, team.JoinRequest{}), http.StatusTooManyRequests, "6th unauthenticated request")
+	for i := 0; i < 20; i++ {
+		if _, err := a.Heads(ctx); err != nil {
+			t.Fatalf("signed request %d while unauthenticated traffic is limited: %v", i, err)
+		}
 	}
 }

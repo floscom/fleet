@@ -37,10 +37,12 @@ const (
 	// maxJSONBody caps a JSON request: a full roster of team.MaxMembers
 	// members with their KEM keys is about half of this.
 	maxJSONBody = 2 << 20
-	// nonceTTL is how long a nonce from /v1/nonce stays usable, maxNonces
-	// how many may be outstanding (the endpoint needs no auth).
-	nonceTTL  = 30 * time.Second
-	maxNonces = 4096
+	// nonceTTL is how long a nonce stays usable; maxNonces caps how many
+	// may be outstanding in all, maxNoncesPerIP per client address, so
+	// one address cannot starve the others (the endpoint needs no auth).
+	nonceTTL       = 30 * time.Second
+	maxNonces      = 8192
+	maxNoncesPerIP = 256
 	// pendingTTL is how long an uploaded blob waits for a head to reference
 	// it before it is deleted.
 	pendingTTL = time.Hour
@@ -60,11 +62,20 @@ const (
 	rateWindow = time.Minute
 )
 
+// NonceHeader is the response header of every signed request: a fresh
+// nonce for the client's next one, so a member needs GET /v1/nonce only
+// for its first request (and after a pause longer than nonceTTL).
+const NonceHeader = "Fleet-Nonce"
+
 // Variables so tests can shorten them.
 var (
-	// rateLimit is the number of unauthenticated requests one IP may make
-	// per rateWindow.
+	// rateLimit is the number of unauthenticated requests (create, join)
+	// one IP may make per rateWindow.
 	rateLimit = 60
+	// nonceRateLimit is the same for GET /v1/nonce: far higher, as every
+	// member behind one address needs one to start with, and a nonce is
+	// cheap and bounded by maxNoncesPerIP and nonceTTL anyway.
+	nonceRateLimit = 600
 	// pollWait is how long an events request waits for something to happen.
 	pollWait = 25 * time.Second
 )
@@ -100,9 +111,12 @@ type Server struct {
 	mu    sync.Mutex
 	teams map[string]*teamState
 
-	nonces  nonces
-	codes   codes
-	limiter *rateLimiter
+	nonces nonces
+	codes  codes
+	// limiter bounds the unauthenticated endpoints, nonceLimiter GET
+	// /v1/nonce.
+	limiter      *rateLimiter
+	nonceLimiter *rateLimiter
 }
 
 // New loads (or starts) a hub in opts.DataDir.
@@ -124,7 +138,8 @@ func New(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{opts: opts, log: opts.Log, store: st, teams: teams, limiter: newRateLimiter(opts.now)}
+	s := &Server{opts: opts, log: opts.Log, store: st, teams: teams,
+		limiter: newRateLimiter(opts.now, rateLimit), nonceLimiter: newRateLimiter(opts.now, nonceRateLimit)}
 	s.nonces.now, s.codes.now = opts.now, opts.now
 	s.mux = http.NewServeMux()
 	s.routes()
