@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	fleetv1 "fleet/gen/fleetv1"
@@ -345,6 +346,9 @@ func (m *manager) launch(ctx context.Context, ad adapter.Adapter, a agentRec, re
 		// client in the tmux pane needs none of it.
 		env, unset = nil, nil
 	}
+	if argv, err = launcher(stateDir, argv); err != nil {
+		return res, err
+	}
 	err = d.tmux.NewSession(ctx, tmux.NewSessionOptions{
 		Name:     a.TmuxSession,
 		Cwd:      res.cwd,
@@ -359,6 +363,34 @@ func (m *manager) launch(ctx context.Context, ad adapter.Adapter, a agentRec, re
 	}
 	res.sessionID = spec.SessionID
 	return res, nil
+}
+
+// maxTmuxArgv keeps the new-session command well under tmux's ~16 KiB limit
+// on a client command, which a long start prompt would exceed.
+const maxTmuxArgv = 8 << 10
+
+// launcher returns argv unchanged when it is short, and otherwise writes it
+// to a script in dir that deletes itself and execs it, returning the argv
+// that runs the script.
+func launcher(dir string, argv []string) ([]string, error) {
+	n := 0
+	for _, a := range argv {
+		n += len(a) + 1
+	}
+	if n <= maxTmuxArgv {
+		return argv, nil
+	}
+	var b strings.Builder
+	b.WriteString("rm -f -- \"$0\"\nexec")
+	for _, a := range argv {
+		b.WriteString(" '" + strings.ReplaceAll(a, "'", `'\''`) + "'")
+	}
+	b.WriteString("\n")
+	path := filepath.Join(dir, "launch.sh")
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		return nil, err
+	}
+	return []string{"/bin/sh", path}, nil
 }
 
 // worktreeDir is <base>/worktrees/<repo base>-<hash>/<agent name>, with the
