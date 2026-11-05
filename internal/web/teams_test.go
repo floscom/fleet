@@ -3,6 +3,7 @@ package web
 import (
 	"io"
 	"log/slog"
+	"os"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -109,5 +110,61 @@ func TestTeamRoutesWithoutTeams(t *testing.T) {
 	var e struct{ Error string }
 	if code := api(t, ts, "GET", "/api/teams", tok, "", &e); code != 404 || e.Error == "" {
 		t.Fatalf("no gateway: %d %+v", code, e)
+	}
+}
+
+func TestOwnSkills(t *testing.T) {
+	dir := t.TempDir()
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	st, err := skills.Open(skills.Options{Dir: filepath.Join(dir, "skills"), State: filepath.Join(dir, "skills.json"), ID: "a-id", Name: "a", Log: quiet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, md := range map[string]string{
+		"review":  "---\nname: review\ndescription: >\n  Reviews a diff\n  for bugs.\n---\n# Review\n",
+		"deploy":  "---\nname: deploy\ndescription: \"Ships it\"\n---\n",
+		"no-desc": "# Just text\n",
+	} {
+		if err := os.MkdirAll(filepath.Join(st.Dir(), name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(st.Dir(), name, "SKILL.md"), []byte(md), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A change is taken once it held still for a scan.
+	st.Scan(t.Context())
+	st.Scan(t.Context())
+	tokenPath, keyPath := filepath.Join(dir, "web-token"), filepath.Join(dir, "fleet-key")
+	tok, _ := LoadOrCreateToken(tokenPath)
+	key, _ := LoadOrCreateToken(keyPath)
+	src := newFakeSource()
+	src.id = "a-id"
+	ts := startServerOpts(t, Options{Source: src, TokenPath: tokenPath, KeyPath: keyPath, Skills: st})
+
+	if code, _ := signed(t, ts, key, "a-id", "", "GET", "/api/own-skills", ""); code != 404 {
+		t.Fatalf("signed with the fleet key: %d", code)
+	}
+	var got struct {
+		Skills []struct {
+			Name, Description string
+			Size, ChangedMs   int64
+		}
+	}
+	if code := api(t, ts, "GET", "/api/own-skills", tok, "", &got); code != 200 || len(got.Skills) != 3 {
+		t.Fatalf("own skills: %d %+v", code, got)
+	}
+	want := map[string]string{"deploy": "Ships it", "no-desc": "", "review": "Reviews a diff for bugs."}
+	for i, s := range got.Skills {
+		if s.Description != want[s.Name] || s.Size == 0 || s.ChangedMs == 0 || i > 0 && got.Skills[i-1].Name > s.Name {
+			t.Errorf("skill %d: %+v", i, s)
+		}
+	}
+
+	// Without shared skills: 404.
+	ts2 := startServerOpts(t, Options{Source: newFakeSource(), TokenPath: tokenPath})
+	var e struct{ Error string }
+	if code := api(t, ts2, "GET", "/api/own-skills", tok, "", &e); code != 404 || e.Error == "" {
+		t.Fatalf("no skills: %d %+v", code, e)
 	}
 }

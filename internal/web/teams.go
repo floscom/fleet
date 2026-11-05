@@ -22,15 +22,25 @@ package web
 //	POST   /api/teams/{t}/pin         {ref, pin}            -> {"team": TeamView}
 //	POST   /api/teams/{t}/apply       {bundle}              -> {"team": TeamView}
 //	GET    /api/teams/{t}/diff/{bundle...}     -> {"diff": DiffView}
+//	GET    /api/own-skills                     -> {"skills": [ownSkill...]}
 //
 // {t} is a team id, name or id prefix; {m} a member name, id or id
 // prefix; a ref "<member>/<skill>" or "<member>/*"; a bundle a bundle id,
 // "<member>/<skill>" or the name a team skill is installed under.
+// /api/own-skills lists the fleet's skills that are the user's own (none
+// installed from a team), what publish takes, for the dashboard to pick
+// from.
 
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	"fleet/internal/gateway"
@@ -57,6 +67,7 @@ func (s *Server) teamRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/teams/{t}/pin", s.apiPin)
 	mux.HandleFunc("POST /api/teams/{t}/apply", s.apiApply)
 	mux.HandleFunc("GET /api/teams/{t}/diff/{bundle...}", s.apiDiff)
+	mux.HandleFunc("GET /api/own-skills", s.apiOwnSkills)
 }
 
 // teams returns the gateway, or answers 404 without one.
@@ -316,4 +327,83 @@ func decodeOptional(w http.ResponseWriter, r *http.Request, v any) bool {
 		return true
 	}
 	return decode(w, r, v)
+}
+
+// ownSkill is one of the user's own skills, as /api/own-skills lists it.
+type ownSkill struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Size        int64  `json:"size"`
+	// ChangedMs is its version: when it last changed.
+	ChangedMs int64 `json:"changedMs"`
+}
+
+func (s *Server) apiOwnSkills(w http.ResponseWriter, r *http.Request) {
+	st := s.opts.Skills
+	if st == nil {
+		writeError(w, http.StatusNotFound, "this fleet shares no skills")
+		return
+	}
+	out := []ownSkill{}
+	for _, e := range st.Manifest() {
+		if e.Deleted || e.Source != nil {
+			continue
+		}
+		out = append(out, ownSkill{Name: e.Name, Description: skillDescription(filepath.Join(st.Dir(), e.Name, "SKILL.md")), Size: e.Size, ChangedMs: e.Version})
+	}
+	slices.SortFunc(out, func(a, b ownSkill) int { return strings.Compare(a.Name, b.Name) })
+	writeJSON(w, http.StatusOK, map[string][]ownSkill{"skills": out})
+}
+
+var (
+	// fenceRE opens or closes YAML front matter.
+	fenceRE = regexp.MustCompile(`^(---|\.\.\.)[ \t]*\r?$`)
+	// descRE is the top-level description key of front matter, and the
+	// rest of its line.
+	descRE = regexp.MustCompile(`^["']?description["']?[ \t]*:[ \t]*(.*?)\r?$`)
+)
+
+// skillDescription reads the description in the front matter of the
+// SKILL.md at path, for display (as the gateway does for what it
+// publishes): a plain or quoted value, or a block or plain value continued
+// on indented lines, folded into one line; "" without one.
+func skillDescription(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(io.LimitReader(f, 64<<10))
+	lines := strings.Split(strings.TrimPrefix(string(b), "\ufeff"), "\n")
+	if !fenceRE.MatchString(lines[0]) {
+		return ""
+	}
+	for i := 1; i < len(lines) && !fenceRE.MatchString(lines[i]); i++ {
+		m := descRE.FindStringSubmatch(lines[i])
+		if m == nil {
+			continue
+		}
+		var parts []string
+		if v := strings.TrimSpace(m[1]); v != "" && v[0] != '|' && v[0] != '>' {
+			parts = append(parts, v)
+		}
+		for _, c := range lines[i+1:] {
+			if c = strings.TrimRight(c, "\r"); strings.TrimSpace(c) == "" {
+				continue
+			}
+			if c[0] != ' ' && c[0] != '\t' {
+				break
+			}
+			parts = append(parts, strings.TrimSpace(c))
+		}
+		d := strings.Join(parts, " ")
+		if len(d) >= 2 && (d[0] == '"' && d[len(d)-1] == '"' || d[0] == '\'' && d[len(d)-1] == '\'') {
+			d = d[1 : len(d)-1]
+		}
+		if len(d) > 300 {
+			d = strings.ToValidUTF8(d[:300], "") + "…"
+		}
+		return d
+	}
+	return ""
 }
