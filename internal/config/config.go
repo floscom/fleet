@@ -17,6 +17,10 @@
 //	sandbox/           what Docker sandboxes mount ([sandbox] dir, see SandboxConfig)
 //	skills/            skills shared with the fleet, linked into each agent CLI (package skills)
 //	skills.json        what is known of each shared skill, deleted ones included
+//	teams/<team id>/   a team this daemon created or joined (package gateway, 0700):
+//	  member-key.json  this fleet's member key in the team (0600)
+//	  state.json       trusted roster, team keys, invite secrets, subscriptions (0600)
+//	  pending/         updates held back by a pin, decrypted (<bundle>.tar.gz, 0600)
 package config
 
 import (

@@ -295,6 +295,7 @@ func (s *Server) apiHandler() http.Handler {
 	browser.HandleFunc("POST /api/push/unsubscribe", s.apiPushUnsubscribe)
 	browser.HandleFunc("POST /api/push/test", s.apiPushTest)
 	browser.HandleFunc("/api/hosts/{id}/{rest...}", s.apiHost)
+	s.teamRoutes(browser)
 	browser.Handle("/", admin)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")

@@ -35,7 +35,7 @@
 
   // What the page shows, and choices kept in this browser.
   const U = {
-    view: 'home', // 'home' (phones: the list), 'new', 'chat', 'devices'
+    view: 'home', // 'home' (phones: the list), 'new', 'chat', 'devices', 'teams'
     key: '', // agent key of the session shown
     groupBy: load('fleet.groupBy', 'folder'),
     collapsed: new Set(load('fleet.collapsed', [])),
@@ -497,11 +497,11 @@
   // --------------------------------------------------------------- routes
   //
   // The address names the view: #/ (phones: the session list; desktops: a
-  // new session), #/new, #/devices and #/s/<agent key>. A `fleet web`
+  // new session), #/new, #/devices, #/teams and #/s/<agent key>. A `fleet web`
   // link's #token=... is taken before (takeLinkToken).
 
   function parseRoute() {
-    const m = /^#\/(s|new|devices)(?:\/(.+))?$/.exec(location.hash);
+    const m = /^#\/(s|new|devices|teams)(?:\/(.+))?$/.exec(location.hash);
     if (!m) return { view: 'home', key: '' };
     if (m[1] === 's') {
       let key = '';
@@ -538,6 +538,7 @@
     renderSideFoot();
     renderMain();
     updateTitle();
+    if (changed && U.view === 'teams') loadTeams();
     if (changed && U.view !== 'home' && small()) $('main').focus({ preventScroll: true });
   }
 
@@ -561,6 +562,7 @@
       return showChat(host, id);
     }
     if (U.view === 'devices') return renderDevices();
+    if (U.view === 'teams') return renderTeams();
     // Phones: the list is the screen; whatever main showed slides away.
     if (U.view === 'home' && small()) return;
     if (!admin) return lockedView(main);
@@ -721,6 +723,7 @@
       h('a', { class: 'brand', href: '#/', 'aria-label': 'fleet, home' }, wordmark()),
       h('span', 'spacer'),
       h('span', { class: 'on-phone', id: 'side-dots' }),
+      h('a', { class: 'icon-btn on-phone', href: '#/teams', 'aria-label': 'Teams', title: 'Teams' }, icon('users')),
       iconBtn('settings', 'Settings', openSettings, { cls: 'on-phone' }),
       iconBtn('panel-left', 'Hide the sessions', () => toggleSide(false), { cls: 'not-phone' }));
   }
@@ -964,6 +967,7 @@
       fill(foot,
         h('a', { class: 'devstrip', href: '#/devices', 'aria-current': U.view === 'devices' ? 'page' : null, 'aria-label': text, title: 'Devices' },
           ms.map((m) => h('span', { class: 'dev' + (hostUp(m.state) ? '' : ' off'), title: `${m.name}: ${MACHINE_STATE[m.state][1]}` }, h('span', MACHINE_STATE[m.state][0]), m.name))),
+        h('a', { class: 'icon-btn', href: '#/teams', 'aria-label': 'Teams', title: 'Teams', 'aria-current': U.view === 'teams' ? 'page' : null }, icon('users')),
         iconBtn('settings', 'Settings', openSettings));
     }
     const dots = $('side-dots');
@@ -6977,6 +6981,650 @@
     });
   }
 
+  // ------------------------------------------------------------------ teams
+  //
+  // Teams (docs/TEAMS.md): skills shared with other people's fleets through
+  // a hub. A team lives on the daemon it was joined on, so this view talks
+  // to /api/teams here only, and asks again every TEAM_POLL_MS while it
+  // shows.
+
+  const TEAM_POLL_MS = 20000;
+  const TM = { teams: null, error: '', off: '', loading: false, timer: 0 };
+
+  const teamAPI = (t, path) => '/api/teams/' + encodeURIComponent(t.id) + (path ? '/' + path : '');
+
+  // hubHost is the host of a hub's address, for display.
+  function hubHost(url) {
+    try {
+      return new URL(url).host;
+    } catch {
+      return url || '';
+    }
+  }
+
+  const longDate = (ms) => new Date(ms).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+
+  async function loadTeams() {
+    clearTimeout(TM.timer);
+    TM.timer = 0;
+    if (!admin || U.view !== 'teams' || TM.loading) return;
+    TM.loading = true;
+    try {
+      const r = await api('GET', '/api/teams');
+      TM.teams = (r && r.teams) || [];
+      TM.error = TM.off = '';
+    } catch (e) {
+      if (e.status === 404) TM.off = e.message;
+      else TM.error = e.message;
+    }
+    TM.loading = false;
+    if (U.view !== 'teams') return;
+    // A repaint would take an open menu's button away, or a dialog's team.
+    if (!MENU && !$('dlg').open) renderTeams();
+    if (!document.hidden) TM.timer = setTimeout(loadTeams, TEAM_POLL_MS);
+  }
+
+  function setTeam(v) {
+    if (!v || !TM.teams) return;
+    const i = TM.teams.findIndex((t) => t.id === v.id);
+    if (i >= 0) TM.teams[i] = v;
+    else TM.teams.push(v);
+  }
+
+  // teamBusy shows that btn works on it (a spinner, and text unless it is
+  // an icon button) and returns what puts it back.
+  function teamBusy(btn, text) {
+    const kids = [...btn.childNodes];
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    btn.replaceChildren(h('span', 'spin'), btn.classList.contains('icon-btn') ? '' : text);
+    return () => {
+      btn.replaceChildren(...kids);
+      btn.disabled = false;
+      btn.removeAttribute('aria-busy');
+    };
+  }
+
+  // teamOp asks the daemon for a change to team t: o.path (POST, or
+  // o.method) with o.body; o.btn shows it is busy with o.text. Success
+  // toasts o.ok, failure what o.fail could not do.
+  async function teamOp(t, o) {
+    const undo = o.btn && o.btn.isConnected ? teamBusy(o.btn, o.text || 'Working…') : null;
+    try {
+      const r = await api(o.method || 'POST', teamAPI(t, o.path), o.body);
+      setTeam(r && r.team);
+    } catch (e) {
+      if (undo) undo();
+      toast(`Could not ${o.fail}: ${e.message}`, 'error');
+      return false;
+    }
+    if (o.ok) toast(o.ok);
+    if (U.view === 'teams') renderTeams();
+    return true;
+  }
+
+  function renderTeams() {
+    const main = $('main');
+    if (!admin) return lockedView(main);
+    if (TM.teams === null && !TM.off && !TM.error) loadTeams();
+    const page = main.querySelector('.page');
+    const top = page ? page.scrollTop : 0;
+    const focused = main.contains(document.activeElement) ? document.activeElement.dataset.focus : '';
+    const lead = leadBtn();
+    const teams = TM.teams || [];
+    const acts = (primary) => [
+      h('button', { type: 'button', class: 'btn' + (primary ? ' primary' : ''), 'data-focus': 'team-join', onclick: openJoinTeam }, 'Join a team'),
+      h('button', { type: 'button', class: 'btn', 'data-focus': 'team-create', onclick: openCreateTeam }, icon('plus'), 'Create a team'),
+    ];
+    let body;
+    if (TM.off) {
+      body = h('div', 'no-chat tm-empty', h('span', 'big-ic', icon('users', 'i-lg')), h('h2', null, 'No teams on this machine'), h('p', null, TM.off + '.'));
+    } else if (TM.teams === null) {
+      body = TM.error
+        ? h('div', 'no-chat tm-empty', h('h2', null, 'Could not load the teams'), h('p', null, TM.error),
+          h('button', { type: 'button', class: 'btn', onclick: () => { TM.error = ''; loadTeams(); } }, icon('refresh'), 'Try again'))
+        : h('p', 'tm-loading', 'Loading…');
+    } else if (!teams.length) {
+      body = h('div', 'no-chat tm-empty',
+        h('span', 'big-ic', icon('users', 'i-lg')),
+        h('h2', null, 'Share skills with other people'),
+        h('p', null, 'A team passes the skills each member chooses to publish between several people’s fleets, end to end encrypted through a hub.'),
+        h('div', 'tm-empty-acts', acts(true)));
+    } else {
+      body = [TM.error ? h('p', 'tm-stale', `Could not refresh: ${TM.error}`) : null, teams.map(teamCard)];
+    }
+    fill(main, h('div', 'view',
+      lead ? h('div', 'topbar', lead, h('h1', null, 'Teams')) : null,
+      h('div', 'page', h('div', 'page-in',
+        h('div', 'page-h',
+          h('div', null, h('h1', { class: lead ? 'sr-only' : null }, 'Teams'),
+            h('p', 'page-sub', teams.length ? `${plural(teams.length, 'team')} · only what you publish leaves this fleet` : 'Skills shared with other people’s fleets')),
+          teams.length ? h('div', 'page-acts', acts(false)) : null),
+        body))));
+    const p2 = main.querySelector('.page');
+    if (p2) p2.scrollTop = top;
+    if (focused) main.querySelector(`[data-focus="${CSS.escape(focused)}"]`)?.focus();
+  }
+
+  const TEAM_STATE = {
+    ok: ['dot', ''],
+    waiting: ['dot warn', 'waiting for an admin’s fleet'],
+    offline: ['dot bad', 'hub offline'],
+    removed: ['dot off', 'removed'],
+  };
+
+  function teamCard(t) {
+    const st = TEAM_STATE[t.status] || TEAM_STATE.offline;
+    const joined = t.status === 'ok' || t.status === 'offline';
+    const notes = {
+      waiting: 'You joined. An admin’s fleet adds this one by itself the next time it is online; the team’s skills show here then.',
+      offline: `The hub does not answer${t.error ? ` (${t.error})` : ''}. This is the last state seen; fleet keeps trying.`,
+      removed: 'An admin removed this fleet from the team. The skills installed from it stay and no longer update.',
+    };
+    const out = [h('div', 'mach-h',
+      h('span', 'mach-ic', icon('users'), h('span', st[0])),
+      h('div', 'mach-id',
+        h('div', 'mach-name', h('span', 'trunc', t.name), t.admin ? h('span', 'chip ok', 'Admin') : null,
+          st[1] ? h('span', 'mach-state ' + (t.status === 'waiting' ? 'warn' : t.status === 'offline' ? 'bad' : ''), st[1]) : null),
+        h('div', 'mach-spec',
+          h('span', { class: 'mono', title: t.hub }, hubHost(t.hub)),
+          joined ? h('span', null, plural(t.members.length, 'member')) : null,
+          h('span', null, t.syncedAtMs ? ['synced ', relTime(t.syncedAtMs, '', true)] : 'not synced yet'))),
+      h('div', 'mach-acts',
+        t.status === 'removed' ? null : iconBtn('refresh', `Sync ${t.name} now`, (ev) => teamOp(t, { btn: ev.currentTarget, path: 'sync', fail: `sync ${t.name}` }), { attrs: { 'data-focus': 'sync-' + t.id } })))];
+    if (notes[t.status]) out.push(h('p', 'mach-note', notes[t.status]));
+    if (joined) out.push(teamSkillsSec(t), teamPublishedSec(t), teamMembersSec(t));
+    out.push(h('div', 'mach-foot',
+      h('span', 'grow', 'You are ', h('strong', null, t.me.name || 'unnamed'), ' here'),
+      h('button', { type: 'button', class: 'link-btn danger', 'data-focus': 'leave-' + t.id, onclick: () => confirmLeaveTeam(t) }, t.status === 'removed' ? 'Forget this team' : 'Leave team')));
+    return h('section', { class: 'mach' + (t.status === 'removed' ? ' off' : ''), 'aria-label': t.name }, out);
+  }
+
+  // ---- the team's skills, by publisher
+
+  function teamSkillsSec(t) {
+    const theirs = t.skills.filter((s) => !s.mine);
+    const box = h('div', 'tm-sec', h('div', 'tm-sec-h', h('h3', 'sec-h', 'Skills from the team', theirs.length ? h('span', 'n', String(theirs.length)) : null)));
+    if (!theirs.length) {
+      box.append(h('p', 'tm-none', t.members.length > 1 ? 'Nobody else has published a skill yet.' : 'Nobody else is in the team yet: invite someone to share skills with.'));
+      return box;
+    }
+    const groups = new Map();
+    for (const s of theirs) {
+      if (!groups.has(s.owner)) groups.set(s.owner, []);
+      groups.get(s.owner).push(s);
+    }
+    for (const list of groups.values()) {
+      const owner = list[0].ownerName;
+      const left = list.every((s) => s.publisherLeft);
+      box.append(h('div', 'tm-grp',
+        h('span', 'tm-grp-name trunc', owner),
+        h('span', 'muted', left ? 'left the team' : plural(list.length, 'skill')),
+        left || t.status !== 'ok' ? null : allBtn(t, owner, 'btn ghost sm')));
+      for (const s of list) box.append(teamSkillRow(t, s));
+    }
+    return box;
+  }
+
+  // allBtn subscribes to everything member owner publishes, now and later,
+  // or stops it.
+  function allBtn(t, owner, cls) {
+    const all = t.subscriptions.includes(owner + '/*');
+    return h('button', {
+      type: 'button', class: cls, 'data-focus': `all-${t.id}-${owner}`,
+      title: all ? `Stop taking new skills from ${owner}` : `Take every skill ${owner} publishes, now and later`,
+      onclick: (ev) => subscribeAll(t, owner, !all, ev.currentTarget),
+    }, all ? 'Unsubscribe from all' : 'Subscribe to all');
+  }
+
+  function subscribeAll(t, owner, on, btn) {
+    return teamOp(t, {
+      btn, text: on ? 'Subscribing…' : 'Unsubscribing…', path: on ? 'subscribe' : 'unsubscribe', body: { ref: owner + '/*' },
+      ok: on ? `Subscribed to everything from ${owner}, new skills included` : `No longer subscribed to everything from ${owner}`,
+      fail: on ? `subscribe to ${owner}’s skills` : `unsubscribe from ${owner}’s skills`,
+    });
+  }
+
+  function teamSkillRow(t, s) {
+    const renamed = s.installed && s.installed !== s.name;
+    const chips = [
+      s.installed ? h('span', 'chip ok', icon('check'), renamed ? `Installed as ${s.installed}` : 'Installed') : null,
+      s.subscribed && !s.installed && !s.problem ? h('span', 'chip', 'Installing…') : null,
+      s.pinned ? h('span', { class: 'chip', title: 'Updates wait until you apply them' }, icon('pin'), 'Pinned') : null,
+      s.pending ? h('span', 'chip warn', 'Update waiting') : null,
+      s.forked ? h('span', { class: 'chip', title: 'Changed here: your own skill now, it no longer updates' }, `Forked as ${s.forked}`) : null,
+      s.publisherLeft ? h('span', { class: 'chip', title: 'Kept as it is: it no longer updates' }, 'Publisher left') : null,
+      s.dropped && !s.forked ? h('span', { class: 'chip plain', title: 'Unsubscribed or deleted here: not installed until you subscribe again' }, 'Removed here') : null,
+      s.problem ? h('span', 'chip bad', 'Cannot install') : null,
+    ];
+    const meta = [fmtSize(s.size)];
+    if (s.files) meta.push(plural(s.files, 'file'));
+    const acts = [];
+    if (s.pending) {
+      acts.push(h('button', { type: 'button', class: 'btn sm', 'data-focus': 'diff-' + s.bundle, onclick: () => openTeamDiff(t, s) }, 'View diff'));
+    }
+    if (!s.subscribed && !s.publisherLeft && !s.mine && t.status === 'ok') {
+      acts.push(h('button', {
+        type: 'button', class: 'btn sm', 'data-focus': 'sub-' + s.bundle,
+        onclick: (ev) => teamOp(t, { btn: ev.currentTarget, text: 'Subscribing…', path: 'subscribe', body: { ref: s.ref }, ok: `Subscribed to ${s.name}`, fail: `subscribe to ${s.name}` }),
+      }, 'Subscribe'));
+    }
+    if (s.subscribed || s.installed) {
+      acts.push(iconBtn('more', `More for ${s.name}`, (ev) => teamSkillMenu(ev.currentTarget, t, s), { attrs: { 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'data-focus': 'more-' + s.bundle } }));
+    }
+    return h('div', 'tm-row',
+      h('div', 'tm-main',
+        h('div', 'tm-name', h('span', 'tm-title', s.name), chips),
+        s.description ? h('p', { class: 'tm-desc', title: s.description }, s.description) : null,
+        h('div', 'tm-meta', meta.map((m) => h('span', null, m)), s.changedMs ? h('span', null, 'changed ', relTime(s.changedMs, '', true)) : null,
+          s.pending ? h('span', null, 'update from ', relTime(s.pending.changedMs, '', true)) : null),
+        s.problem ? h('p', 'tm-err', s.problem) : null),
+      acts.length ? h('div', 'tm-acts', acts) : null);
+  }
+
+  function teamSkillMenu(anchor, t, s) {
+    openMenu(anchor, (el, close) => {
+      const op = (o) => {
+        close();
+        teamOp(t, { btn: anchor, ...o });
+      };
+      if (s.pending) el.append(mi({ icon: 'eye', label: 'View diff', sub: 'What the waiting update changes', onSelect: () => { close(); openTeamDiff(t, s); } }));
+      if (s.installed && !s.publisherLeft) {
+        el.append(s.pinned
+          ? mi({ icon: 'pin', label: 'Unpin', sub: s.pending ? 'Takes the waiting update now, and later ones' : 'Takes updates again', onSelect: () => op({ path: 'pin', body: { ref: s.ref, pin: false }, ok: `${s.name} takes updates again`, fail: `unpin ${s.name}` }) })
+          : mi({ icon: 'pin', label: 'Pin', sub: 'Holds updates until you apply them', onSelect: () => op({ path: 'pin', body: { ref: s.ref, pin: true }, ok: `Pinned ${s.name}`, fail: `pin ${s.name}` }) }));
+      }
+      el.append(mi({ icon: 'x', label: 'Unsubscribe', sub: 'Removes it from your fleet', danger: true, onSelect: () => op({ path: 'unsubscribe', body: { ref: s.ref }, ok: `Unsubscribed from ${s.name}`, fail: `unsubscribe from ${s.name}` }) }));
+    }, { label: s.name, alignRight: true });
+  }
+
+  // ---- the user's own skills, published
+
+  const PUBLISH_STATE = {
+    published: ['chip ok', 'Published'],
+    changing: ['chip', 'Sending the change'],
+    pending: ['chip warn', 'Not uploaded yet'],
+    error: ['chip bad', 'Failed'],
+  };
+
+  function teamPublishedSec(t) {
+    const info = new Map(t.skills.filter((s) => s.mine).map((s) => [s.name, s]));
+    const box = h('div', 'tm-sec', h('div', 'tm-sec-h',
+      h('h3', 'sec-h', 'Your published skills', t.published.length ? h('span', 'n', String(t.published.length)) : null),
+      t.status === 'ok' ? h('button', { type: 'button', class: 'btn sm', 'data-focus': 'publish-' + t.id, onclick: () => openPublish(t) }, icon('plus'), 'Publish') : null));
+    if (!t.published.length) {
+      box.append(h('p', 'tm-none', 'Nothing yet. Your skills stay in this fleet until you publish one.'));
+      return box;
+    }
+    for (const p of t.published) {
+      const s = info.get(p.skill);
+      const st = PUBLISH_STATE[p.status] || PUBLISH_STATE.error;
+      box.append(h('div', 'tm-row',
+        h('div', 'tm-main',
+          h('div', 'tm-name', h('span', 'tm-title', p.skill), h('span', st[0], st[1])),
+          s && s.description ? h('p', { class: 'tm-desc', title: s.description }, s.description) : null,
+          h('div', 'tm-meta', s ? h('span', null, fmtSize(s.size)) : null, p.changedMs ? h('span', null, 'sent ', relTime(p.changedMs, '', true)) : null),
+          p.error ? h('p', 'tm-err', p.error) : null),
+        h('div', 'tm-acts', h('button', { type: 'button', class: 'btn ghost sm', 'data-focus': 'unpub-' + p.skill, onclick: () => confirmUnpublish(t, p.skill) }, 'Unpublish'))));
+    }
+    return box;
+  }
+
+  async function openPublish(t) {
+    const list = h('div', { class: 'tm-pick', role: 'radiogroup', 'aria-label': 'Your skills' }, h('p', 'tm-none', 'Loading your skills…'));
+    const status = h('p', { class: 'dlg-status', role: 'status', 'aria-live': 'polite' });
+    const pub = h('button', { type: 'button', class: 'btn primary', disabled: true }, 'Publish');
+    let busy = false;
+    openDialog({
+      id: 'team-publish',
+      title: `Publish to ${t.name}`,
+      sub: 'Members can subscribe to it, and every later change you make goes to them too, until you unpublish it.',
+      body: [list, status],
+      foot: [h('button', { type: 'button', class: 'btn', onclick: closeDialog }, 'Cancel'), pub],
+      canClose: () => !busy,
+    });
+    let own;
+    try {
+      own = ((await api('GET', '/api/own-skills')) || {}).skills || [];
+    } catch (e) {
+      fill(list, h('p', 'tm-err', `Could not list your skills: ${e.message}`));
+      return;
+    }
+    if (!dialogShows('team-publish')) return;
+    const done = new Set(t.published.map((p) => p.skill));
+    const free = own.filter((s) => !done.has(s.name));
+    if (!free.length) {
+      fill(list, h('p', 'tm-none', own.length ? 'All your skills are published here already.' : ['No skills of your own yet. Add a skill folder with ', h('code', 'mono', 'fleet skill add <folder>'), '.']));
+      return;
+    }
+    fill(list, free.map((s, i) => h('label', 'tm-opt',
+      h('input', { type: 'radio', name: 'team-skill', value: s.name, checked: i === 0 }),
+      h('span', 'grow', h('span', 'tm-title', s.name), s.description ? h('span', 'tm-desc', s.description) : null,
+        h('span', 'tm-meta', h('span', null, fmtSize(s.size)), h('span', null, 'changed ', relTime(s.changedMs, '', true)))))));
+    pub.disabled = false;
+    pub.onclick = async () => {
+      const name = list.querySelector('input:checked')?.value;
+      if (!name || busy) return;
+      busy = true;
+      const undo = teamBusy(pub, 'Publishing…');
+      try {
+        const r = await api('POST', teamAPI(t, 'publish'), { skill: name });
+        setTeam(r && r.team);
+      } catch (e) {
+        busy = false;
+        undo();
+        status.className = 'dlg-status err';
+        status.textContent = e.message;
+        return;
+      }
+      busy = false;
+      closeDialog();
+      toast(`Published ${name} to ${t.name}`);
+      if (U.view === 'teams') renderTeams();
+    };
+  }
+
+  // confirmTeam asks before a change that is hard to take back: o.label
+  // on the button (danger), o.run doing it. A failure stays in the dialog.
+  function confirmTeam(o) {
+    let busy = false;
+    const status = h('p', { class: 'dlg-status', role: 'status', 'aria-live': 'polite' });
+    const yes = h('button', { type: 'button', class: 'btn danger', disabled: !!o.blocked, onclick: async () => {
+      if (busy) return;
+      busy = true;
+      const undo = teamBusy(yes, o.busy);
+      try {
+        await o.run();
+      } catch (e) {
+        busy = false;
+        undo();
+        status.className = 'dlg-status err';
+        status.textContent = e.message;
+        return;
+      }
+      busy = false;
+      closeDialog();
+      if (o.ok) toast(o.ok);
+      if (U.view === 'teams') renderTeams();
+    } }, o.label);
+    openDialog({
+      id: 'team-confirm', title: o.title, sub: o.sub,
+      body: [o.body || null, status],
+      foot: [h('button', { type: 'button', class: 'btn', onclick: closeDialog }, 'Cancel'), yes],
+      focus: o.blocked ? null : yes,
+      canClose: () => !busy,
+    });
+  }
+
+  function confirmUnpublish(t, skill) {
+    confirmTeam({
+      title: `Unpublish ${skill}?`,
+      sub: `It leaves ${t.name}, and members who installed it lose it. Your own copy stays.`,
+      label: 'Unpublish', busy: 'Unpublishing…', ok: `Unpublished ${skill}`,
+      run: async () => setTeam((await api('POST', teamAPI(t, 'unpublish'), { skill })).team),
+    });
+  }
+
+  // ---- members
+
+  function teamMembersSec(t) {
+    const box = h('div', 'tm-sec', h('div', 'tm-sec-h',
+      h('h3', 'sec-h', 'Members', h('span', 'n', String(t.members.length))),
+      t.admin && t.status === 'ok' ? h('button', { type: 'button', class: 'btn sm', 'data-focus': 'invite-' + t.id, onclick: () => openInvite(t) }, icon('plus'), 'Invite') : null));
+    if (t.admin && t.invites.length) {
+      const last = Math.max(...t.invites.map((i) => i.expiresMs));
+      box.append(h('p', 'tm-none', `${plural(t.invites.length, 'open invite')}, good until ${longDate(last)}. This fleet adds whoever joins with one, while it is online.`));
+    }
+    for (const m of t.members) {
+      const menu = !m.me && t.status === 'ok';
+      box.append(h('div', 'tm-row tm-member',
+        h('span', { class: 'tm-av', 'aria-hidden': 'true' }, (m.name || '?').slice(0, 1).toUpperCase()),
+        h('div', 'tm-main', h('div', 'tm-name', h('span', 'tm-title', m.name || m.id.slice(0, 8)),
+          m.me ? h('span', 'chip plain', 'You') : null, m.admin ? h('span', 'chip ok', 'Admin') : null)),
+        menu ? h('div', 'tm-acts', iconBtn('more', `More for ${m.name}`, (ev) => memberMenu(ev.currentTarget, t, m), { attrs: { 'aria-haspopup': 'menu', 'aria-expanded': 'false', 'data-focus': 'mem-' + m.id } })) : null));
+    }
+    return box;
+  }
+
+  function memberMenu(anchor, t, m) {
+    openMenu(anchor, (el, close) => {
+      const all = t.subscriptions.includes(m.name + '/*');
+      el.append(mi({ icon: 'download', label: all ? 'Unsubscribe from all' : `Subscribe to all from ${m.name}`, sub: all ? 'Stops taking new skills from them' : 'Everything they publish, now and later', onSelect: () => {
+        close();
+        subscribeAll(t, m.name, !all, anchor);
+      } }));
+      if (!t.admin) return;
+      el.append(mi({ icon: 'key', label: m.admin ? 'Remove admin' : 'Make admin', sub: m.admin ? 'They can no longer invite or remove members' : 'They can invite and remove members', onSelect: () => {
+        close();
+        teamOp(t, { btn: anchor, path: `members/${encodeURIComponent(m.id)}/admin`, body: { admin: !m.admin }, ok: m.admin ? `${m.name} is no longer an admin` : `${m.name} is an admin now`, fail: `change ${m.name}’s role` });
+      } }));
+      el.append(h('div', 'menu-sep'));
+      el.append(mi({ icon: 'trash', label: 'Remove from team', danger: true, onSelect: () => {
+        close();
+        confirmTeam({
+          title: `Remove ${m.name} from ${t.name}?`,
+          sub: 'Their fleet gets no new team key, and the skills they published leave the team. They can only come back with a new invite.',
+          label: 'Remove', busy: 'Removing…', ok: `Removed ${m.name}`,
+          run: async () => setTeam((await api('DELETE', teamAPI(t, `members/${encodeURIComponent(m.id)}`))).team),
+        });
+      } }));
+    }, { label: m.name, alignRight: true });
+  }
+
+  function openInvite(t) {
+    let busy = false;
+    let ttl = '7d';
+    const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Good for' });
+    const opts = [['1d', '1 day'], ['7d', '7 days'], ['30d', '30 days']];
+    for (const [v, text] of opts) {
+      seg.append(h('button', { type: 'button', 'aria-pressed': String(v === ttl), onclick: () => {
+        ttl = v;
+        seg.querySelectorAll('button').forEach((b, i) => b.setAttribute('aria-pressed', String(opts[i][0] === v)));
+      } }, text));
+    }
+    const status = h('p', { class: 'dlg-status', role: 'status', 'aria-live': 'polite' });
+    const body = h('div', 'tm-form', h('div', 'set-row', h('div', 'grow', h('div', null, 'Good for'), h('div', 'sub', 'The link works once, for one person.')), seg), status);
+    const make = h('button', { type: 'button', class: 'btn primary', onclick: async () => {
+      if (busy) return;
+      busy = true;
+      const undo = teamBusy(make, 'Creating…');
+      let r;
+      try {
+        r = await api('POST', teamAPI(t, 'invites'), { ttl });
+      } catch (e) {
+        busy = false;
+        undo();
+        status.className = 'dlg-status err';
+        status.textContent = e.message;
+        return;
+      }
+      busy = false;
+      setTeam(r.team);
+      fill(body,
+        h('div', 'field', h('span', 'field-l', 'Invite link'), codeBox(r.invite)),
+        h('p', 'field-hint', `Works once, until ${longDate(r.expiresMs)}.`),
+        h('p', 'tm-callout', 'Send it to them directly, in a chat or mail you trust, not through the hub: whoever has it can join. This fleet adds them when they join, so keep it online until then.'));
+      fill($('dlg').querySelector('.dlg-f'), h('button', { type: 'button', class: 'btn primary', onclick: closeDialog }, 'Done'));
+      if (U.view === 'teams') renderTeams();
+    } }, 'Create link');
+    openDialog({
+      id: 'team-invite',
+      title: `Invite someone to ${t.name}`,
+      sub: 'They paste the link into Teams on their own fleet’s dashboard, or run fleet team join with it.',
+      body,
+      foot: [h('button', { type: 'button', class: 'btn', onclick: closeDialog }, 'Cancel'), make],
+      focus: make,
+      canClose: () => !busy,
+    });
+  }
+
+  function confirmLeaveTeam(t) {
+    const gone = t.status === 'removed' || t.status === 'waiting';
+    const admins = t.members.filter((m) => m.admin).length;
+    const last = !gone && t.admin && admins === 1 && t.members.length > 1;
+    confirmTeam({
+      title: gone ? `Forget ${t.name}?` : `Leave ${t.name}?`,
+      sub: gone ? 'This fleet stops waiting for it. Skills installed from it stay.'
+        : 'Skills installed from it stay and no longer update. The skills you published leave the team. Coming back takes a new invite.',
+      body: last ? h('p', 'tm-callout warn', 'You are its only admin, and the last admin cannot leave. Make someone else an admin first (Members, the … beside a name).') : null,
+      blocked: last,
+      label: gone ? 'Forget' : 'Leave', busy: gone ? 'Forgetting…' : 'Leaving…', ok: gone ? `Forgot ${t.name}` : `Left ${t.name}`,
+      run: async () => {
+        await api('POST', teamAPI(t, 'leave'));
+        TM.teams = (TM.teams || []).filter((x) => x.id !== t.id);
+      },
+    });
+  }
+
+  // ---- joining and creating
+
+  // teamForm opens a dialog with fields (label, input, hint) that submit
+  // with Enter: send gets their values and returns the new team.
+  function teamForm(o) {
+    let busy = false;
+    const status = h('p', { class: 'dlg-status', role: 'status', 'aria-live': 'polite' });
+    const form = h('form', { class: 'tm-form', id: 'team-form', novalidate: true },
+      o.fields.map((f) => h('label', 'field', h('span', 'field-l', f.label), f.input, f.hint ? h('span', 'field-hint', f.hint) : null)), status);
+    const submit = h('button', { type: 'submit', class: 'btn primary', form: 'team-form' }, o.label);
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      if (busy) return;
+      const missing = o.fields.find((f) => f.required && !f.input.value.trim());
+      if (missing) {
+        status.className = 'dlg-status err';
+        status.textContent = `${missing.label} is needed.`;
+        missing.input.focus();
+        return;
+      }
+      busy = true;
+      const undo = teamBusy(submit, o.busy);
+      status.className = 'dlg-status';
+      status.textContent = '';
+      let v;
+      try {
+        v = await o.send();
+      } catch (e) {
+        busy = false;
+        undo();
+        status.className = 'dlg-status err';
+        status.textContent = e.message;
+        return;
+      }
+      busy = false;
+      if (TM.teams) setTeam(v);
+      else TM.teams = [v];
+      closeDialog();
+      toast(o.ok(v));
+      if (U.view === 'teams') renderTeams();
+      else go('#/teams');
+    });
+    openDialog({
+      id: 'team-form', title: o.title, sub: o.sub, body: form,
+      foot: [h('button', { type: 'button', class: 'btn', onclick: closeDialog }, 'Cancel'), submit],
+      focus: touch() ? null : o.fields[0].input,
+      canClose: () => !busy,
+    });
+  }
+
+  // myTeamName is the name this fleet goes by in its teams, to start from.
+  const myTeamName = () => ((TM.teams || []).find((t) => t.me && t.me.name) || { me: {} }).me.name || '';
+
+  const teamInput = (attrs) => h('input', { class: 'input', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', ...attrs });
+
+  function nameField() {
+    return { label: 'Your name', input: teamInput({ value: myTeamName(), maxlength: 64, autocapitalize: 'words', placeholder: 'e.g. Florian' }), hint: 'How the others see you. Your machines and their names stay private.', required: true };
+  }
+
+  function openJoinTeam() {
+    const invite = h('textarea', { class: 'input mono', rows: 3, autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', placeholder: 'fleet-team:…' });
+    invite.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' && !ev.shiftKey) {
+        ev.preventDefault();
+        invite.form.requestSubmit();
+      }
+    });
+    const me = nameField();
+    teamForm({
+      title: 'Join a team',
+      sub: 'Paste the invite link an admin of the team sent you.',
+      fields: [{ label: 'Invite link', input: invite, required: true }, me],
+      label: 'Join', busy: 'Joining…',
+      send: async () => (await api('POST', '/api/teams/join', { invite: invite.value.trim(), me: me.input.value.trim() })).team,
+      ok: (v) => (v.status === 'waiting' ? `Joined ${v.name}: an admin’s fleet adds you shortly` : `Joined ${v.name}`),
+    });
+  }
+
+  function openCreateTeam() {
+    const hub = { label: 'Hub address', input: teamInput({ type: 'url', inputmode: 'url', placeholder: 'https://hub.example.com' }), hint: 'A server running fleet hub. It only ever sees encrypted data.', required: true };
+    const code = { label: 'Creation code', input: teamInput({ class: 'input mono' }), hint: 'From whoever runs the hub (fleet hub code). Leave it empty on an open hub.' };
+    const name = { label: 'Team name', input: teamInput({ maxlength: 64, autocapitalize: 'words', placeholder: 'e.g. codeline' }), required: true };
+    const me = nameField();
+    teamForm({
+      title: 'Create a team',
+      sub: 'You become its admin: you invite the others and decide who stays.',
+      fields: [hub, code, name, me],
+      label: 'Create', busy: 'Creating…',
+      send: async () => (await api('POST', '/api/teams', { hub: hub.input.value.trim(), code: code.input.value.trim(), name: name.input.value.trim(), me: me.input.value.trim() })).team,
+      ok: (v) => `Created ${v.name}`,
+    });
+  }
+
+  // ---- a pinned skill's waiting update
+
+  const FILE_STATE = { added: ['chip ok', 'Added'], removed: ['chip bad', 'Removed'], changed: ['chip', 'Changed'] };
+
+  async function openTeamDiff(t, s) {
+    let busy = false;
+    const status = h('p', { class: 'dlg-status', role: 'status', 'aria-live': 'polite' }, 'Loading the changes…');
+    const body = h('div', 'tm-diff', status);
+    const apply = h('button', { type: 'button', class: 'btn primary', disabled: true }, 'Apply update');
+    openDialog({
+      id: 'team-diff', wide: true,
+      title: `Update to ${s.name}`,
+      sub: `From ${s.ownerName}. ${s.name} is pinned, so the update waits until you apply it.`,
+      body,
+      foot: [h('button', { type: 'button', class: 'btn', onclick: closeDialog }, 'Close'), apply],
+      canClose: () => !busy,
+    });
+    let d;
+    try {
+      d = (await api('GET', teamAPI(t, 'diff/' + encodeURIComponent(s.bundle)))).diff;
+    } catch (e) {
+      status.className = 'dlg-status err';
+      status.textContent = `Could not load the changes: ${e.message}`;
+      return;
+    }
+    if (!dialogShows('team-diff')) return;
+    status.textContent = '';
+    fill(body,
+      h('p', 'tm-when', 'Installed: ', h('strong', null, longDate(d.fromMs)), h('span', 'muted', ' → '), 'update: ', h('strong', null, longDate(d.toMs))),
+      d.files.length ? h('ul', { class: 'tm-files', 'aria-label': 'Files' }, d.files.map((f) => h('li', null,
+        h('span', (FILE_STATE[f.status] || FILE_STATE.changed)[0], (FILE_STATE[f.status] || FILE_STATE.changed)[1]),
+        h('span', 'mono trunc', f.path), f.binary ? h('span', 'muted', 'binary or large, not shown') : null))) : null,
+      d.text ? codeView({ text: d.text, lang: 'diff', label: 'Changes' }) : h('p', 'tm-none', 'No changes to text files.'),
+      d.truncated ? h('p', 'field-hint', 'The diff stops here; applying takes all of the update.') : null,
+      status);
+    apply.disabled = false;
+    apply.onclick = async () => {
+      if (busy) return;
+      busy = true;
+      const undo = teamBusy(apply, 'Applying…');
+      try {
+        setTeam((await api('POST', teamAPI(t, 'apply'), { bundle: s.bundle })).team);
+      } catch (e) {
+        busy = false;
+        undo();
+        status.className = 'dlg-status err';
+        status.textContent = e.message;
+        return;
+      }
+      busy = false;
+      closeDialog();
+      toast(`Updated ${s.installed || s.name}; it stays pinned`);
+      if (U.view === 'teams') renderTeams();
+    };
+  }
+
   // ---- adding or editing a folder (a root): a folder browser over GET
   // .../fs on the machine, then its name, the agents allowed and trust.
 
@@ -7445,6 +8093,7 @@
     scheduleRemote(0);
     scheduleWorkflows(0);
     if (Date.now() - usageAt >= USAGE_POLL_MS) scheduleUsage(0);
+    if (U.view === 'teams') loadTeams();
   });
 
   // ----------------------------------------------------------- renders

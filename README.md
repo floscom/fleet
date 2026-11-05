@@ -185,6 +185,8 @@ address. Without it, commands talk to the local daemon.
 | `fleet queue add\|ls\|rm\|pause\|resume <agent> ...` | Queue messages for an agent; the daemon sends the next one each time it finishes a turn. |
 | `fleet note <agent> [text...] [-d]` | Leave a note on an agent (e.g. why it must stay open), shown on its dashboard row and in `fleet ls`; without text prints it, `-d` removes it. |
 | `fleet skill [ls]` / `skill add <folder> [--link]` / `skill rm <name>` | List, share or delete the [skills shared](#shared-skills) with every machine of the fleet. |
+| `fleet team [ls]` / `team create <hub> <name>` / `team invite` / `team join <invite>` / `team publish <skill>` / `team subscribe <member>/<skill\|*>` / ... | Share skills with other people's fleets in a [team](#teams): members, invites, publishing, subscriptions, pins (`fleet team --help`). |
+| `fleet hub [--autocert DOMAIN \| --listen ADDR]` / `hub code` | Run a [team hub](#running-a-team-hub), or print a one-time team creation code from it. |
 | `fleet sandbox build [--pull] [--tag T]` / `sandbox dockerfile` | Build the Docker image sandboxed agents run in (on the server) / print its Dockerfile. |
 | `fleet watch` | Print agent state changes as they happen. |
 | `fleet prs [agent] [-a] [--json]` | List the GitHub pull requests agents created, open ones unless `-a`. |
@@ -629,6 +631,68 @@ fleet skill rm deploy                          # deleted on every machine
   key can put code on every machine; that is no more than the key already
   allows (it can start a shell on all of them).
 - Sandboxed agents don't see shared skills yet.
+
+### Running a team hub
+
+Teams (see `docs/TEAMS.md`, and [Teams](#teams) below) share skills
+between different people's fleets through a hub, a server anyone can run
+with the same binary:
+
+```
+fleet hub --autocert hub.example.com   # HTTPS on :443, Let's Encrypt
+fleet hub --listen 127.0.0.1:7430      # plain HTTP, behind nginx or caddy
+fleet hub code                         # a one-time team creation code
+```
+
+The hub keeps its state in `~/.fleet-hub` (`--data`): per team a JSON
+index and one file per skill bundle. It stores and forwards only
+ciphertext: member names, skill names and skill contents are sealed with a
+team key the hub never has, so an operator sees member ids, public keys,
+sizes and times, and nothing else. Teams are created with a one-time code
+from `fleet hub code` (run on the hub's machine; `--open` lets anyone
+create teams). `--quota` caps each team's storage (1 GiB by default), a
+skill is at most 16 MiB.
+
+### Teams
+
+A team joins several people's fleets for the skills each member chooses
+to publish. Your fleet's daemon talks to the team's hub (it only connects
+out, so any network works), installs what you subscribe to into
+`~/.fleet/skills`, and the fleet sync takes it to your other machines.
+
+```
+fleet team create https://hub.example.com codeline --code ABCD-EFGH-JKMN
+fleet team invite                        # one person, one join, 7 days (--ttl)
+fleet team join 'fleet-team:https://hub.example.com/...#...'   # on their machine
+fleet team publish git-commit            # one of your skills, kept up to date
+fleet team skills                        # what members published
+fleet team subscribe flo/git-commit      # or flo/* for all of flo's
+fleet team pin flo/git-commit            # hold updates back...
+fleet team diff flo/git-commit           # ...look at one...
+fleet team apply flo/git-commit          # ...and take it
+fleet team members | admin <m> | remove <m> | leave | unsubscribe <ref>
+```
+
+- The invite is the approval: whoever joins with it is added by the
+  inviting admin's daemon as soon as it is online, with no click. Send
+  invites directly (chat, mail); the hub never sees the secret in them.
+- Everything is end-to-end encrypted. The hub sees member ids, sizes and
+  times, not skill names, contents or member names, and every roster and
+  skill is signed and checked, so a hub can at most withhold things.
+- Nothing is shared until you publish it, and only your own skills can be
+  published. Every change to a published skill goes to the team once the
+  folder holds still; deleting it withdraws it.
+- Updates of subscribed skills install by themselves unless pinned.
+  Changing a team skill here makes it your own (forked): it no longer
+  updates. Deleting one unsubscribes it until you subscribe to it again.
+- A skill's scripts run with your agents' rights: `fleet team skills`
+  always shows who published what. Subscribe to people you trust.
+- Removing a member, or a member leaving, starts a new team key they never
+  get; publishers' daemons re-wrap their skills for it by themselves.
+- A team lives on the daemon it was created or joined on (its keys are
+  in `~/.fleet/teams`); `fleet team` talks to that daemon, as does the
+  Teams part of its dashboard. Make a second admin so a team survives
+  losing the first one's machine.
 
 ## How tmux is used, and how cleanup works
 

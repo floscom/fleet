@@ -39,6 +39,9 @@ var (
 // folders (".fleet-...") are left alone.
 var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 
+// maxName is the longest a skill name may be, as nameRE has it.
+const maxName = 64
+
 // ValidName reports whether name may be the name of a shared skill.
 func ValidName(name string) bool { return nameRE.MatchString(name) }
 

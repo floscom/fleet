@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io"
@@ -131,6 +132,12 @@ func listSkills(cmd *cobra.Command) error {
 			notes = append(notes, "not shared yet (is the daemon running?)")
 		case in.Pending:
 			notes = append(notes, "changed, not shared yet (is the daemon running?)")
+		}
+		switch e := in.Entry; {
+		case e.Source != nil:
+			notes = append(notes, "from "+e.Source.Ref()+" in team "+cmp.Or(e.Source.TeamName, e.Source.Team))
+		case e.ForkedFrom != nil:
+			notes = append(notes, "forked from "+e.ForkedFrom.Ref())
 		}
 		if in.Target != "" {
 			notes = append(notes, "linked from "+tilde(in.Target))
