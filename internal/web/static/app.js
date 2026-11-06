@@ -3459,6 +3459,12 @@
       case 'task':
         closeGroup(f);
         return [taskEndNode(f, e)];
+      case 'message': {
+        closeGroup(f);
+        const el = messageNode(e);
+        f.last = { el, ts: e.ts };
+        return [el];
+      }
       default: {
         closeGroup(f);
         const mark = MARKS[e.text];
@@ -3979,6 +3985,31 @@
       box.append(h('button', { type: 'button', class: 'btn ghost sm', onclick: (ev) => {
         ev.currentTarget.textContent = body.classList.toggle('folded-task') ? 'Show all' : 'Show less';
       } }, 'Show all'));
+    }
+    return timeTitle(box, e);
+  }
+
+  // messageNode shows a message from another agent (a teammate, a subagent
+  // handing back its report, another session) the way a group chat shows
+  // someone else's: a bubble on the left under the sender's name, in the
+  // color their agent CLI gave them. Long ones are folded; a teammate that
+  // only went idle is a note.
+  const PEER_COLORS = new Set(['red', 'blue', 'green', 'yellow', 'purple', 'orange', 'pink', 'cyan']);
+
+  function messageNode(e) {
+    const from = e.name || 'Another agent';
+    if (!e.output) return timeTitle(h('div', 'note-line', e.text === 'idle' ? `${from} is idle` : `${from}: ${e.text || ''}`), e);
+    const about = e.text || (e.error ? 'Stopped on an error' : '');
+    const body = h('div', 'peer-b', md(e.output));
+    const box = h('div', { class: 'msg-peer' + (e.error ? ' failed' : ''), 'data-c': PEER_COLORS.has(e.color) ? e.color : null },
+      h('div', 'peer-from', h('b', null, from), about ? h('span', { title: about }, about) : null), body);
+    if (e.output.length > 700 || e.output.split('\n').length > 10) {
+      body.classList.add('folded');
+      box.append(h('button', { type: 'button', class: 'link-btn peer-more', 'aria-expanded': 'false', onclick: (ev) => {
+        const folded = body.classList.toggle('folded');
+        ev.currentTarget.textContent = folded ? 'Show more' : 'Show less';
+        ev.currentTarget.setAttribute('aria-expanded', String(!folded));
+      } }, 'Show more'));
     }
     return timeTitle(box, e);
   }

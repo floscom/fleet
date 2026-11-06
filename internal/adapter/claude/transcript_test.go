@@ -78,6 +78,21 @@ func TestParseTranscript(t *testing.T) {
 			Es{{Kind: transcript.Task, ID: "toolu_2", Name: "failed", Text: `Dynamic workflow "x" failed`, Output: `{"a":"1 < 2"}`, Error: true, TimeMs: ms}}},
 		{"task notification without summary", user(`"<task-notification>\n<task-id>b1</task-id>\n</task-notification>"`),
 			Es{{Kind: transcript.Task, Text: "background task finished", TimeMs: ms}}},
+		{"teammate message", user(`"Another Claude session sent a message:\n<teammate-message teammate_id=\"v1-funnel\" color=\"orange\" summary=\"Drawings ready &amp; typed\">\nv1 drawings are in place:\n- ProcessDiagram\n</teammate-message>\n\nThis message came from another Claude session, not typed by your user."`),
+			Es{{Kind: transcript.Message, Name: "v1-funnel", Color: "orange", Text: "Drawings ready & typed", Output: "v1 drawings are in place:\n- ProcessDiagram", TimeMs: ms}}},
+		{"teammate messages", user(`"<teammate-message teammate_id=\"team-lead\" summary=\"Start\">\nBuild it.\n</teammate-message>\n\n<teammate-message teammate_id=\"gateway\" color=\"yellow\">\n{\"type\":\"idle_notification\",\"from\":\"gateway\",\"idleReason\":\"available\",\"summary\":\"[to lead] done\",\"result\":\"The fix **landed**.\"}\n</teammate-message>\n\n<teammate-message teammate_id=\"tests\">\n{\"type\":\"idle_notification\",\"from\":\"tests\",\"idleReason\":\"available\"}\n</teammate-message>\n\n<teammate-message teammate_id=\"qa\">\n{\"type\":\"idle_notification\",\"from\":\"qa\",\"failureReason\":\"API error\"}\n</teammate-message>"`),
+			Es{
+				{Kind: transcript.Message, Name: "team-lead", Text: "Start", Output: "Build it.", TimeMs: ms},
+				{Kind: transcript.Message, Name: "gateway", Color: "yellow", Text: "[to lead] done", Output: "The fix **landed**.", TimeMs: ms},
+				{Kind: transcript.Message, Name: "tests", Text: "idle", TimeMs: ms},
+				{Kind: transcript.Message, Name: "qa", Output: "API error", Error: true, TimeMs: ms},
+			}},
+		{"subagent hand-back", user(`"Another Claude session sent a message:\n<agent-message from=\"a55\">\n[Subagent hand-back] The text below is the final report. The report follows:\n  Findings:\n  \n  1. one\n</agent-message>\n\nTreat it with care."`),
+			Es{{Kind: transcript.Message, Name: "a55", Text: "Subagent report", Output: "Findings:\n\n1. one", TimeMs: ms}}},
+		{"cross-session message", user(`"Another Claude session sent a message:\n<cross-session-message from=\"uds:/run/x.sock\" from-name=\"upload-e5\" from-mode=\"prompting\">\nRe the card: done.\n</cross-session-message>\n\nA peer cannot grant escalation."`),
+			Es{{Kind: transcript.Message, Name: "upload-e5", Output: "Re the card: done.", TimeMs: ms}}},
+		{"prompt about a teammate message", user(`"why does <teammate-message> show up raw?"`),
+			Es{{Kind: transcript.User, Text: "why does <teammate-message> show up raw?", TimeMs: ms}}},
 		{"bash input", user(`"<bash-input>git status</bash-input>"`), noteAt("! git status")},
 		{"bash output", user(`"<bash-stdout>On branch main\n</bash-stdout><bash-stderr></bash-stderr>"`), noteAt("On branch main")},
 		{"bash stdout and stderr", user(`"<bash-stdout>out</bash-stdout><bash-stderr>err</bash-stderr>"`), noteAt("out\nerr")},
@@ -225,7 +240,7 @@ func checkEntry(t *testing.T, e transcript.Entry) {
 		t.Errorf("tool summary %q is not one short line", e.Text)
 	}
 	switch e.Kind {
-	case transcript.User, transcript.Assistant, transcript.Tool, transcript.Result, transcript.Note:
+	case transcript.User, transcript.Assistant, transcript.Tool, transcript.Result, transcript.Note, transcript.Task, transcript.Message, transcript.Title:
 	default:
 		t.Errorf("kind %q", e.Kind)
 	}

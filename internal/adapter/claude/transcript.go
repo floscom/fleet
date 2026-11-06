@@ -125,6 +125,7 @@ type block struct {
 //	user tool_result                   -> Result (ID = tool_use_id)
 //	slash command output, interruption -> Note
 //	task notification                  -> Task (ID = tool-use-id)
+//	message from another agent         -> Message (Name = sender)
 //	assistant text                     -> Assistant
 //	assistant tool_use                 -> Tool
 //	assistant API error                -> Note
@@ -245,19 +246,19 @@ func userContent(raw json.RawMessage) []transcript.Entry {
 
 // userText maps user text. Claude Code records slash commands, their
 // output, background task notifications, ! shell commands and
-// interruptions as user text wrapped in pseudo-XML tags. A slash command
-// is what the user typed ("/review the auth code"), so it stays a User
-// entry; a task notification becomes a Task, the rest notes. Only a tag at
-// the very start counts, so a prompt that merely mentions one stays a
-// prompt.
+// interruptions as user text wrapped in pseudo-XML tags, and so are
+// messages from other agents. A slash command is what the user typed
+// ("/review the auth code"), so it stays a User entry; a task notification
+// becomes a Task, a message from another agent a Message, the rest notes.
+// Only a tag at the very start counts, so a prompt that merely mentions one
+// stays a prompt.
 func userText(s string) []transcript.Entry {
 	s = strings.TrimSpace(stripTag(s, "system-reminder"))
 	if strings.HasPrefix(s, workflowTask) {
-		// A workflow agent's task, computed by the script: after a header
-		// about where it came from, every line indented by two spaces.
-		if _, task, ok := strings.Cut(s, "follows:\n"); ok {
-			s = strings.TrimSpace(strings.ReplaceAll("\n"+task, "\n  ", "\n"))
-		}
+		s = framed(s)
+	}
+	if es := peerMessages(s); es != nil {
+		return es
 	}
 	switch {
 	case s == "":
@@ -294,6 +295,91 @@ func userText(s string) []transcript.Entry {
 
 // workflowTask starts the task of a workflow agent.
 const workflowTask = "[Workflow harness"
+
+// framed is the text the harness framed: after a header about where it
+// came from, every line indented by two spaces. A workflow agent's task
+// and a subagent's report are framed so.
+func framed(s string) string {
+	_, text, ok := strings.Cut(s, "follows:\n")
+	if !ok {
+		return s
+	}
+	return strings.TrimSpace(strings.ReplaceAll("\n"+text, "\n  ", "\n"))
+}
+
+// peerIntro starts a message from another session. After the messages
+// comes advice for the model on how far to trust them.
+const peerIntro = "Another Claude session sent a message:"
+
+// peerTag matches the start of a message from another agent: a teammate
+// of an agent team, a subagent handing back its report, or another
+// session. One user turn may hold several.
+var peerTag = regexp.MustCompile(`^<(teammate-message|agent-message|cross-session-message)((?:\s+[\w-]+="[^"]*")*)\s*>`)
+
+var peerAttr = regexp.MustCompile(`([\w-]+)="([^"]*)"`)
+
+// peerMessages maps the messages from other agents s starts with, or
+// returns nil if it starts with none.
+func peerMessages(s string) []transcript.Entry {
+	s = strings.TrimSpace(strings.TrimPrefix(s, peerIntro))
+	var out []transcript.Entry
+	for {
+		m := peerTag.FindStringSubmatch(s)
+		if m == nil {
+			return out
+		}
+		body, rest, ok := strings.Cut(s[len(m[0]):], "</"+m[1]+">")
+		if !ok {
+			return out
+		}
+		attrs := map[string]string{}
+		for _, a := range peerAttr.FindAllStringSubmatch(m[2], -1) {
+			attrs[a[1]] = html.UnescapeString(a[2])
+		}
+		out = append(out, peerMessage(attrs, strings.TrimSpace(body)))
+		s = strings.TrimSpace(rest)
+	}
+}
+
+// peerMessage maps one message. A teammate that goes idle says so in
+// JSON, with what it last reported.
+func peerMessage(attrs map[string]string, body string) transcript.Entry {
+	from := attrs["teammate_id"]
+	if from == "" {
+		from = attrs["from-name"]
+	}
+	if from == "" {
+		from = attrs["from"]
+	}
+	e := transcript.Entry{Kind: transcript.Message, Name: from, Text: attrs["summary"], Output: body, Color: attrs["color"]}
+	if strings.HasPrefix(body, "[Subagent hand-back]") {
+		e.Output = framed(body)
+		if e.Text == "" {
+			e.Text = "Subagent report"
+		}
+	}
+	var n struct {
+		Type, Summary, Result, FailureReason string
+	}
+	if strings.HasPrefix(body, "{") && json.Unmarshal([]byte(body), &n) == nil && n.Type == "idle_notification" {
+		if e.Text == "" {
+			e.Text = n.Summary
+		}
+		e.Output = n.Result
+		if n.FailureReason != "" {
+			e.Error = true
+			if e.Output == "" {
+				e.Output = n.FailureReason
+			}
+		}
+		if e.Output == "" && e.Text == "" {
+			e.Text = "idle"
+		}
+	}
+	e.Text = transcript.Clip(e.Text, transcript.MaxText)
+	e.Output = transcript.Clip(e.Output, transcript.MaxOutput)
+	return e
+}
 
 // taskEnd maps the notification that a background task ended. Its summary
 // and result are HTML-escaped.

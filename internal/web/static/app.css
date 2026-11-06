@@ -1826,6 +1826,26 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
 .bg-task summary { cursor: pointer; overflow-wrap: anywhere; }
 .bg-task summary::-webkit-details-marker { display: none; }
 
+/* A message from another agent (a teammate, a subagent, another session):
+   someone else's bubble in a group chat, under the sender's name. */
+.msg-peer { --c: var(--fg-2); align-self: flex-start; max-width: min(85%, 600px); min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.msg-peer[data-c="red"] { --c: var(--red); }
+.msg-peer[data-c="blue"] { --c: var(--blue); }
+.msg-peer[data-c="green"] { --c: light-dark(#0b7a50, #3fcf8e); }
+.msg-peer[data-c="yellow"] { --c: var(--amber); }
+.msg-peer[data-c="purple"] { --c: var(--violet); }
+.msg-peer[data-c="orange"] { --c: var(--orange); }
+.msg-peer[data-c="pink"] { --c: light-dark(#b0306f, #ff8ac4); }
+.msg-peer[data-c="cyan"] { --c: light-dark(#0b6f80, #5fd3e6); }
+.peer-from { display: flex; align-items: baseline; gap: 6px; max-width: 100%; padding: 0 4px; font-size: 12px; line-height: 16px; color: var(--fg-3); }
+.peer-from b { flex: none; font-weight: 600; color: var(--c); }
+.peer-from span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.peer-b { max-width: 100%; padding: 9px 14px; border: 1px solid var(--line); border-radius: 18px 18px 18px 6px; background: var(--bg); }
+.peer-b .md { line-height: 1.55; }
+.peer-b.folded .md { max-height: 14em; overflow: hidden; mask-image: linear-gradient(to bottom, #000 60%, transparent); }
+.msg-peer.failed .peer-b { border-color: var(--red-line); background: var(--red-soft); }
+.peer-more { padding: 0 4px; font-size: 12.5px; }
+
 .wf-out { padding: 0 14px 12px; }
 .wf.failed { border-color: var(--red-line); }
 .wf .wf-ic.bad { background: var(--red-soft); color: var(--red); }

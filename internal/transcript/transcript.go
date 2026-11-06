@@ -39,6 +39,11 @@ const (
 	// started it, Name how it ended (completed, failed, killed), Output
 	// what it returned, and Error marks one that failed.
 	Task = "task"
+	// Message is a message from another agent (a teammate, a subagent
+	// handing back its report, another session): Name is who sent it, Text
+	// its one-line summary if it has one, Output the message, Color the
+	// sender's color, and Error marks a teammate that stopped on a failure.
+	Message = "message"
 	// Title is the title the agent CLI gave the conversation (Text); a
 	// later one replaces an earlier. Not a message: chats do not show it.
 	Title = "title"
@@ -71,6 +76,9 @@ type Entry struct {
 	TimeMs int64 `json:"ts,omitempty"`
 	// Images are the images of a User message or a Result.
 	Images []Image `json:"images,omitempty"`
+	// Color is the color the agent CLI gave the sender of a Message (red,
+	// blue, green, yellow, purple, orange, pink, cyan); empty if none.
+	Color string `json:"color,omitempty"`
 	// Files are the files a Tool call writes (creates, changes or
 	// deletes), as the agent names them: absolute, or relative to its
 	// working directory.
