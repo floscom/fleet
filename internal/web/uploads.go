@@ -6,6 +6,8 @@ package web
 // the path it answers into the prompt.
 //
 //	POST /api/uploads?name=clip.mov   the file as the body; answers {"path", "size"}
+//	POST /api/uploads?name=a.pdf&dir=/abs/folder   into that folder (or
+//	  "~/..." in this machine's home), as a.pdf; answers {"path", "size", "dir"}
 //
 // Forwarded to other fleets like the rest of /api/ (see peers.go), but
 // streamed: the body is spooled to disk to sign it, and the target checks
@@ -19,6 +21,7 @@ import (
 	"errors"
 	"hash"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -50,6 +53,30 @@ func uploadPath(path string) bool { return path == "/api/uploads" }
 // apiUpload saves the body as a new file in the upload dir.
 func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 	dir := s.opts.Source.UploadDir()
+	// dir= puts the file in that folder instead (fleet cp --to), under its
+	// own name: never pruned, never replacing a file there.
+	into := r.URL.Query().Get("dir")
+	if into != "" {
+		// "~" is this machine's home: the sender cannot know it.
+		if rest, ok := strings.CutPrefix(into, "~"); ok && (rest == "" || rest[0] == '/') {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "no home folder there")
+				return
+			}
+			into = home + rest
+		}
+		into = filepath.Clean(into)
+		if !filepath.IsAbs(into) {
+			writeError(w, http.StatusBadRequest, "dir must be an absolute path")
+			return
+		}
+		if fi, err := os.Stat(into); err != nil || !fi.IsDir() {
+			writeError(w, http.StatusBadRequest, "no folder "+into+" there")
+			return
+		}
+		dir = into
+	}
 	if dir == "" {
 		writeError(w, http.StatusNotFound, "this fleet takes no uploads")
 		return
@@ -58,11 +85,18 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusRequestEntityTooLarge, "file too large (at most "+strconv.Itoa(maxUpload>>30)+" GiB)")
 		return
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		s.writeSourceError(w, err)
+	if into == "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			s.writeSourceError(w, err)
+			return
+		}
+		s.pruneUploads(dir)
+	}
+	name := r.URL.Query().Get("name")
+	if into != "" && plainName(name) == "" {
+		writeError(w, http.StatusBadRequest, "name the file")
 		return
 	}
-	s.pruneUploads(dir)
 	f, err := os.CreateTemp(dir, partialPrefix+"*")
 	if err != nil {
 		s.writeSourceError(w, err)
@@ -76,11 +110,23 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 		err = errors.New("empty file")
 	}
 	var path string
-	if err == nil {
-		path, err = uploadDest(dir, r.URL.Query().Get("name"))
-	}
-	if err == nil {
-		err = os.Rename(f.Name(), path)
+	switch {
+	case err != nil:
+	case into != "":
+		// A link fails when the name is taken, where a rename would
+		// replace the file.
+		// Readable like a file copied there, not private like an upload.
+		path = filepath.Join(dir, plainName(name))
+		if err = os.Chmod(f.Name(), 0o644); err == nil {
+			err = os.Link(f.Name(), path)
+		}
+		if err == nil {
+			os.Remove(f.Name())
+		}
+	default:
+		if path, err = uploadDest(dir, name); err == nil {
+			err = os.Rename(f.Name(), path)
+		}
 	}
 	if err != nil {
 		os.Remove(f.Name())
@@ -90,12 +136,28 @@ func (s *Server) apiUpload(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusRequestEntityTooLarge, "file too large (at most "+strconv.Itoa(maxUpload>>30)+" GiB)")
 		case errors.Is(err, errBodyMismatch):
 			writeError(w, http.StatusUnauthorized, "not signed with this fleet's key")
+		case errors.Is(err, fs.ErrExist):
+			writeError(w, http.StatusConflict, path+" already exists there")
 		default:
 			writeError(w, http.StatusBadRequest, "upload failed: "+err.Error())
 		}
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"path": path, "size": n})
+	reply := map[string]any{"path": path, "size": n}
+	if into != "" {
+		reply["dir"] = into
+	}
+	writeJSON(w, http.StatusCreated, reply)
+}
+
+// plainName is the last element of name, as a file name of its own: ""
+// if it has none.
+func plainName(name string) string {
+	name = filepath.Base(strings.ReplaceAll(name, `\`, "/"))
+	if name == "." || name == ".." || name == "/" || strings.HasPrefix(name, partialPrefix) {
+		return ""
+	}
+	return name
 }
 
 // uploadDest is a new path in dir for a file uploaded as name: the

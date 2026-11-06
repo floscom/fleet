@@ -546,6 +546,14 @@ func teamCall(cmd *cobra.Command, method, path string, body, out any) error {
 	if !client.IsLocal(host) {
 		return errors.New("fleet team works with this machine's daemon, where its teams live: run it without --host")
 	}
+	ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Minute)
+	defer cancel()
+	return localWebCall(ctx, method, path, body, out)
+}
+
+// localWebCall calls this machine's daemon's web API on loopback with the
+// admin token, decoding the JSON reply into out (if not nil).
+func localWebCall(ctx context.Context, method, path string, body, out any) error {
 	base, err := localWebBase()
 	if err != nil {
 		return err
@@ -567,8 +575,6 @@ func teamCall(cmd *cobra.Command, method, path string, body, out any) error {
 		}
 		rd = bytes.NewReader(b)
 	}
-	ctx, cancel := context.WithTimeout(cmd.Context(), 3*time.Minute)
-	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, method, base+path, rd)
 	if err != nil {
 		return err
@@ -588,6 +594,10 @@ func teamCall(cmd *cobra.Command, method, path string, body, out any) error {
 	reply, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 	if err != nil {
 		return err
+	}
+	if resp.StatusCode == http.StatusNotFound && !json.Valid(reply) {
+		// The mux's plain-text 404 of a daemon older than the route.
+		return errors.New("the fleet daemon here is too old for this: update it (fleet update) and restart it")
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		var e struct {
@@ -616,7 +626,7 @@ func localWebBase() (string, error) {
 		addr = config.DefaultWeb
 	}
 	if addr == "off" {
-		return "", errors.New(`teams are managed through the daemon's dashboard, which is off (web = "off" in config.toml)`)
+		return "", errors.New(`this works through the daemon's dashboard, which is off (web = "off" in config.toml)`)
 	}
 	h, port, err := net.SplitHostPort(addr)
 	if err != nil {

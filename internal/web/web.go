@@ -15,7 +15,8 @@
 // browser tab: it keeps the current state and fans out JSON messages to
 // every WebSocket client. A client whose buffer fills up is dropped, never
 // waited for. Devices and LAN peers are only polled while a client is
-// connected.
+// connected; a request that needs the peers without one browses then
+// (hub.freshPeers).
 package web
 
 import (
@@ -55,6 +56,8 @@ const (
 	// peerMisses is how many consecutive browses may miss a peer before it
 	// leaves the list.
 	peerMisses = 2
+	// minPeerPrefix is the shortest id prefix that names a peer.
+	minPeerPrefix = 4
 	// clientBuffer is the per-client message backlog beyond the snapshot.
 	clientBuffer = 256
 )
@@ -959,6 +962,32 @@ func (h *hub) updatePeersLocked(found []discovery.Found) {
 	}
 }
 
+// freshPeers brings the peer list up to date for a request that needs it
+// without a dashboard open: the pollers keep it current only while a
+// browser is connected (join), so without one, or before their first
+// browse, it browses now.
+func (h *hub) freshPeers(ctx context.Context) {
+	h.mu.Lock()
+	polled := h.stopPoll != nil && h.browsed
+	h.mu.Unlock()
+	if polled {
+		return
+	}
+	found, err := h.browse(ctx, browseTimeout)
+	if err != nil {
+		h.log.Debug("web ui: mdns browse failed", "err", err)
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.updatePeersLocked(found)
+	h.browsed = true
+	if msg := h.peersMsgLocked(); !bytes.Equal(h.peers, msg) {
+		h.peers = msg
+		h.broadcastLocked(msg)
+	}
+}
+
 // peer returns the fleet daemon id seen on the LAN, never this one.
 func (h *hub) peer(id string) (Peer, bool) {
 	if id == "" || id == h.src.Info().ID {
@@ -971,6 +1000,86 @@ func (h *hub) peer(id string) (Peer, bool) {
 		return Peer{}, false
 	}
 	return e.peer, true
+}
+
+// errSelf means a machine named for a peer is this one.
+var errSelf = errors.New("that is this machine: name another one of the fleet")
+
+// findPeer finds the fleet daemon ref names among those seen on the
+// network, as a person or agent would name it: its id or a prefix of it
+// (at least minPeerPrefix digits), its name or its host name, in any case.
+// The errors say what went wrong in words for the user.
+func (h *hub) findPeer(ref string) (Peer, error) {
+	info := h.src.Info()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if ref == "" {
+		return Peer{}, errors.New("name the machine to send the file to")
+	}
+	var peers []Peer
+	for _, e := range h.peerSet {
+		if e.peer.ID != "" && e.peer.ID != info.ID {
+			peers = append(peers, e.peer)
+		}
+	}
+	for _, p := range peers {
+		if p.ID == ref {
+			return p, nil
+		}
+	}
+	if ref == info.ID || strings.EqualFold(ref, info.Name) {
+		return Peer{}, errSelf
+	}
+	match := func(ok func(Peer) bool) []Peer {
+		var out []Peer
+		for _, p := range peers {
+			if ok(p) {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	found := match(func(p Peer) bool { return strings.EqualFold(p.Name, ref) })
+	// This machine's host name only after the peers' names: two daemons
+	// may share a host.
+	if len(found) == 0 && strings.EqualFold(ref, info.Hostname) {
+		return Peer{}, errSelf
+	}
+	if len(found) == 0 {
+		// "macbook" names macbook.local. as well.
+		ref := strings.TrimSuffix(ref, ".")
+		found = match(func(p Peer) bool {
+			h := strings.TrimSuffix(p.Host, ".")
+			short, _, _ := strings.Cut(h, ".")
+			return strings.EqualFold(h, ref) || strings.EqualFold(short, ref)
+		})
+	}
+	if len(found) == 0 && len(ref) >= minPeerPrefix {
+		found = match(func(p Peer) bool { return strings.HasPrefix(p.ID, strings.ToLower(ref)) })
+	}
+	names := func(ps []Peer) string {
+		var out []string
+		for _, p := range ps {
+			n := p.Name
+			if n == "" {
+				n = p.Host
+			}
+			out = append(out, n+" ("+p.ID[:min(len(p.ID), 12)]+")")
+		}
+		sort.Strings(out)
+		return strings.Join(out, ", ")
+	}
+	switch {
+	case len(found) == 1:
+		return found[0], nil
+	case len(found) > 1:
+		return Peer{}, fmt.Errorf("%q names several machines: %s; use the id", ref, names(found))
+	case !h.browsed:
+		return Peer{}, errors.New("still looking for the fleet's machines on the network: try again in a few seconds")
+	case len(peers) == 0:
+		return Peer{}, fmt.Errorf("no machine %q on the network: this daemon sees no other fleet daemon", ref)
+	}
+	return Peer{}, fmt.Errorf("no machine %q on the network; it sees %s", ref, names(peers))
 }
 
 // peersMsgLocked is the "peers" message for the current peer list.

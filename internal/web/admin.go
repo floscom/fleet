@@ -295,6 +295,8 @@ func (s *Server) apiHandler() http.Handler {
 	browser.HandleFunc("POST /api/push/unsubscribe", s.apiPushUnsubscribe)
 	browser.HandleFunc("POST /api/push/test", s.apiPushTest)
 	browser.HandleFunc("/api/hosts/{id}/{rest...}", s.apiHost)
+	browser.HandleFunc("GET /api/peers", s.apiPeers)
+	browser.HandleFunc("POST /api/send", s.apiSend)
 	s.teamRoutes(browser)
 	browser.Handle("/", admin)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
