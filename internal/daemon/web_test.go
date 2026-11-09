@@ -111,3 +111,45 @@ func TestWebUpdateRoot(t *testing.T) {
 		t.Fatalf("failed save = %v; roots = %+v", err, d.cfg.Roots)
 	}
 }
+
+func TestWebWorkDir(t *testing.T) {
+	t.Setenv("FLEET_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	d := &daemon{
+		cfg:  &config.Config{},
+		opts: Options{Adapters: adapter.NewRegistry(testAdapter{})},
+		log:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	sub := &subscriber{ch: make(chan *fleetv1.Event, 4)}
+	d.agents = &manager{d: d, subs: map[*subscriber]struct{}{sub: {}}}
+	source := &webSource{d: d}
+	if got := source.WorkDir(); got != home {
+		t.Fatalf("no work folder: %q, want the home %q", got, home)
+	}
+	work, _ := filepath.EvalSymlinks(t.TempDir())
+	if got, err := source.SetWorkDir(work); err != nil || got != work {
+		t.Fatalf("SetWorkDir = %q, %v", got, err)
+	}
+	if loaded, err := config.Load(); err != nil || loaded.WorkDir != work {
+		t.Fatalf("saved work_dir = %+v, %v", loaded, err)
+	}
+	select {
+	case ev := <-sub.ch:
+		if rc := ev.GetRootsChanged(); rc == nil || rc.GetWorkDir() != work {
+			t.Fatalf("broadcast = %+v", ev)
+		}
+	default:
+		t.Fatal("the work folder did not reach dashboard subscribers")
+	}
+	for p, status := range map[string]int{"relative": http.StatusBadRequest, filepath.Join(work, "missing"): http.StatusNotFound} {
+		_, err := source.SetWorkDir(p)
+		var we *web.Error
+		if !errors.As(err, &we) || we.Status != status || d.cfg.WorkDir != work || len(sub.ch) != 0 {
+			t.Fatalf("SetWorkDir(%q) = %v; work_dir %q", p, err, d.cfg.WorkDir)
+		}
+	}
+	if got, err := source.SetWorkDir(""); err != nil || got != home {
+		t.Fatalf("back to the home: %q, %v", got, err)
+	}
+}

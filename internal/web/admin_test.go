@@ -312,6 +312,15 @@ func TestAdminListDir(t *testing.T) {
 		t.Fatalf("home: %+v", got)
 	}
 
+	// No path with a work folder: the work folder.
+	src := newFakeSource()
+	src.workDir = filepath.Join(real, "Alpha")
+	ts2 := startServerToken(t, src, path)
+	api(t, ts2, "GET", "/api/fs", tok, "", &got)
+	if got.Path != src.workDir || got.Work != src.workDir || got.Home != home {
+		t.Fatalf("work folder: %+v", got)
+	}
+
 	var e struct{ Error string }
 	for p, status := range map[string]int{
 		"relative/dir":                 400,
@@ -374,5 +383,36 @@ func must(t *testing.T, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestAdminWorkDir(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "web-token")
+	tok, _ := LoadOrCreateToken(path)
+	src := newFakeSource()
+	src.workDir = "/home/me"
+	ts := startServerToken(t, src, path)
+
+	var roots struct {
+		Roots   []Root
+		WorkDir string
+	}
+	if code := api(t, ts, "GET", "/api/roots", tok, "", &roots); code != 200 || roots.WorkDir != "/home/me" || len(roots.Roots) != 1 {
+		t.Fatalf("roots: %d %+v", code, roots)
+	}
+	var set struct{ WorkDir string }
+	if code := api(t, ts, "PUT", "/api/workdir", tok, `{"path":"/srv/data"}`, &set); code != 200 || set.WorkDir != "/srv/data" {
+		t.Fatalf("set: %d %+v", code, set)
+	}
+	if code := api(t, ts, "PUT", "/api/workdir", "", `{"path":"/x"}`, nil); code != 401 && code != 403 {
+		t.Fatalf("set without the token: %d", code)
+	}
+	src.workErr = &Error{http.StatusNotFound, "/nope: no such folder"}
+	var e struct{ Error string }
+	if code := api(t, ts, "PUT", "/api/workdir", tok, `{"path":"/nope"}`, &e); code != 404 || e.Error == "" {
+		t.Fatalf("bad folder: %d %+v", code, e)
+	}
+	if !forwardable(http.MethodPut, "workdir") || forwardable(http.MethodDelete, "workdir") {
+		t.Fatal("PUT workdir must reach other machines, DELETE not")
 	}
 }

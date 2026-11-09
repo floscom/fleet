@@ -106,7 +106,13 @@ func (c *conn) dispatch(id uint64, m *fleetv1.ClientMessage) error {
 	case *fleetv1.ClientMessage_ListAdapters:
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_ListAdapters{ListAdapters: d.listAdapters(c.ctx)}})
 	case *fleetv1.ClientMessage_ListRoots:
-		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_ListRoots{ListRoots: &fleetv1.ListRootsResponse{Roots: d.roots()}}})
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_ListRoots{ListRoots: &fleetv1.ListRootsResponse{Roots: d.roots(), WorkDir: d.workDir()}}})
+	case *fleetv1.ClientMessage_SetWorkDir:
+		w, err := d.setWorkDir(msg.SetWorkDir.GetPath())
+		if err != nil {
+			return err
+		}
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_SetWorkDir{SetWorkDir: &fleetv1.SetWorkDirResponse{WorkDir: w}}})
 	case *fleetv1.ClientMessage_AddRoot:
 		r, err := d.addRoot(msg.AddRoot)
 		if err != nil {
@@ -247,6 +253,38 @@ func (d *daemon) roots() []*fleetv1.Root {
 	return out
 }
 
+// broadcastRoots tells subscribers the roots and the work folder.
+func (d *daemon) broadcastRoots() {
+	d.agents.broadcastRoots(&fleetv1.RootsChanged{Roots: d.roots(), WorkDir: d.workDir()})
+}
+
+// workDir is the work folder (fleetv1.SetWorkDirRequest).
+func (d *daemon) workDir() string { return d.config().WorkDirOrHome() }
+
+// setWorkDir sets the work folder, "" for the home directory, and returns
+// it.
+func (d *daemon) setWorkDir(path string) (string, error) {
+	d.cfgMu.Lock()
+	old := d.cfg.WorkDir
+	if err := d.cfg.SetWorkDir(path); err != nil {
+		d.cfgMu.Unlock()
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", errf(codeNotFound, "%v", err)
+		}
+		return "", errf(codeInvalid, "%v", err)
+	}
+	if err := d.cfg.Save(); err != nil {
+		d.cfg.WorkDir = old
+		d.cfgMu.Unlock()
+		return "", fmt.Errorf("save config: %w", err)
+	}
+	d.cfgMu.Unlock()
+	w := d.workDir()
+	d.log.Info("work folder set", "path", w)
+	d.broadcastRoots()
+	return w, nil
+}
+
 func (d *daemon) addRoot(req *fleetv1.AddRootRequest) (*fleetv1.Root, error) {
 	if !filepath.IsAbs(req.GetPath()) {
 		return nil, errf(codeInvalid, "root path must be absolute: %q", req.GetPath())
@@ -274,7 +312,7 @@ func (d *daemon) addRoot(req *fleetv1.AddRootRequest) (*fleetv1.Root, error) {
 		return nil, errf(codeInvalid, "%v", err)
 	}
 	d.log.Info("root added", "name", r.Name, "path", r.Path)
-	d.agents.broadcastRoots(d.roots())
+	d.broadcastRoots()
 	return r.Proto(), nil
 }
 
@@ -319,7 +357,7 @@ func (d *daemon) updateRoot(name string, req *fleetv1.AddRootRequest) (*fleetv1.
 	}
 	d.cfgMu.Unlock()
 	d.log.Info("root updated", "previousName", name, "name", r.Name, "path", r.Path)
-	d.agents.broadcastRoots(d.roots())
+	d.broadcastRoots()
 	return r.Proto(), nil
 }
 
@@ -337,7 +375,7 @@ func (d *daemon) removeRoot(name string) error {
 	}
 	d.cfgMu.Unlock()
 	d.log.Info("root removed", "name", name)
-	d.agents.broadcastRoots(d.roots())
+	d.broadcastRoots()
 	return nil
 }
 

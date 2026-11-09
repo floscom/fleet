@@ -44,6 +44,21 @@ func (c *Client) ListRoots(ctx context.Context) ([]*fleetv1.Root, error) {
 	return r.GetRoots(), err
 }
 
+// WorkDir is the daemon's work folder (fleetv1.SetWorkDirRequest).
+func (c *Client) WorkDir(ctx context.Context) (string, error) {
+	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_ListRoots{ListRoots: &fleetv1.ListRootsRequest{}}},
+		(*fleetv1.ServerMessage).GetListRoots)
+	return r.GetWorkDir(), err
+}
+
+// SetWorkDir sets the daemon's work folder ("" for its home directory)
+// and returns it.
+func (c *Client) SetWorkDir(ctx context.Context, path string) (string, error) {
+	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_SetWorkDir{SetWorkDir: &fleetv1.SetWorkDirRequest{Path: path}}},
+		(*fleetv1.ServerMessage).GetSetWorkDir)
+	return r.GetWorkDir(), err
+}
+
 // AddRoot adds a root. The path must be absolute on the daemon host.
 func (c *Client) AddRoot(ctx context.Context, in *fleetv1.AddRootRequest) (*fleetv1.Root, error) {
 	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_AddRoot{AddRoot: in}},

@@ -105,6 +105,53 @@ MCP servers and settings, so only use it for code you trust.`,
 	return cmd
 }
 
+func newWorkDirCmd() *cobra.Command {
+	var home bool
+	cmd := &cobra.Command{
+		Use:   "workdir [path]",
+		Short: "Show or set the folder the agents' projects live in",
+		Long: `Show or set the work folder: where the agents' projects live on the
+machine. The dashboard's folder pickers open there and new folders go
+there by default. Without one it is the home directory.
+
+The work folder is not a root: agents still start only inside roots
+(fleet roots add).`,
+		Example: "  fleet workdir /mnt/data\n  fleet workdir --home",
+		Args:    cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if home && len(args) > 0 {
+				return fmt.Errorf("--home takes no path")
+			}
+			var p string
+			if len(args) > 0 {
+				// "~" is the daemon host's home: it expands it.
+				if p = args[0]; p != "~" && !strings.HasPrefix(p, "~/") {
+					var err error
+					if p, err = hostPath(p); err != nil {
+						return err
+					}
+				}
+			}
+			return withClient(cmd, func(ctx context.Context, c *client.Client) error {
+				var w string
+				var err error
+				if len(args) > 0 || home {
+					w, err = c.SetWorkDir(ctx, p)
+				} else {
+					w, err = c.WorkDir(ctx)
+				}
+				if err != nil {
+					return err
+				}
+				fmt.Fprintln(cmd.OutOrStdout(), w)
+				return nil
+			})
+		},
+	}
+	cmd.Flags().BoolVar(&home, "home", false, "go back to the home directory")
+	return cmd
+}
+
 // addLocalRoots makes each of paths (absolute, symlink-resolved) a root of
 // the local daemon unless it already is one (`fleet start --root`).
 func addLocalRoots(ctx context.Context, out io.Writer, paths []string, trust bool) error {

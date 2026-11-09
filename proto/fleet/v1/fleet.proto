@@ -54,6 +54,7 @@ message ClientMessage {
     BrowseRequest browse = 25;
     GetHostStatsRequest get_host_stats = 26;
     UpdateRequest update = 27;
+    SetWorkDirRequest set_work_dir = 28;
 
     // Agents
     ListAgentsRequest list_agents = 30;
@@ -105,6 +106,7 @@ message ServerMessage {
     BrowseResponse browse = 25;
     GetHostStatsResponse get_host_stats = 26;
     UpdateResponse update = 27;
+    SetWorkDirResponse set_work_dir = 28;
 
     ListAgentsResponse list_agents = 30;
     RunAgentResponse run_agent = 31;
@@ -402,6 +404,8 @@ message Root {
 message ListRootsRequest {}
 message ListRootsResponse {
   repeated Root roots = 1;
+  // See SetWorkDirRequest.
+  string work_dir = 2;
 }
 
 message AddRootRequest {
@@ -422,6 +426,19 @@ message RemoveRootRequest {
   string name = 1;
 }
 message RemoveRootResponse {}
+
+// Sets the work folder: the folder on the daemon host where the agents'
+// projects live, which folder pickers open in and new folders go to by
+// default (work_dir in config.toml). It is not a root: agents still start
+// only inside roots.
+message SetWorkDirRequest {
+  // Absolute path on the daemon host; "" goes back to the home directory.
+  string path = 1;
+}
+message SetWorkDirResponse {
+  // Absolute: the home directory when none is set.
+  string work_dir = 1;
+}
 
 // Lists sub-directories of a directory inside a root. Files are omitted.
 message BrowseRequest {
@@ -913,6 +930,8 @@ message Event {
 message SnapshotDone {}
 message RootsChanged {
   repeated Root roots = 1;
+  // See SetWorkDirRequest.
+  string work_dir = 2;
 }
 
 // ---------------------------------------------------------------------------

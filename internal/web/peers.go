@@ -232,6 +232,9 @@ func forwardable(method, rest string) bool {
 	case http.MethodPost:
 		return rest == "fs" || rest == "roots" || rest == "agents" || rest == "uploads" || rest == "update" || agentRoute(rest, "input", "interrupt", "answer", "model", "note", "queue", "stop", "merge", "git", "send", "resume")
 	case http.MethodPut, http.MethodDelete:
+		if method == http.MethodPut && rest == "workdir" {
+			return true
+		}
 		return oneSegment(strings.CutPrefix(rest, "roots/"))
 	}
 	return false

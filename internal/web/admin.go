@@ -67,8 +67,10 @@ type Dir struct {
 	// Path is absolute and symlink-resolved.
 	Path string `json:"path"`
 	// Parent is "" at the filesystem root.
-	Parent  string     `json:"parent"`
-	Home    string     `json:"home"`
+	Parent string `json:"parent"`
+	Home   string `json:"home"`
+	// Work is the work folder (Source.WorkDir).
+	Work    string     `json:"work"`
 	Entries []DirEntry `json:"entries"`
 	// Truncated is set when entries were cut at maxDirEntries.
 	Truncated bool `json:"truncated"`
@@ -260,6 +262,7 @@ func (s *Server) apiHandler() http.Handler {
 	admin.HandleFunc("POST /api/roots", s.apiAddRoot)
 	admin.HandleFunc("PUT /api/roots/{name}", s.apiUpdateRoot)
 	admin.HandleFunc("DELETE /api/roots/{name}", s.apiRemoveRoot)
+	admin.HandleFunc("PUT /api/workdir", s.apiSetWorkDir)
 	admin.HandleFunc("POST /api/uploads", s.apiUpload)
 	admin.HandleFunc("GET /api/agents", s.apiAgents)
 	admin.HandleFunc("POST /api/agents", s.apiRunAgent)
@@ -385,13 +388,34 @@ func (s *Server) apiUnlock(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"token": tok})
 }
 
+// apiRoots answers {"roots", "workDir"}.
 func (s *Server) apiRoots(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string][]Root{"roots": rootsOf(s.opts.Source.Roots())})
+	writeJSON(w, http.StatusOK, struct {
+		Roots   []Root `json:"roots"`
+		WorkDir string `json:"workDir"`
+	}{rootsOf(s.opts.Source.Roots()), s.opts.Source.WorkDir()})
+}
+
+// apiSetWorkDir sets the work folder to {"path"} ("" for the home
+// directory) and answers {"workDir"}.
+func (s *Server) apiSetWorkDir(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	wd, err := s.opts.Source.SetWorkDir(req.Path)
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"workDir": wd})
 }
 
 func (s *Server) apiListDir(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	dir, err := listDir(q.Get("path"), q.Get("hidden") == "1")
+	dir, err := listDir(q.Get("path"), s.opts.Source.WorkDir(), q.Get("hidden") == "1")
 	if err != nil {
 		s.writeSourceError(w, err)
 		return
@@ -552,13 +576,16 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 // ---------------------------------------------------------------------------
 // Folder listing
 
-// listDir lists the subfolders of path ("" = the home directory), for
-// picking a new root anywhere on this machine. Symlinks to folders are
-// listed like folders.
-func listDir(path string, hidden bool) (Dir, error) {
+// listDir lists the subfolders of path ("" = the work folder work, else
+// the home directory), for picking a new root anywhere on this machine.
+// Symlinks to folders are listed like folders.
+func listDir(path, work string, hidden bool) (Dir, error) {
 	home, _ := os.UserHomeDir()
+	if work == "" {
+		work = home
+	}
 	if path == "" {
-		path = home
+		path = work
 		if path == "" {
 			path = string(filepath.Separator)
 		}
@@ -579,7 +606,7 @@ func listDir(path string, hidden bool) (Dir, error) {
 	if err != nil {
 		return Dir{}, fsError(real, err)
 	}
-	out := Dir{Path: real, Home: home, Entries: []DirEntry{}}
+	out := Dir{Path: real, Home: home, Work: work, Entries: []DirEntry{}}
 	if parent := filepath.Dir(real); parent != real {
 		out.Parent = parent
 	}

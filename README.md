@@ -174,6 +174,7 @@ address. Without it, commands talk to the local daemon.
 | `fleet version` | Print the version. |
 | `fleet update [--check] [--auto on\|off]` | Install the newest release now (the daemon restarts on it once no agent works), only check for one, or turn automatic updates on or off. With `-H`, a paired server's daemon; without a running daemon, this binary. |
 | `fleet roots` / `roots add <path> [--name N] [--adapters a,b] [--trust]` / `roots rm <name>` | Manage the folders agents may run in. `--trust`: see [Folder trust](#folder-trust). |
+| `fleet workdir [path]` / `workdir --home` | Show or set the machine's work folder, where the projects live: the dashboard's folder pickers open there and new folders go there. Without one it is the home folder. It is not a root. |
 | `fleet browse [root[/path]] [-a]` | List folders inside a root, marking git repos and running agents. |
 | `fleet adapters` | Adapters, whether their CLI is installed, version and features, and the models and efforts `fleet run --model/--effort` take. |
 | `fleet run <adapter> [path] [flags] [-- agent args]` | Start an agent. `path` is `root:rel/path`, an absolute path, or (local only) a relative path; default `.`. Flags: `--name`, `--pinned`, `--worktree`, `--branch`, `--prompt`, `--model`, `--effort`, `--attach`, `--clone <repo>` (instead of a path), `--docker` / `--sandbox docker\|none`. |
@@ -351,6 +352,12 @@ tmux_socket = "fleet"
 # "worktree" (default: a worktree when inside a git repo, else pinned) or "pinned".
 default_isolation = "worktree"
 
+# Where the projects live on this machine: the dashboard's folder pickers
+# open here and new folders go here. Absolute or "~/...". Default: the home
+# folder. Not a root: agents still start only inside roots. Set with
+# `fleet workdir` or Devices › Work folder.
+work_dir = "/mnt/data/code"
+
 # Folders agents may start in. Managed with `fleet roots add/rm`.
 [[root]]
 name = "code"
@@ -417,7 +424,9 @@ from the link; the same key unlocks every machine in the fleet, no
   folders); existing roots and git repos are marked. *New folder* creates
   and trusts a folder in one step. A folder's ✎ edits its name, agent
   restrictions and trust; roots can also be removed. None of this affects
-  agents already running.
+  agents already running. *Work folder* › *Change* picks where a machine's
+  projects live, when that is not the home folder: the pickers open there
+  and new folders go there.
 - **Run sessions** — start Claude Code, Codex, Gemini CLI or a shell, chat with it,
   answer it, type into it and archive it, on this machine or any other in
   the fleet (see [Sessions in the browser](#sessions-in-the-browser)).

@@ -374,3 +374,58 @@ func TestSandboxConfig(t *testing.T) {
 		t.Errorf("saved config mentions sandbox:\n%s", b)
 	}
 }
+
+func TestWorkDir(t *testing.T) {
+	setHome(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	realHome, _ := filepath.EvalSymlinks(home)
+	var c Config
+	if got := c.WorkDirOrHome(); got != home {
+		t.Fatalf("no work_dir: %q, want the home %q", got, home)
+	}
+	work := filepath.Join(home, "code")
+	if err := os.Mkdir(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetWorkDir("~/code"); err != nil || c.WorkDir != filepath.Join(realHome, "code") {
+		t.Fatalf("SetWorkDir(~/code): %q, %v", c.WorkDir, err)
+	}
+	if got := c.WorkDirOrHome(); got != c.WorkDir {
+		t.Fatalf("WorkDirOrHome = %q, want %q", got, c.WorkDir)
+	}
+	for _, bad := range []string{"code", filepath.Join(home, "missing"), filepath.Join(home, "f")} {
+		if bad == filepath.Join(home, "f") {
+			if err := os.WriteFile(bad, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := c.SetWorkDir(bad); err == nil {
+			t.Fatalf("SetWorkDir(%q) took it", bad)
+		}
+	}
+	if c.WorkDir != filepath.Join(realHome, "code") {
+		t.Fatalf("a refused path changed WorkDir to %q", c.WorkDir)
+	}
+	// A work folder that went away falls back to the home.
+	if err := os.Remove(work); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.WorkDirOrHome(); got != home {
+		t.Fatalf("gone work_dir: %q, want the home %q", got, home)
+	}
+	if err := c.SetWorkDir(""); err != nil || c.WorkDir != "" {
+		t.Fatalf("SetWorkDir(\"\"): %q, %v", c.WorkDir, err)
+	}
+
+	// config.toml refuses a relative work_dir.
+	if err := os.MkdirAll(Path(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Path("config.toml"), []byte(`work_dir = "code"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "work_dir") {
+		t.Fatalf("relative work_dir loaded: %v", err)
+	}
+}

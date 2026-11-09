@@ -693,13 +693,14 @@ and `.effort`. Claude Code offers `opus`, `fable`, `sonnet` and `haiku` at
 
 Detection results are cached by the daemon. No errors.
 
-**`ListRootsRequest` → `ListRootsResponse`**: configured roots, each with
+**`ListRootsRequest` → `ListRootsResponse{roots, work_dir}`**: configured roots, each with
 `name`, symlink-resolved absolute `path`, `adapters` (empty = all
 allowed) and `trust`. With `trust`, the daemon answers the agent CLI's
 "Do you trust this folder?" prompt for agents started in the root (see
 [Agent state machine](#14-agent-state-machine)); a client should say so
 when offering the option, since a trusted project may run its own hooks
-and MCP servers. No errors.
+and MCP servers. `work_dir` is the work folder (see `SetWorkDirRequest`).
+No errors.
 
 **`AddRootRequest{path, name, adapters, trust}` → `AddRootResponse{root}`**
 
@@ -716,6 +717,17 @@ and MCP servers. No errors.
 - Running agents in that root keep running. Broadcast as
   `Event.roots_changed`.
 - Errors: `NOT_FOUND` (no such root).
+
+**`SetWorkDirRequest{path}` → `SetWorkDirResponse{work_dir}`**
+
+- The work folder is where the projects live on the daemon host: pickers
+  open there and new folders go there by default. It is not a root.
+- `path` is absolute, or `~/...` in the daemon user's home; it is stored
+  symlink-resolved as `work_dir` in `config.toml`. `""` goes back to the
+  home directory, which `work_dir` then reports.
+- Broadcast as `Event.roots_changed`.
+- Errors: `INVALID_ARGUMENT` (relative path, not a directory);
+  `NOT_FOUND` (path does not exist).
 
 **`BrowseRequest{root, path, include_hidden}` → `BrowseResponse{root, path, entries}`**
 
@@ -1042,7 +1054,8 @@ Client                                  Daemon
   copy by `id`; do not merge fields.
 - `agent_removed`: the agent id; it was forgotten, trimmed from history, or
   its start failed.
-- `roots_changed`: the full new root list after `AddRoot` / `RemoveRoot`.
+- `roots_changed`: the full new root list and the work folder after
+  `AddRoot` / `RemoveRoot` / `SetWorkDir`.
   Roots are **not** part of the snapshot: call `ListRootsRequest` once
   after subscribing.
 - The snapshot includes finished agents (the same set as

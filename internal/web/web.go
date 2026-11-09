@@ -84,6 +84,13 @@ type Source interface {
 	Devices() []Device
 	// Roots lists the configured roots.
 	Roots() []*fleetv1.Root
+	// WorkDir is the work folder, where folder pickers open and new
+	// folders go (fleetv1.SetWorkDirRequest): the home directory when none
+	// is set.
+	WorkDir() string
+	// SetWorkDir sets the work folder ("" for the home directory) and
+	// returns it. Errors meant for the user are *Error.
+	SetWorkDir(path string) (string, error)
 	// AddRoot adds a root. Errors meant for the user are *Error.
 	AddRoot(req *fleetv1.AddRootRequest) (*fleetv1.Root, error)
 	// UpdateRoot replaces a root by name. Errors meant for the user are *Error.
@@ -622,6 +629,13 @@ func rootsOf(roots []*fleetv1.Root) []Root {
 	return out
 }
 
+// rootsMsg is the roots message: the roots and the work folder.
+func rootsMsg(roots []*fleetv1.Root, workDir string) []byte {
+	b := encode("roots", "roots", rootsOf(roots))
+	wd, _ := json.Marshal(workDir)
+	return append(append(append(b[:len(b)-1], `,"workDir":`...), wd...), '}')
+}
+
 func nonNil[T any](s []T) []T {
 	if s == nil {
 		return []T{}
@@ -718,7 +732,7 @@ func (h *hub) run(ctx context.Context) {
 		// Subscribe first, then read the roots: the subscription's snapshot
 		// has no roots, and any later change is queued on it.
 		events, cancel := h.src.SubscribeAgents()
-		roots := encode("roots", "roots", rootsOf(h.src.Roots()))
+		roots := rootsMsg(h.src.Roots(), h.src.WorkDir())
 		h.mu.Lock()
 		if !bytes.Equal(h.roots, roots) {
 			h.roots = roots
@@ -780,7 +794,7 @@ func (h *hub) follow(ctx context.Context, events <-chan *fleetv1.Event) {
 		case *fleetv1.Event_AgentRemoved:
 			h.removeAgentLocked(k.AgentRemoved)
 		case *fleetv1.Event_RootsChanged:
-			h.roots = encode("roots", "roots", rootsOf(k.RootsChanged.GetRoots()))
+			h.roots = rootsMsg(k.RootsChanged.GetRoots(), k.RootsChanged.GetWorkDir())
 			h.broadcastLocked(h.roots)
 		case *fleetv1.Event_SnapshotDone:
 			for id := range h.agents {

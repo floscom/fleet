@@ -464,10 +464,10 @@ func (m *manager) queueLocked(s *subscriber, ev *fleetv1.Event) bool {
 	}
 }
 
-func (m *manager) broadcastRoots(roots []*fleetv1.Root) {
+func (m *manager) broadcastRoots(rc *fleetv1.RootsChanged) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.broadcastLocked(&fleetv1.Event{Kind: &fleetv1.Event_RootsChanged{RootsChanged: &fleetv1.RootsChanged{Roots: roots}}})
+	m.broadcastLocked(&fleetv1.Event{Kind: &fleetv1.Event_RootsChanged{RootsChanged: rc}})
 }
 
 // handleSubscribe replies, then streams the snapshot and live events. A

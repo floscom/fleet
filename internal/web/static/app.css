@@ -1343,6 +1343,9 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
 .root-row:first-of-type { border-top: 0; }
 .root-main { flex: 1; min-width: 0; }
 .root-name { display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; }
+.work-row .root-name .trunc { flex: none; }
+.work-row .root-name .muted { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 400; }
+.pr-places { display: contents; }
 .root-path { font-family: var(--mono); font-size: 12px; color: var(--fg-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .root-acts { display: flex; gap: 2px; flex: none; }
 .root-confirm { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--fg-3); }

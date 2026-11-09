@@ -19,6 +19,7 @@
     devices: [],
     peers: [],
     roots: [],
+    workDir: '', // this machine's work folder: where pickers open and new folders go ('' = not known)
     agents: new Map(), // id -> agent
     remote: new Map(), // server id of another fleet -> {agents: Map(id -> agent), fails}
     workflows: new Map(), // agentKey -> workflow runs going on (see pollWorkflows)
@@ -26,6 +27,7 @@
     host: new Map(), // server id -> how its machine is doing (see pollUsage)
     update: new Map(), // server id -> where its daemon stands with updates (see pollUsage)
     peerRoots: new Map(), // server id of another fleet -> its roots, for Devices
+    peerWork: new Map(), // server id of another fleet -> its work folder
     snapshotDone: false,
     unseen: null, // ids of the agents shown that the coming snapshot has not named yet (see resetState)
     peersSeen: false, // first complete (post-browse) peers list of this connection received
@@ -5767,6 +5769,7 @@
     loaded: null, // the host whose adapters and roots were loaded (null: none yet)
     adapters: null, // [{id, name, available, images, models, efforts}] of the machine
     roots: null, // roots of another machine (this one's are S.roots)
+    workDir: '', // work folder of another machine (this one's is S.workDir)
     path: '', // chosen folder, absolute; '' = none yet
     want: null, // {path} or {root, sub} asked for before the machine's roots are known
     home: '', // the machine's home folder, as its listings say
@@ -5791,6 +5794,12 @@
 
   const launchAPI = (path) => (launch.host ? `/api/hosts/${encodeURIComponent(launch.host)}/${path}` : '/api/' + path);
   const launchRoots = () => (launch.host ? launch.roots || [] : S.roots);
+  // launchWork is where a new folder goes by default: the machine's work
+  // folder, from its home as ~ (older daemons have none: ~).
+  const launchWork = () => {
+    const w = launch.host ? launch.workDir : S.workDir;
+    return w ? tilde(w) : '~';
+  };
   const inRoot = (r, sub) => (sub ? joinPath(r.path, sub) : r.path);
   const within = (path, dir) => path === dir || path.startsWith(joinPath(dir, ''));
   const parentOf = (p) => (p.lastIndexOf('/') > 0 ? p.slice(0, p.lastIndexOf('/')) : p.length > 1 ? '/' : '');
@@ -5859,6 +5868,7 @@
     launch.adapters = null;
     launch.adapterRoot = '';
     launch.roots = null;
+    launch.workDir = '';
     launch.home = '';
     launch.dirs = new Map();
     launch.look = '';
@@ -5872,12 +5882,13 @@
     };
     const [ads, roots] = await Promise.all([
       api('GET', launchAPI('adapters')).then((r) => (r && r.adapters) || []).catch(fail),
-      host ? api('GET', launchAPI('roots')).then((r) => (r && r.roots) || []).catch(fail) : null,
+      host ? api('GET', launchAPI('roots')).catch(fail) : null,
     ]);
     if (gen !== launch.gen) return;
     if (host && ads) setHostState(host, 'joined');
     launch.adapters = ads || [];
-    launch.roots = roots;
+    launch.roots = host && roots ? roots.roots || [] : null;
+    launch.workDir = (roots && roots.workDir) || '';
     launch.error = err;
     launchRootsChanged();
   }
@@ -6216,7 +6227,7 @@
     if (listing) rows.push({ note: 'Still listing folders…' });
     else if (!hits.length) rows.push({ note: `No folder matches “${q}”: look inside one (›) to search its folders too` });
     const typed = launch.q.trim();
-    if (words.length === 1 && !hits.some((x) => x.score === 0)) rows.push({ make: /^[~/]/.test(typed) ? typed : joinPath('~', typed) });
+    if (words.length === 1 && !hits.some((x) => x.score === 0)) rows.push({ make: /^[~/]/.test(typed) ? typed : joinPath(launchWork(), typed) });
     return rows;
   }
 
@@ -6277,7 +6288,7 @@
         }));
         if (focusedKey) [...list.querySelectorAll('[data-key]')].find((x) => x.dataset.key === focusedKey)?.focus();
         if (making != null) {
-          const p = h('input', { class: 'input mono', value: making, placeholder: '~/new-project', 'aria-label': 'New folder', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
+          const p = h('input', { class: 'input mono', value: making, placeholder: joinPath(launchWork(), 'new-project'), 'aria-label': 'New folder', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
           const trust = h('input', { type: 'checkbox', checked: true });
           const create = async () => {
             const path = p.value.trim();
@@ -6310,7 +6321,7 @@
           if (!launch.making) setTimeout(() => p.focus());
         } else {
           fill(foot, mi({ icon: 'folder-plus', label: 'New folder', sub: 'becomes a root, ready to start in', onSelect: () => {
-            making = joinPath(launch.look ? tilde(launch.look) : '~', '');
+            making = joinPath(launch.look ? tilde(launch.look) : launchWork(), '');
             note = null;
             paint();
           } }));
@@ -6902,7 +6913,7 @@
         renderDevices();
       },
     })) : null;
-    box.append(h('div', 'roots-h', h('h3', 'sec-h', `Folders · ${roots.length}`), filter, add));
+    box.append(h('div', 'roots-h', h('h3', 'sec-h', `Folders · ${roots.length}`), filter, add), workRow(m));
     if (!roots.length) box.append(h('p', 'roots-loading', 'No folders yet: agents can only start inside one.'));
     for (const r of shown) box.append(rootRow(m, r));
     if (q && !found.length) box.append(h('p', 'roots-loading', `No folder matches “${q}”.`));
@@ -6912,6 +6923,18 @@
       renderDevices();
     } }, all ? 'Show fewer' : `Show all ${roots.length} folders`));
     return box;
+  }
+
+  // workRow is the machine's work folder, where folder pickers open and
+  // new folders go. Older daemons have none.
+  function workRow(m) {
+    const work = m.id ? S.peerWork.get(m.id) : S.workDir;
+    if (!work) return null;
+    return h('div', 'root-row work-row',
+      h('div', 'root-main',
+        h('div', 'root-name', h('span', 'trunc', 'Work folder'), h('span', 'muted', 'pickers open here, new folders go here')),
+        h('div', { class: 'root-path', title: work }, shortPath(work))),
+      h('div', 'root-acts', h('button', { type: 'button', class: 'btn ghost sm', 'aria-label': 'Change the work folder of ' + m.name, onclick: () => openRootPicker(m.id, null, true) }, 'Change')));
   }
 
   function rootRow(m, r) {
@@ -6943,6 +6966,7 @@
     try {
       const r = await api('GET', `/api/hosts/${encodeURIComponent(id)}/roots`);
       S.peerRoots.set(id, (r && r.roots) || []);
+      S.peerWork.set(id, (r && r.workDir) || '');
     } catch {
       S.peerRoots.delete(id);
       return;
@@ -7667,7 +7691,7 @@
   // ---- adding or editing a folder (a root): a folder browser over GET
   // .../fs on the machine, then its name, the agents allowed and trust.
 
-  const picker = { host: '', dir: null, seq: 0, loading: false, error: '', busy: false, editing: null, making: false, adapters: null, roots: null, hidden: false, filter: '', newName: null, els: null };
+  const picker = { host: '', dir: null, seq: 0, loading: false, error: '', busy: false, editing: null, work: false, making: false, adapters: null, roots: null, hidden: false, filter: '', newName: null, els: null };
 
   const pickerAPI = (path) => (picker.host ? `/api/hosts/${encodeURIComponent(picker.host)}/${path}` : '/api/' + path);
   const pickerRoots = () => (picker.host ? picker.roots || [] : S.roots);
@@ -7682,9 +7706,11 @@
     return best;
   }
 
-  function openRootPicker(host, root) {
+  // openRootPicker adds a root on host, edits root, or, with work, chooses
+  // the machine's work folder.
+  function openRootPicker(host, root, work) {
     if (!admin) return;
-    Object.assign(picker, { host: host || '', dir: null, loading: false, error: '', busy: false, editing: root || null, making: false, adapters: null, roots: null, filter: '', newName: null });
+    Object.assign(picker, { host: host || '', dir: null, loading: false, error: '', busy: false, editing: root || null, work: !!work, making: false, adapters: null, roots: null, filter: '', newName: null });
     picker.seq++;
     const name = h('input', { class: 'input mono', value: root ? root.name : '', maxlength: 64, autocomplete: 'off', spellcheck: 'false', 'aria-label': 'Name' });
     const trust = h('input', { type: 'checkbox', checked: !!(root && root.trust) });
@@ -7694,10 +7720,11 @@
     const crumbs = h('nav', { class: 'crumbs', 'aria-label': 'Current folder' });
     const list = h('div', { class: 'pick-list', role: 'listbox', 'aria-label': 'Folders' });
     const newRow = h('div');
+    const places = h('span', 'pr-places');
     const agents = h('div', 'radio-chips');
     const status = h('p', { class: 'dlg-status', role: 'status', 'aria-live': 'polite' });
     const save2 = h('button', { type: 'button', class: 'btn primary', onclick: () => saveRoot() }, root ? 'Save' : 'Add as root');
-    picker.els = { name, trust, path, filter, hidden, crumbs, list, newRow, agents, status, save: save2 };
+    picker.els = { name, trust, path, filter, hidden, crumbs, list, newRow, places, agents, status, save: save2 };
     path.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter') {
         ev.preventDefault();
@@ -7739,21 +7766,22 @@
     openDialog({
       id: 'root',
       wide: true,
-      title: root ? `Edit ${root.name}` : 'Add a folder',
-      sub: `Agents can start anywhere inside it. A folder on ${hostName(picker.host)}.`,
+      title: work ? 'Work folder' : root ? `Edit ${root.name}` : 'Add a folder',
+      sub: work ? `Where the projects live on ${hostName(picker.host)}: folder pickers open here and new folders go here. Agents still start only inside the folders added.`
+        : `Agents can start anywhere inside it. A folder on ${hostName(picker.host)}.`,
       body: [
         h('div', 'pop-row', h('label', 'search grow', icon('folder', 'i-sm'), path), h('button', { type: 'button', class: 'btn sm', onclick: goToTyped }, 'Go')),
         h('div', 'pop-row', crumbs, h('span', 'grow'),
           h('button', { type: 'button', class: 'btn ghost sm', onclick: () => { picker.newName = ''; paintNewRow(); } }, icon('folder-plus'), 'New folder'),
-          h('button', { type: 'button', class: 'btn ghost sm', onclick: () => browse('') }, '~ home'),
+          places,
           h('label', 'pr-acts', hidden, 'hidden')),
         newRow,
         h('label', 'search', icon('search', 'i-sm'), filter),
         list,
-        h('div', 'opt-grid',
+        work ? null : h('div', 'opt-grid',
           h('span', 'field-l', 'Name'), name,
           h('span', 'field-l', 'Agents'), h('div', null, agents, h('span', 'field-hint', 'None ticked: all of them'))),
-        h('label', 'check-row warn', trust, h('span', null, h('strong', null, 'Trust this folder. '), 'Agents started here skip Claude Code’s and Codex’s “Do you trust this folder?” prompt, so its own hooks, MCP servers and settings run. Only for code you trust.')),
+        work ? null : h('label', 'check-row warn', trust, h('span', null, h('strong', null, 'Trust this folder. '), 'Agents started here skip Claude Code’s and Codex’s “Do you trust this folder?” prompt, so its own hooks, MCP servers and settings run. Only for code you trust.')),
         status,
       ],
       foot: [h('button', { type: 'button', class: 'btn', onclick: closeDialog }, 'Cancel'), save2],
@@ -7855,6 +7883,21 @@
       parts.map((p, i) => [i ? ' / ' : '', i === parts.length - 1 ? h('span', { 'aria-current': 'location' }, p) : h('button', { type: 'button', onclick: () => browse('/' + parts.slice(0, i + 1).join('/')) }, p)])] : null);
     paintPickerList();
     paintNewRow();
+    // the work folder (where an empty path opens) and the home
+    const work = dir && dir.work && dir.work !== dir.home ? dir.work : '';
+    fill(els.places,
+      work ? h('button', { type: 'button', class: 'btn ghost sm', title: 'The work folder: ' + shortPath(work), onclick: () => browse('') }, icon('folder'), baseName(work)) : null,
+      h('button', { type: 'button', class: 'btn ghost sm', onclick: () => browse(dir && dir.home ? dir.home : '') }, '~ home'));
+    if (picker.work) {
+      const st = els.status;
+      st.className = 'dlg-status' + (picker.error ? ' err' : '');
+      if (picker.error) fill(st, picker.error);
+      else if (!dir) fill(st, 'Loading…');
+      else fill(st, dir.path === dir.work ? 'This is the work folder now' : ['Uses ', h('span', 'mono', shortPath(dir.path))]);
+      els.save.disabled = !dir || picker.loading || picker.busy || (picker.host && hostState(picker.host) === 'not_joined');
+      els.save.textContent = picker.busy ? 'Saving…' : 'Use this folder';
+      return;
+    }
     // what Add does, or what is in the way
     const existing = dir && rootAt(dir.path);
     const conflict = existing && (!picker.editing || existing.name !== picker.editing.name);
@@ -7943,6 +7986,7 @@
     const els = picker.els;
     const dir = picker.dir;
     const editing = picker.editing;
+    if (picker.work) return saveWorkDir();
     const existing = dir && rootAt(dir.path);
     if (!els || !dir || picker.loading || picker.busy || (existing && (!editing || existing.name !== editing.name))) return;
     const name = els.name.value.trim();
@@ -7965,6 +8009,29 @@
       return;
     } catch (e) {
       picker.error = e.message;
+    }
+    picker.busy = false;
+    paintPicker();
+  }
+
+  // saveWorkDir makes the folder the picker is in the machine's work
+  // folder; the home goes back to none.
+  async function saveWorkDir() {
+    const dir = picker.dir;
+    if (!picker.els || !dir || picker.loading || picker.busy) return;
+    const host = picker.host;
+    picker.busy = true;
+    picker.error = '';
+    paintPicker();
+    try {
+      const r = await api('PUT', pickerAPI('workdir'), { path: dir.path === dir.home ? '' : dir.path });
+      toast(`The work folder${host ? ' of ' + hostName(host) : ''} is ${shortPath(r.workDir)}`);
+      picker.busy = false;
+      closeDialog();
+      if (host) loadPeerRoots(host);
+      return;
+    } catch (e) {
+      picker.error = e.status === 404 || e.status === 405 ? `${hostName(host)} runs an older fleet: update it to set its work folder` : e.message;
     }
     picker.busy = false;
     paintPicker();
@@ -8227,6 +8294,7 @@
       }
       case 'roots':
         S.roots = msg.roots || [];
+        S.workDir = msg.workDir || '';
         invalidate('roots');
         break;
       case 'agent': {
@@ -8511,6 +8579,7 @@
       S.host.clear();
       S.update.clear();
       S.peerRoots.clear();
+      S.peerWork.clear();
     } else if (dialogShows('unlock')) closeDialog();
     syncPush();
     tryOpenPending();
@@ -8723,6 +8792,7 @@
     S.devices = s.devices || [];
     S.peers = s.peers || [];
     S.roots = s.roots || [];
+    S.workDir = s.workDir || '';
     for (const a of s.agents || []) if (a && a.id) S.agents.set(a.id, a);
     if (!getToken()) return;
     for (const [host, list] of Object.entries(s.remote || {})) {
@@ -8738,7 +8808,7 @@
     if (!S.snapshotDone) return;
     const remote = {};
     for (const [host, r] of S.remote) remote[host] = [...r.agents.values()];
-    save(SNAP_KEY, { v: SNAP_V, server: S.server, devices: S.devices, peers: S.peers, roots: S.roots, agents: [...S.agents.values()], remote });
+    save(SNAP_KEY, { v: SNAP_V, server: S.server, devices: S.devices, peers: S.peers, roots: S.roots, workDir: S.workDir, agents: [...S.agents.values()], remote });
   }
 
   function snapshotSoon() {

@@ -67,7 +67,11 @@ type Config struct {
 	TmuxSocket string `toml:"tmux_socket"`
 	// DefaultIsolation: "worktree" (default; falls back to pinned outside git) or "pinned".
 	DefaultIsolation string `toml:"default_isolation"`
-	Roots            []Root `toml:"root"`
+	// WorkDir is where the agents' projects live on this machine: folder
+	// pickers open here and new folders go here by default. It is not a
+	// root. Absolute, or "~/..."; "" means the home directory.
+	WorkDir string `toml:"work_dir,omitempty"`
+	Roots   []Root `toml:"root"`
 	// Adapter-specific overrides, e.g. [adapter.claude] binary = "/opt/claude".
 	Adapters map[string]AdapterConfig `toml:"adapter"`
 	// Sandbox configures Docker sandboxes ([sandbox]).
@@ -280,6 +284,9 @@ func Load() (*Config, error) {
 	if c.Sandbox.Dir != "" && !filepath.IsAbs(c.Sandbox.Dir) && !strings.HasPrefix(c.Sandbox.Dir, "~/") {
 		return nil, fmt.Errorf("config.toml: [sandbox] dir must be absolute or start with ~/, not %q", c.Sandbox.Dir)
 	}
+	if c.WorkDir != "" && !filepath.IsAbs(c.WorkDir) && c.WorkDir != "~" && !strings.HasPrefix(c.WorkDir, "~/") {
+		return nil, fmt.Errorf("config.toml: work_dir must be absolute or start with ~/, not %q", c.WorkDir)
+	}
 	switch c.Sandbox.Default {
 	case "", "none", "docker":
 	default:
@@ -326,6 +333,62 @@ func (c Config) StayAwakeOn() bool { return c.StayAwake == nil || *c.StayAwake }
 
 // AutoUpdateOn reports the effective auto_update setting.
 func (c Config) AutoUpdateOn() bool { return c.AutoUpdate == nil || *c.AutoUpdate }
+
+// WorkDirOrHome returns the work folder (WorkDir with "~" expanded,
+// symlink-resolved), or the home directory when none is set or it is not
+// a folder (anymore). "" when there is neither.
+func (c Config) WorkDirOrHome() string {
+	home, _ := os.UserHomeDir()
+	p := c.WorkDir
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home == "" {
+			return ""
+		}
+		p = filepath.Join(home, p[1:])
+	}
+	if p != "" {
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			if fi, err := os.Stat(real); err == nil && fi.IsDir() {
+				return real
+			}
+		}
+	}
+	return home
+}
+
+// SetWorkDir validates path (absolute or "~/...", an existing folder) and
+// makes it WorkDir, symlink-resolved; "" goes back to the home directory.
+// It does not Save.
+func (c *Config) SetWorkDir(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		c.WorkDir = ""
+		return nil
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("no home directory to find %s in", path)
+		}
+		path = filepath.Join(home, path[1:])
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("work folder must be an absolute path: %q", path)
+	}
+	real, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("no folder %s: %w", path, fs.ErrNotExist)
+	} else if err != nil {
+		return err
+	}
+	if fi, err := os.Stat(real); err != nil {
+		return err
+	} else if !fi.IsDir() {
+		return fmt.Errorf("%s is not a folder", real)
+	}
+	c.WorkDir = real
+	return nil
+}
 
 // writeFileAtomic writes data to a temp file next to path (0600), syncs it
 // and renames it into place.

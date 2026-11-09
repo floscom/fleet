@@ -40,6 +40,9 @@ type fakeSource struct {
 	// These errors are returned by their corresponding root operations.
 	addErr, updateErr, removeErr error
 	removed                      []string
+	// workDir is WorkDir; SetWorkDir sets it unless workErr.
+	workDir string
+	workErr error
 
 	// Agents: runs, stops and inputs received; chat is what Chat returns
 	// (Agent filled in from agent).
@@ -123,6 +126,22 @@ func (s *fakeSource) UpdateRoot(name string, req *fleetv1.AddRootRequest) (*flee
 	}
 	s.updated = append(s.updated, fakeRootUpdate{name: name, req: req})
 	return &fleetv1.Root{Name: req.Name, Path: req.Path, Adapters: req.Adapters, Trust: req.Trust}, nil
+}
+
+func (s *fakeSource) WorkDir() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.workDir
+}
+
+func (s *fakeSource) SetWorkDir(path string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.workErr != nil {
+		return "", s.workErr
+	}
+	s.workDir = path
+	return path, nil
 }
 
 func (s *fakeSource) RemoveRoot(name string) error {
@@ -400,6 +419,7 @@ type msg struct {
 	Complete bool            `json:"complete"`
 	Devices  json.RawMessage `json:"devices"`
 	Roots    []Root          `json:"roots"`
+	WorkDir  string          `json:"workDir"`
 }
 
 func TestWebSocketSnapshotAndLive(t *testing.T) {
@@ -408,6 +428,7 @@ func TestWebSocketSnapshotAndLive(t *testing.T) {
 			Isolation: fleetv1.Isolation_ISOLATION_WORKTREE, Sandbox: fleetv1.Sandbox_SANDBOX_DOCKER, CreatedAtMs: 1},
 		&fleetv1.Agent{Id: "a2", Name: "done", State: fleetv1.AgentState_AGENT_STATE_EXITED, HasExitCode: true, CreatedAtMs: 2},
 	)
+	src.workDir = "/srv/data"
 	ts := startServer(t, src)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -442,8 +463,8 @@ func TestWebSocketSnapshotAndLive(t *testing.T) {
 	if len(got[2].Peers) != 1 || !got[2].Peers[0].Self || got[2].Peers[0].Port != 7420 || got[2].Complete {
 		t.Fatalf("initial peers: %+v", got[2].Peers)
 	}
-	if len(got[3].Roots) != 1 || got[3].Roots[0].Adapters == nil {
-		t.Fatalf("roots: %+v", got[3].Roots)
+	if len(got[3].Roots) != 1 || got[3].Roots[0].Adapters == nil || got[3].WorkDir != "/srv/data" {
+		t.Fatalf("roots: %+v %q", got[3].Roots, got[3].WorkDir)
 	}
 	a1, a2 := got[4].Agent, got[5].Agent
 	if a1.ID != "a1" || a1.State != "needs_input" || a1.Isolation != "worktree" || a1.Sandbox != "docker" || a1.ExitCode != nil {

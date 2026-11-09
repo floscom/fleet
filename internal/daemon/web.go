@@ -47,6 +47,13 @@ func (s *webSource) Devices() []web.Device {
 
 func (s *webSource) Roots() []*fleetv1.Root { return s.d.roots() }
 
+func (s *webSource) WorkDir() string { return s.d.workDir() }
+
+func (s *webSource) SetWorkDir(path string) (string, error) {
+	w, err := s.d.setWorkDir(path)
+	return w, webError(err)
+}
+
 func (s *webSource) AddRoot(req *fleetv1.AddRootRequest) (*fleetv1.Root, error) {
 	r, err := s.d.addRoot(req)
 	return r, webError(err)
