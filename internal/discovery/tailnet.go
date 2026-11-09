@@ -123,7 +123,8 @@ func probe(ctx context.Context, client *http.Client, p tailnetPeer, port int) (F
 	}, true
 }
 
-// tailnetPeers lists the online machines of the tailnet, this one aside.
+// tailnetPeers lists the online or active machines of the tailnet, this
+// one aside.
 func tailnetPeers(ctx context.Context) ([]tailnetPeer, error) {
 	var out []byte
 	for _, bin := range tailscaleBins {
@@ -154,6 +155,9 @@ func parseStatus(b []byte) []tailnetPeer {
 			DNSName      string
 			TailscaleIPs []string
 			Online       bool
+			// Active means traffic flowed lately: a machine whose control
+			// connection dropped is shown offline but may still answer.
+			Active bool
 		}
 	}
 	if json.Unmarshal(b, &st) != nil || st.BackendState != "Running" {
@@ -162,7 +166,7 @@ func parseStatus(b []byte) []tailnetPeer {
 	var out []tailnetPeer
 	for _, p := range st.Peer {
 		addrs := mergeAddrs(nil, p.TailscaleIPs)
-		if !p.Online || len(addrs) == 0 {
+		if !(p.Online || p.Active) || len(addrs) == 0 {
 			continue
 		}
 		host := strings.TrimSuffix(p.DNSName, ".")

@@ -17,12 +17,13 @@ func TestParseStatus(t *testing.T) {
 	  "k1":{"HostName":"zerox","DNSName":"zerox.tail.ts.net.","TailscaleIPs":["fd7a::1","100.0.0.2"],"Online":true},
 	  "k2":{"HostName":"air","DNSName":"air.tail.ts.net.","TailscaleIPs":["100.0.0.3"],"Online":false},
 	  "k3":{"HostName":"bare","TailscaleIPs":["100.0.0.4"],"Online":true},
-	  "k4":{"HostName":"noip","DNSName":"noip.tail.ts.net.","Online":true}}}`
+	  "k4":{"HostName":"noip","DNSName":"noip.tail.ts.net.","Online":true},
+	  "k5":{"HostName":"c6015","DNSName":"c6015.tail.ts.net.","TailscaleIPs":["100.0.0.5"],"Online":false,"Active":true}}}`
 	got := map[string][]string{}
 	for _, p := range parseStatus([]byte(status)) {
 		got[p.Host] = p.Addrs
 	}
-	want := map[string][]string{"zerox.tail.ts.net": {"100.0.0.2", "fd7a::1"}, "bare": {"100.0.0.4"}}
+	want := map[string][]string{"zerox.tail.ts.net": {"100.0.0.2", "fd7a::1"}, "bare": {"100.0.0.4"}, "c6015.tail.ts.net": {"100.0.0.5"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
