@@ -955,8 +955,12 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
 .meta-line { display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--fg-3); }
 .meta-line::before, .meta-line::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .meta-line.busy { color: var(--fg-2); }
-.msg-time { align-self: flex-start; margin-top: -12px; font-size: 11px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
+.msg-time { align-self: flex-start; margin-top: -12px; display: flex; align-items: center; gap: 2px; font-size: 11px; color: var(--fg-3); font-variant-numeric: tabular-nums; }
 .msg-time.mine { align-self: flex-end; }
+/* Its icon lines up with the answer's text; the row keeps its height. */
+.msg-copy { width: 24px; height: 24px; margin: -4px 0 -4px -5px; }
+.msg-copy .i { width: 14px; height: 14px; }
+@media (pointer: coarse) { .msg-copy::after { content: ""; position: absolute; inset: -8px; } }
 
 .answered {
   align-self: flex-end; max-width: min(85%, 600px);

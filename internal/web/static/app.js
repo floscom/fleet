@@ -1356,6 +1356,10 @@
       setTimeout(() => {
         btn.textContent = was;
       }, 1500);
+    } else if (btn && ok && btn.classList.contains('icon-btn')) {
+      // A copy icon turns into a check for a moment.
+      btn.replaceChildren(icon('check'));
+      setTimeout(() => btn.replaceChildren(icon('copy')), 1500);
     } else toast(ok ? 'Copied' : 'Could not copy: select the text and copy it', ok ? 'ok' : 'warn');
   }
 
@@ -3162,8 +3166,9 @@
       group: null, // the group the next tool call joins
       groups: [], // every group shown
       day: '', // the day of the last message shown
-      last: null, // {el, ts} of the newest message shown, which stamp marks
+      last: null, // {el, ts, text?} of the newest message shown (text: an answer's), which stamp marks
       stamp: null, // the time under it
+      stamped: null, // the last the stamp was made for
       catchup: false, // a copy shows: the next request asks for what came after it, without waiting
     }, o);
   }
@@ -3267,18 +3272,21 @@
     if (atBottom) scroller.scrollTop = scroller.scrollHeight;
   }
 
-  // stampLast puts when the newest message arrived under it.
+  // stampLast puts when the newest message arrived under it, and under an
+  // answer a button that copies it (its markdown).
   function stampLast(f) {
     const l = f.last;
     if (!l || !l.ts) {
       if (f.stamp) f.stamp.remove();
       return;
     }
-    if (!f.stamp || Number(f.stamp.dataset.ts) !== l.ts) {
+    if (!f.stamp || f.stamped !== l) {
       if (f.stamp) f.stamp.remove();
-      f.stamp = relTime(l.ts, 'msg-time', true);
+      f.stamp = h('div', 'msg-time' + (l.el.classList.contains('msg-user') ? ' mine' : ''),
+        l.text ? iconBtn('copy', 'Copy the answer', (ev) => copyText(l.text, ev.currentTarget), { cls: 'msg-copy' }) : null,
+        relTime(l.ts, '', true));
+      f.stamped = l;
     }
-    f.stamp.classList.toggle('mine', l.el.classList.contains('msg-user'));
     if (l.el.nextElementSibling !== f.stamp) l.el.after(f.stamp);
   }
 
@@ -3453,7 +3461,7 @@
       case 'assistant': {
         closeGroup(f);
         const el = timeTitle(md(e.text || ''), e);
-        f.last = { el, ts: e.ts };
+        f.last = { el, ts: e.ts, text: e.text || '' };
         return [el];
       }
       case 'task':
