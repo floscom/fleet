@@ -76,3 +76,35 @@ func TestApplyHookDialogs(t *testing.T) {
 		}
 	}
 }
+
+// TestAside checks that work the CLI does between turns (Claude compacting
+// while idle) ends where it began.
+func TestAside(t *testing.T) {
+	const (
+		working = fleetv1.AgentState_AGENT_STATE_WORKING
+		idle    = fleetv1.AgentState_AGENT_STATE_IDLE
+	)
+	start := adapter.StateUpdate{State: working, Detail: "Compacting the conversation", AsideStart: true}
+	end := adapter.StateUpdate{State: working, AsideEnd: true}
+	tests := []struct {
+		name  string
+		own   fleetv1.AgentState
+		steps []adapter.StateUpdate
+		want  fleetv1.AgentState
+	}{
+		{"compacted while idle", idle, []adapter.StateUpdate{start, end}, idle},
+		{"compacted mid-turn", working, []adapter.StateUpdate{start, end}, working},
+		{"a turn began meanwhile", idle, []adapter.StateUpdate{start, {State: working}, end}, working},
+		{"an idle notification meanwhile", idle, []adapter.StateUpdate{start, {State: idle}, end}, idle},
+		{"a turn after an idle compaction", idle, []adapter.StateUpdate{start, end, {State: working}, start, end}, working},
+	}
+	for _, tt := range tests {
+		a := &agentRec{State: tt.own, OwnState: tt.own}
+		for _, u := range tt.steps {
+			a.applyHook(a.aside(u))
+		}
+		if a.State != tt.want {
+			t.Errorf("%s: %v, want %v", tt.name, a.State, tt.want)
+		}
+	}
+}

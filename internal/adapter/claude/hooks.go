@@ -43,7 +43,8 @@ const compacting = "Compacting the conversation"
 //	PostToolUseFailure, PermissionDenied -> WORKING (the turn goes on)
 //	SubagentStop                      -> WORKING, from that subagent
 //	PreCompact                        -> WORKING (compacting as detail)
-//	PostCompact                       -> WORKING; IDLE after /compact
+//	PostCompact                       -> WORKING; IDLE after /compact, or
+//	                                     if compacted while idle
 //
 // Informational notifications (auth_success, elicitation results) are ignored,
 // and so is permission_prompt: PermissionRequest reports the same dialog
@@ -101,10 +102,12 @@ func (c *claude) HandleHook(ev adapter.HookEvent) (adapter.StateUpdate, bool) {
 		u.State = fleetv1.AgentState_AGENT_STATE_WORKING
 	case "PreCompact":
 		u.State, u.Detail = fleetv1.AgentState_AGENT_STATE_WORKING, compacting
+		u.AsideStart = true
 	case "PostCompact":
 		// /compact ends without a Stop hook; an automatic compaction
-		// goes on with the turn.
-		u.State = fleetv1.AgentState_AGENT_STATE_WORKING
+		// goes on with the turn, unless it ran between turns (2.1.323:
+		// "Compacted while idle, before the prompt cache expired").
+		u.State, u.AsideEnd = fleetv1.AgentState_AGENT_STATE_WORKING, true
 		if p.Trigger == "manual" {
 			u.State = fleetv1.AgentState_AGENT_STATE_IDLE
 		}

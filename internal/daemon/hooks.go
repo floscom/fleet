@@ -70,6 +70,9 @@ func (m *manager) applyHookLocked(a *agentRec, ad adapter.Adapter, upd adapter.S
 		a.SessionID, a.Dialogs = upd.SessionID, nil
 		changed = true
 	}
+	if upd.Subagent == "" {
+		upd = a.aside(upd)
+	}
 	if upd.State > stateStarting && isLive(upd.State) && a.applyHook(upd) {
 		changed = true
 	}
@@ -87,6 +90,24 @@ func (m *manager) applyHookLocked(a *agentRec, ad adapter.Adapter, upd adapter.S
 	case saved:
 		m.saveLocked()
 	}
+}
+
+// aside tracks work the agent does between turns (adapter.StateUpdate
+// AsideStart and AsideEnd) and returns upd as it applies: work that began
+// while the agent did not work ends in IDLE, unless a turn began since.
+func (a *agentRec) aside(upd adapter.StateUpdate) adapter.StateUpdate {
+	switch {
+	case upd.AsideStart:
+		a.AsideIdle = a.OwnState != stateWorking
+	case upd.AsideEnd:
+		if a.AsideIdle {
+			upd.State = stateIdle
+		}
+		a.AsideIdle = false
+	case upd.State == stateWorking:
+		a.AsideIdle = false
+	}
+	return upd
 }
 
 // dialog is a dialog a hook reported open.

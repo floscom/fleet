@@ -98,6 +98,9 @@ type agentRec struct {
 	// QueuePaused holds it (queue.go).
 	Queue       []queued `json:"queue,omitempty"`
 	QueuePaused bool     `json:"queue_paused,omitempty"`
+	// AsideIdle is set while the agent does work between turns that
+	// began while it was not working (adapter.StateUpdate.AsideStart).
+	AsideIdle bool `json:"aside_idle,omitempty"`
 
 	// limit is the usage limit that stopped the agent (limits.go).
 	limit *fleetv1.UsageLimit

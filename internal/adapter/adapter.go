@@ -445,6 +445,11 @@ type StateUpdate struct {
 	// its Subagent and Call, which only their own updates close.
 	Subagent string
 	Call     string
+	// AsideStart marks the start of work the CLI also does between turns
+	// (Claude compacting its conversation while idle), and AsideEnd its
+	// end: the agent goes back to IDLE then if no turn was going on when
+	// the work started, nor began since.
+	AsideStart, AsideEnd bool
 }
 
 // Registry holds the adapters known to the daemon.
