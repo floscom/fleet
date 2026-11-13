@@ -242,6 +242,10 @@ func TestHandleHook(t *testing.T) {
 			true, fleetv1.AgentState_AGENT_STATE_WORKING, "", sid},
 		{"PostCompact", `{"session_id":"` + sid + `","hook_event_name":"PostCompact","trigger":"manual","compact_summary":"..."}`,
 			true, fleetv1.AgentState_AGENT_STATE_IDLE, "", sid},
+		// 2.1.323 starts the session again after compacting, mid-turn
+		// for an automatic compaction: the state stays as it is.
+		{"SessionStart", `{"session_id":"` + sid + `","transcript_path":"/t.jsonl","hook_event_name":"SessionStart","source":"compact"}`,
+			true, 0, "", sid},
 		{"SessionEnd", `{}`, false, 0, "", ""},
 	}
 	a := New("", nil)

@@ -32,6 +32,7 @@ const compacting = "Compacting the conversation"
 // HandleHook maps Claude Code hook events to agent states:
 //
 //	SessionStart                      -> IDLE (records session_id)
+//	SessionStart source compact       -> state unchanged
 //	UserPromptSubmit, PostToolUse     -> WORKING
 //	PermissionRequest                 -> NEEDS_INPUT (tool summary)
 //	Notification idle_prompt          -> IDLE
@@ -59,7 +60,11 @@ func (c *claude) HandleHook(ev adapter.HookEvent) (adapter.StateUpdate, bool) {
 	u := adapter.StateUpdate{SessionID: p.SessionID, Transcript: p.TranscriptPath, Subagent: p.AgentID}
 	switch ev.Event {
 	case "SessionStart":
-		u.State = fleetv1.AgentState_AGENT_STATE_IDLE
+		// Every compaction ends with a SessionStart of source compact,
+		// after PostCompact: an automatic one goes on with the turn.
+		if p.Source != "compact" {
+			u.State = fleetv1.AgentState_AGENT_STATE_IDLE
+		}
 	case "UserPromptSubmit":
 		u.State = fleetv1.AgentState_AGENT_STATE_WORKING
 	case "PreToolUse", "PostToolUse":
