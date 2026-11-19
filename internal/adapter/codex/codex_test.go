@@ -289,3 +289,43 @@ func TestAuthFile(t *testing.T) {
 		t.Errorf("AuthFile(/sb) = %q", got)
 	}
 }
+
+func TestLaunchInstructionsAndMCP(t *testing.T) {
+	bin := fakeCodex(t)
+	spec, err := New(bin, nil).Launch(context.Background(), adapter.LaunchRequest{
+		AgentID: "ag1", Cwd: "/work", Prompt: "work ROME-7", FleetBinary: "/usr/bin/fleet", StateDir: t.TempDir(),
+		Instructions: "Work the ticket.\n\"Ask\" when unsure.",
+		MCPServers:   []adapter.MCPServer{{Name: "rome", URL: "https://rome.example.com/mcp", TokenEnv: "ROME_TOKEN"}, {Name: "my.srv", URL: "http://x/mcp"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var overrides []string
+	for i, arg := range spec.Argv {
+		if arg == "-c" {
+			overrides = append(overrides, spec.Argv[i+1])
+		}
+	}
+	var cfg struct {
+		DeveloperInstructions string `toml:"developer_instructions"`
+		MCPServers            map[string]struct {
+			URL               string `toml:"url"`
+			BearerTokenEnvVar string `toml:"bearer_token_env_var"`
+		} `toml:"mcp_servers"`
+	}
+	if _, err := toml.Decode(strings.Join(overrides, "\n"), &cfg); err != nil {
+		t.Fatalf("%v\n%s", err, strings.Join(overrides, "\n"))
+	}
+	if cfg.DeveloperInstructions != "Work the ticket.\n\"Ask\" when unsure." {
+		t.Errorf("developer_instructions = %q", cfg.DeveloperInstructions)
+	}
+	if s := cfg.MCPServers["rome"]; s.URL != "https://rome.example.com/mcp" || s.BearerTokenEnvVar != "ROME_TOKEN" {
+		t.Errorf("rome = %+v", s)
+	}
+	if s := cfg.MCPServers["my.srv"]; s.URL != "http://x/mcp" || s.BearerTokenEnvVar != "" {
+		t.Errorf("my.srv = %+v (%v)", s, cfg.MCPServers)
+	}
+	if tail := spec.Argv[len(spec.Argv)-2:]; !slices.Equal(tail, []string{"--", "work ROME-7"}) {
+		t.Errorf("tail %q", tail)
+	}
+}

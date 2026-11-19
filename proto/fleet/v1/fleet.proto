@@ -56,6 +56,12 @@ message ClientMessage {
     UpdateRequest update = 27;
     SetWorkDirRequest set_work_dir = 28;
 
+    // Task trackers ([[tasks]] in config.toml)
+    ListTaskSourcesRequest list_task_sources = 70;
+    StartTaskRequest start_task = 71;
+    SetupTaskSourceRequest setup_task_source = 72;
+    EditTasksRequest edit_tasks = 73;
+
     // Agents
     ListAgentsRequest list_agents = 30;
     RunAgentRequest run_agent = 31;
@@ -107,6 +113,11 @@ message ServerMessage {
     GetHostStatsResponse get_host_stats = 26;
     UpdateResponse update = 27;
     SetWorkDirResponse set_work_dir = 28;
+
+    ListTaskSourcesResponse list_task_sources = 70;
+    StartTaskResponse start_task = 71;
+    SetupTaskSourceResponse setup_task_source = 72;
+    EditTasksResponse edit_tasks = 73;
 
     ListAgentsResponse list_agents = 30;
     RunAgentResponse run_agent = 31;
@@ -570,6 +581,170 @@ message Agent {
   repeated QueuedMessage queue = 26;
   // The queue waits instead: an interrupted turn pauses it.
   bool queue_paused = 27;
+  // The ticket the agent was started for, unset if none.
+  AgentTask task = 28;
+}
+
+// The tickets of a task tracker an agent works ([[tasks]] in
+// config.toml): fleet started it on a batch of tickets assigned to the
+// tracker account, and sends it the news on them.
+message AgentTask {
+  // The [[tasks]] source's name and kind ("rome").
+  string source = 1;
+  string kind = 2;
+  // The first ticket's key ("ROME-42"), title and web page.
+  string key = 3;
+  string title = 4;
+  string url = 5;
+  // Every ticket's key, in the order the agent works them.
+  repeated string keys = 6;
+}
+
+message ListTaskSourcesRequest {}
+
+message ListTaskSourcesResponse {
+  repeated TaskSource sources = 1;
+}
+
+// A task tracker fleet takes work from, as the daemon sees it.
+message TaskSource {
+  string name = 1;
+  string kind = 2;
+  string url = 3;
+  // Off in config.toml (disabled = true).
+  bool disabled = 4;
+  // The tracker account's handle, empty until it answered.
+  string account = 5;
+  // What went wrong last, empty while polling works.
+  string error = 6;
+  // When the tracker last answered a poll (Unix ms), 0 if never.
+  int64 last_poll_ms = 7;
+  repeated TaskProject projects = 8;
+  // Keys of the tickets waiting for one of max_agents to be done.
+  repeated string waiting = 9;
+  int32 max_agents = 10;
+  // How many of its agents work right now.
+  int32 working = 11;
+  // The queue received from (Rome: the pull webhook, "whk_…"), empty
+  // until known.
+  string webhook = 12;
+  // Messages received whose work is not done yet (each leased meanwhile).
+  int32 in_flight = 13;
+}
+
+// Creates the source's queue (Rome: a pull webhook of the account with
+// collected delivery, for the events fleet acts on in the mapped
+// projects), unless the account has one.
+message SetupTaskSourceRequest {
+  string source = 1;
+  // A batch goes out quiet_minutes after its newest event, at the latest
+  // max_minutes after its oldest; 0 for the tracker's defaults.
+  uint32 quiet_minutes = 2;
+  uint32 max_minutes = 3;
+}
+
+message SetupTaskSourceResponse {
+  string webhook = 1;
+  // False when the account had a queue already.
+  bool created = 2;
+  // What else happened (its projects were brought in line with the mapped
+  // ones) or could not be done; empty if nothing.
+  string note = 3;
+}
+
+// Changes [[tasks]] in config.toml, which the daemon saves and applies at
+// once: a source whose connection changed (url, token, webhook, disabled)
+// restarts, other changes apply as it runs. Mapping or unmapping a project
+// also brings the queue's projects in line (see SetupTaskSourceRequest).
+message EditTasksRequest {
+  oneof op {
+    TaskSourceSpec add_source = 1;
+    // The source's name.
+    string remove_source = 2;
+    TaskProjectEdit map_project = 3;
+    TaskProjectRef unmap_project = 4;
+    TaskOption set_option = 5;
+  }
+}
+
+// A new [[tasks]] entry. The token must be readable by the daemon.
+message TaskSourceSpec {
+  // Default: kind.
+  string name = 1;
+  // Default "rome".
+  string kind = 2;
+  string url = 3;
+  // One of: a file holding the token, or an environment variable of the
+  // daemon. The token itself never travels.
+  string token_file = 4;
+  string token_env = 5;
+  string webhook = 6;
+}
+
+// Maps a project to a folder, or changes its mapping: unset fields stay as
+// they are, set ones (also to "") replace them. A new mapping needs path
+// or root; the folder must be inside a root.
+message TaskProjectEdit {
+  // The source; may be empty when there is one.
+  string source = 1;
+  string key = 2;
+  // Absolute, or relative to root.
+  optional string path = 3;
+  optional string root = 4;
+  optional string adapter = 5;
+  optional string model = 6;
+  optional string effort = 7;
+  optional string isolation = 8;
+  optional string sandbox = 9;
+  optional string instructions = 10;
+  // With set_args, args replace the project's (none clears them).
+  repeated string args = 11;
+  bool set_args = 12;
+}
+
+message TaskProjectRef {
+  string source = 1;
+  string key = 2;
+}
+
+// Sets an option of a source: url, token_file, token_env, webhook,
+// disabled, max_agents, adapter, model, effort, isolation, sandbox, args
+// or instructions. No value unsets it; args takes several.
+message TaskOption {
+  string source = 1;
+  string key = 2;
+  repeated string values = 3;
+}
+
+message EditTasksResponse {
+  repeated TaskSource sources = 1;
+  // What else happened or could not be done (the queue's projects), empty
+  // if nothing.
+  string note = 2;
+}
+
+// A tracker project mapped to a folder.
+message TaskProject {
+  string key = 1;
+  // The folder its tickets are worked in, as resolved; the configured
+  // path when it does not resolve.
+  string path = 2;
+  string adapter = 3;
+  // Why its tickets cannot start (the folder is outside every root, the
+  // adapter is unknown), empty if they can.
+  string error = 4;
+}
+
+// Starts an agent on a ticket now, as if it had just been assigned, or
+// returns the live agent already working it.
+message StartTaskRequest {
+  // The [[tasks]] source; may be empty when there is only one.
+  string source = 1;
+  string key = 2;
+}
+
+message StartTaskResponse {
+  Agent agent = 1;
 }
 
 // A message waiting in an agent's queue.

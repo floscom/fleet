@@ -983,6 +983,71 @@ effort the adapter does not offer);
   running or its adapter reports no activity state, an empty or too long
   message, a full queue); `NOT_FOUND` (agent, or no message with that id).
 
+**`ListTaskSourcesRequest{}` → `ListTaskSourcesResponse{sources}`**
+
+- The task trackers the daemon takes work from (`[[tasks]]` in
+  config.toml): `name`, `kind` ("rome"), `url`, `disabled`, the tracker
+  account's handle (`account`, empty until it answered), the queue it
+  receives from (`webhook`: Rome's pull webhook), the last error (`error`,
+  empty while receiving works), `last_poll_ms` (the last answer of the
+  queue), `max_agents`, how many of its agents are busy (`working`), the
+  batches received whose work is not done (`in_flight`), the keys of the
+  tickets waiting for an agent (`waiting`), and its projects (`key`, the
+  resolved folder `path`, `adapter`, and `error` when its tickets cannot
+  start).
+
+**`SetupTaskSourceRequest{source, quiet_minutes, max_minutes}` → `SetupTaskSourceResponse{webhook, created}`**
+
+- Creates the source's queue, unless the tracker account has one
+  (`created` false). For Rome that is a pull webhook of the account: format
+  batch, `only_mine`, the events the daemon acts on, the mapped projects,
+  collected delivery with `quiet_minutes` and `max_minutes` (0 for Rome's
+  defaults). `source` may be empty when there is one.
+- Errors: `NOT_FOUND` and `UNAVAILABLE` as for `StartTaskRequest`;
+  `INVALID_ARGUMENT` (the tracker refused it, or its kind cannot create a
+  queue).
+
+**`EditTasksRequest{add_source | remove_source | map_project | unmap_project | set_option}` → `EditTasksResponse{sources, note}`**
+
+- Changes `[[tasks]]` in config.toml; the daemon saves it and applies it
+  at once. A source whose connection changed (`url`, its token,
+  `webhook`, `disabled`) restarts, a new one starts, a removed one stops
+  (its leased batches go back to the tracker once their lease runs out),
+  and other changes apply to the next agents it starts. `sources` are the
+  sources afterwards, as `ListTaskSourcesRequest` reports them.
+- `add_source{name, kind, url, token_file | token_env, webhook}`: the
+  token must be readable by the daemon; it never travels itself.
+- `map_project{source, key, path, root, adapter, model, effort, isolation,
+  sandbox, instructions, args, set_args}` maps a project to a folder or
+  changes its mapping: fields left unset stay as they are; set ones (also
+  to "") replace them, and `args` only with `set_args`. A new mapping
+  needs `path` (absolute) or `root` (with `path` inside it); the folder
+  must be inside a root.
+- `set_option{source, key, values}`: `key` is one of url, token_file,
+  token_env, webhook, disabled, max_agents, adapter, model, effort,
+  isolation, sandbox, args, instructions; no value unsets it, only `args`
+  takes several.
+- Mapping and unmapping a project, and setting `webhook`, bring the
+  queue's projects in line with the mapped ones, unless it carries every
+  project; `note` says what happened, or why it could not.
+- Errors: `NOT_FOUND` (no such source, an unknown adapter);
+  `OUTSIDE_ROOTS`-like failures and every other invalid edit are
+  `INVALID_ARGUMENT`, and leave config.toml as it was.
+
+**`StartTaskRequest{source, key}` → `StartTaskResponse{agent}`**
+
+- Starts an agent on ticket `key` now, as if it had just been assigned to
+  the tracker account, ignoring `max_agents`; returns the live agent that
+  already works it, if any. `source` may be empty when there is one.
+- `Agent.task` (`source`, `kind`, `key`, `title` and `url` of the first
+  ticket, `keys` of all of them in the order worked) is set on agents the
+  daemon started for tickets, by this request or from a batch of the
+  queue.
+- Errors: `NOT_FOUND` (no such source, none set up); `INVALID_ARGUMENT`
+  (no key, its project is mapped to no folder, several sources and none
+  named); `UNAVAILABLE` (the source is disabled, has no token, or the
+  tracker refuses it); the errors of `RunAgentRequest`.
+
 `Agent.title` is what the conversation is about, for clients to list
 sessions by: the title the agent CLI gave it (Claude Code writes one into
 its transcript; the latest counts), else the start of the first message

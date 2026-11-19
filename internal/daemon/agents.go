@@ -101,6 +101,9 @@ type agentRec struct {
 	// AsideIdle is set while the agent does work between turns that
 	// began while it was not working (adapter.StateUpdate.AsideStart).
 	AsideIdle bool `json:"aside_idle,omitempty"`
+	// Task is the ticket of a task tracker the agent was started for
+	// (tasks.go), nil if none.
+	Task *agentTask `json:"task,omitempty"`
 
 	// limit is the usage limit that stopped the agent (limits.go).
 	limit *fleetv1.UsageLimit
@@ -166,6 +169,7 @@ func (a *agentRec) proto() *fleetv1.Agent {
 		Title:           a.Title,
 		Queue:           queueProto(a.Queue),
 		QueuePaused:     a.QueuePaused,
+		Task:            a.Task.proto(),
 	}
 }
 

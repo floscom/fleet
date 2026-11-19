@@ -113,6 +113,27 @@ func (c *conn) dispatch(id uint64, m *fleetv1.ClientMessage) error {
 			return err
 		}
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_SetWorkDir{SetWorkDir: &fleetv1.SetWorkDirResponse{WorkDir: w}}})
+	case *fleetv1.ClientMessage_ListTaskSources:
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_ListTaskSources{ListTaskSources: &fleetv1.ListTaskSourcesResponse{Sources: d.tasks.listSources()}}})
+	case *fleetv1.ClientMessage_StartTask:
+		a, err := d.tasks.startTask(c.ctx, msg.StartTask.GetSource(), msg.StartTask.GetKey())
+		if err != nil {
+			return err
+		}
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_StartTask{StartTask: &fleetv1.StartTaskResponse{Agent: a}}})
+	case *fleetv1.ClientMessage_SetupTaskSource:
+		r := msg.SetupTaskSource
+		hook, created, note, err := d.tasks.setupQueue(c.ctx, r.GetSource(), time.Duration(r.GetQuietMinutes())*time.Minute, time.Duration(r.GetMaxMinutes())*time.Minute)
+		if err != nil {
+			return err
+		}
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_SetupTaskSource{SetupTaskSource: &fleetv1.SetupTaskSourceResponse{Webhook: hook, Created: created, Note: note}}})
+	case *fleetv1.ClientMessage_EditTasks:
+		r, err := d.editTasks(c.ctx, msg.EditTasks)
+		if err != nil {
+			return err
+		}
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_EditTasks{EditTasks: r}})
 	case *fleetv1.ClientMessage_AddRoot:
 		r, err := d.addRoot(msg.AddRoot)
 		if err != nil {

@@ -33,6 +33,10 @@ const ID = "claude"
 // SettingsFile is the name of the generated settings file in the state dir.
 const SettingsFile = "claude-settings.json"
 
+// MCPConfigFile is the name of the generated --mcp-config file in the
+// state dir.
+const MCPConfigFile = "claude-mcp.json"
+
 // unsetEnv is removed from the agent's environment.
 //
 //   - ANTHROPIC_API_KEY: when set, Claude Code bills that API key per token
@@ -65,7 +69,7 @@ func (c *claude) DisplayName() string { return "Claude Code" }
 
 // Capabilities: resume would need a session id in LaunchRequest.
 func (c *claude) Capabilities() adapter.Capabilities {
-	return adapter.Capabilities{ActivityState: true, InitialPrompt: true, InitialImages: true}
+	return adapter.Capabilities{ActivityState: true, InitialPrompt: true, InitialImages: true, Instructions: true, MCPServers: true}
 }
 
 func (c *claude) Detect(ctx context.Context) adapter.Detection { return c.bin.Detect(ctx) }
@@ -122,6 +126,22 @@ func (c *claude) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapte
 		argv = append(argv, "--session-id", sid)
 	}
 	argv = append(argv, "--settings", settings)
+	if len(req.MCPServers) > 0 {
+		file := filepath.Join(req.StateDir, MCPConfigFile)
+		if err := writeMCPConfig(file, req.MCPServers); err != nil {
+			return nil, fmt.Errorf("claude: %w", err)
+		}
+		argv = append(argv, "--mcp-config", file)
+		for _, s := range req.MCPServers {
+			if s.Trusted {
+				// A rule naming the server allows every tool it has.
+				argv = append(argv, "--allowedTools", "mcp__"+s.Name)
+			}
+		}
+	}
+	if req.Instructions != "" {
+		argv = append(argv, "--append-system-prompt", req.Instructions)
+	}
 	argv = append(argv, extra...)
 	if req.Model != "" {
 		argv = append(argv, "--model", req.Model)

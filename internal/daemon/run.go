@@ -56,9 +56,27 @@ func dim(v uint32, def int) int {
 	return min(int(v), maxDim)
 }
 
+// launchExtra is what the daemon itself adds to an agent's start, beyond
+// a client's RunAgentRequest: the ticket of a task tracker (tasks.go).
+type launchExtra struct {
+	task *agentTask
+	// env is set in the session.
+	env map[string]string
+	// instructions go into the system prompt, or before the prompt for
+	// adapters without Capabilities.Instructions.
+	instructions string
+	// mcp servers are given to adapters with Capabilities.MCPServers.
+	mcp []adapter.MCPServer
+}
+
 // run validates a RunAgentRequest, reserves the agent in the registry, then
 // creates its worktree or clone (if any) and tmux session.
 func (m *manager) run(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleetv1.Agent, error) {
+	return m.runWith(ctx, req, launchExtra{})
+}
+
+// runWith is run with what the daemon adds.
+func (m *manager) runWith(ctx context.Context, req *fleetv1.RunAgentRequest, x launchExtra) (*fleetv1.Agent, error) {
 	d := m.d
 	ad, ok := d.opts.Adapters.Get(req.GetAdapter())
 	if !ok {
@@ -176,6 +194,7 @@ func (m *manager) run(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleet
 		TmuxSession: tmux.SessionName(id), busy: true,
 		Sandbox: sb, CloneURL: cloneURL,
 		Model: req.GetModel(), Effort: req.GetEffort(),
+		Task: x.task,
 	}
 	if sb == sandboxDocker {
 		a.Container = containerName(cfg, id)
@@ -198,7 +217,7 @@ func (m *manager) run(ctx context.Context, req *fleetv1.RunAgentRequest) (*fleet
 	}
 	lctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
 	defer cancel()
-	res, err := m.launch(lctx, ad, rec, req, repo, trustDir, cfg)
+	res, err := m.launch(lctx, ad, rec, req, repo, trustDir, cfg, x)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -228,7 +247,7 @@ type launchResult struct {
 // launch creates the worktree or clone and the tmux session for a reserved
 // agent (wrapped in docker run when sandboxed), undoing the checkout on
 // failure.
-func (m *manager) launch(ctx context.Context, ad adapter.Adapter, a agentRec, req *fleetv1.RunAgentRequest, repo, trustDir string, cfg config.Config) (res launchResult, err error) {
+func (m *manager) launch(ctx context.Context, ad adapter.Adapter, a agentRec, req *fleetv1.RunAgentRequest, repo, trustDir string, cfg config.Config, x launchExtra) (res launchResult, err error) {
 	d := m.d
 	res.cwd = a.Cwd
 	sandboxed := a.Sandbox == sandboxDocker
@@ -297,20 +316,31 @@ func (m *manager) launch(ctx context.Context, ad adapter.Adapter, a agentRec, re
 	}
 
 	extra := append(slices.Clone(cfg.Adapters[ad.ID()].Args), req.GetExtraArgs()...)
+	prompt, instructions, mcp := req.GetPrompt(), x.instructions, x.mcp
+	caps := ad.Capabilities()
+	if instructions != "" && !caps.Instructions {
+		prompt = strings.TrimSpace(instructions + "\n\n" + prompt)
+		instructions = ""
+	}
+	if !caps.MCPServers {
+		mcp = nil
+	}
 	spec, err := ad.Launch(ctx, adapter.LaunchRequest{
-		AgentID:     a.ID,
-		AgentName:   a.Name,
-		Cwd:         res.cwd,
-		Prompt:      req.GetPrompt(),
-		Images:      images,
-		Model:       a.Model,
-		Effort:      a.Effort,
-		ExtraArgs:   extra,
-		FleetBinary: fleetBin,
-		StateDir:    stateDir,
-		TrustDir:    trustDir,
-		Sandbox:     sandboxed,
-		Home:        home,
+		AgentID:      a.ID,
+		AgentName:    a.Name,
+		Cwd:          res.cwd,
+		Prompt:       prompt,
+		Instructions: instructions,
+		MCPServers:   mcp,
+		Images:       images,
+		Model:        a.Model,
+		Effort:       a.Effort,
+		ExtraArgs:    extra,
+		FleetBinary:  fleetBin,
+		StateDir:     stateDir,
+		TrustDir:     trustDir,
+		Sandbox:      sandboxed,
+		Home:         home,
 	})
 	if err != nil {
 		return res, errf(codeUnavailable, "%s: %v", ad.ID(), err)
@@ -319,6 +349,9 @@ func (m *manager) launch(ctx context.Context, ad adapter.Adapter, a agentRec, re
 		return res, fmt.Errorf("adapter %s returned an empty command", ad.ID())
 	}
 	env := map[string]string{}
+	for k, v := range x.env {
+		env[k] = v
+	}
 	for k, v := range spec.Env {
 		env[k] = v
 	}

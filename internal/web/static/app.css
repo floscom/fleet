@@ -434,6 +434,8 @@ textarea.input { height: auto; padding: 8px 11px; resize: vertical; line-height:
 .chip.bad { color: var(--red); background: var(--red-soft); border-color: transparent; }
 .chip.merged { color: var(--violet); background: var(--violet-soft); border-color: transparent; }
 .chip.limit { color: var(--orange); background: var(--orange-soft); border-color: transparent; }
+a.chip.task-link { text-decoration: none; }
+a.chip.task-link:hover { color: var(--fg); border-color: var(--line-ctl); }
 .chip.wf { color: var(--violet); background: var(--violet-soft); border-color: transparent; }
 .chip.plain { background: transparent; }
 

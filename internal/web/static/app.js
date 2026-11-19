@@ -920,11 +920,22 @@
     return h('span', { class: 'mini-bar', 'aria-hidden': 'true' }, bars.slice(0, 12).map((s) => h('span', s === 'running' || s === 'failed' ? s : 'done')));
   }
 
+  // taskChip names the tracker ticket an agent works (the row is a link
+  // already, so it is no link itself).
+  function taskChip(t) {
+    return h('span', { class: 'chip mono', title: taskTitle(t) }, icon('ticket'), taskLabel(t));
+  }
+
+  // taskLabel is the first ticket's key, and how many more the agent works.
+  const taskLabel = (t) => t.key + ((t.keys || []).length > 1 ? ` +${t.keys.length - 1}` : '');
+  const taskTitle = (t) => ((t.keys || []).length > 1 ? t.keys.join(', ') + '\n' : '') + (t.title ? `${t.key}: ${t.title}` : t.key);
+
   function rowChips(a) {
     const prs = a.pullRequests || [];
     const open = prs.filter(prOpen);
     const shown = (open.length ? open : prs.slice(-1)).slice(-2);
-    return shown.length ? h('div', 'row-chips', shown.map(prChip)) : null;
+    const chips = [a.task ? taskChip(a.task) : null, ...shown.map(prChip)].filter(Boolean);
+    return chips.length ? h('div', 'row-chips', chips) : null;
   }
 
   function sessionRow({ a, host }) {
@@ -2071,6 +2082,13 @@
         !g.upstream && g.branch && !isFinished(a) ? h('span', 'muted', 'not pushed') : null] : 'Pull requests'));
     }
     for (const p of (a.pullRequests || []).filter(prOpen).slice(-2)) meta.push(h('span', 'hide-phone', prChip(p)));
+    if (a.task) {
+      const t = a.task;
+      meta.push(/^https?:/i.test(t.url || '')
+        ? h('a', { class: 'chip mono task-link', href: t.url, target: '_blank', rel: 'noopener noreferrer', title: 'Open ' + taskTitle(t),
+          onclick: (ev) => { ev.preventDefault(); openOut(t.url); } }, icon('ticket'), taskLabel(t))
+        : taskChip(t));
+    }
 
     const acts = [];
     if (!small()) {

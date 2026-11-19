@@ -17,6 +17,7 @@
 //	sandbox/           what Docker sandboxes mount ([sandbox] dir, see SandboxConfig)
 //	skills/            skills shared with the fleet, linked into each agent CLI (package skills)
 //	skills.json        what is known of each shared skill, deleted ones included
+//	tasks.json         where each task source's polling stands, tickets waiting (package tasks)
 //	teams/<team id>/   a team this daemon created or joined (package gateway, 0700):
 //	  member-key.json  this fleet's member key in the team (0600)
 //	  state.json       trusted roster, team keys, invite secrets, subscriptions (0600)
@@ -79,6 +80,8 @@ type Config struct {
 	// Limits configures what happens to agents stopped by a usage limit
 	// ([limits]).
 	Limits LimitsConfig `toml:"limits,omitempty"`
+	// Tasks are the task trackers fleet takes work from ([[tasks]]).
+	Tasks []TaskSource `toml:"tasks,omitempty"`
 }
 
 // DefaultResumeMessage is what is typed into a session to resume it once
@@ -291,6 +294,9 @@ func Load() (*Config, error) {
 	case "", "none", "docker":
 	default:
 		return nil, fmt.Errorf("config.toml: [sandbox] default must be \"none\" or \"docker\", not %q", c.Sandbox.Default)
+	}
+	if err := c.checkTasks(); err != nil {
+		return nil, fmt.Errorf("config.toml: %w", err)
 	}
 	c.applyDefaults()
 	return c, nil

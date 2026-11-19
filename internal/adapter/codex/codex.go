@@ -61,7 +61,7 @@ func (c *codex) DisplayName() string { return "Codex" }
 
 // Capabilities: resume would need a session id in LaunchRequest.
 func (c *codex) Capabilities() adapter.Capabilities {
-	return adapter.Capabilities{ActivityState: true, InitialPrompt: true, InitialImages: true}
+	return adapter.Capabilities{ActivityState: true, InitialPrompt: true, InitialImages: true, Instructions: true, MCPServers: true}
 }
 
 func (c *codex) Detect(ctx context.Context) adapter.Detection { return c.bin.Detect(ctx) }
@@ -90,6 +90,12 @@ func (c *codex) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapter
 	if req.TrustDir != "" {
 		argv = append(argv, "-c", TrustOverride(req.TrustDir))
 	}
+	for _, s := range req.MCPServers {
+		argv = append(argv, MCPOverrides(s)...)
+	}
+	if req.Instructions != "" {
+		argv = append(argv, "-c", "developer_instructions="+tomlString(req.Instructions))
+	}
 	argv = append(argv, c.extraArgs...)
 	argv = append(argv, req.ExtraArgs...)
 	if req.Model != "" {
@@ -106,6 +112,31 @@ func (c *codex) Launch(ctx context.Context, req adapter.LaunchRequest) (*adapter
 		argv = append(argv, "--", req.Prompt)
 	}
 	return &adapter.LaunchSpec{Argv: argv}, nil
+}
+
+// MCPOverrides are the -c arguments that add the streamable HTTP MCP
+// server s, replacing one of the same name in config.toml. Codex reads its
+// bearer token from the environment variable s.TokenEnv.
+func MCPOverrides(s adapter.MCPServer) []string {
+	key := "mcp_servers." + tomlKey(s.Name)
+	out := []string{"-c", key + ".url=" + tomlString(s.URL)}
+	if s.TokenEnv != "" {
+		out = append(out, "-c", key+".bearer_token_env_var="+tomlString(s.TokenEnv))
+	}
+	return out
+}
+
+// tomlKey quotes k as a TOML key unless it is a bare one.
+func tomlKey(k string) string {
+	for _, r := range k {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			return tomlString(k)
+		}
+	}
+	if k == "" {
+		return `""`
+	}
+	return k
 }
 
 // TrustOverride is the -c value that marks dir as a trusted project.

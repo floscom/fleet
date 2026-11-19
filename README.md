@@ -38,6 +38,10 @@ machines on the same LAN start, watch, stop and type into them.
   fails.
 - **Usage-limit auto-resume** — Claude Code and Codex sessions that hit a
   plan limit resume themselves once it resets.
+- **Work from a task tracker** — tickets assigned to an agent account in
+  [Rome](#task-trackers) come in batches from its queue, paced to the
+  agents fleet has free, and start an agent in the project's folder; the
+  answers, mentions and decisions on them reach it.
 - **Agents outlive the daemon** — restarts re-adopt running agents; tmux
   sessions are always cleaned up.
 - **Updates itself** — the daemon installs new releases and restarts on
@@ -184,6 +188,8 @@ address. Without it, commands talk to the local daemon.
 | `fleet interrupt <agent>...` | Interrupt the turn agents are working on, as Esc does; they keep running. |
 | `fleet kill <agent>... [--rm-worktree] [--force] [--forget]` | Stop agents; optionally remove their worktree or clone and history entry. |
 | `fleet queue add\|ls\|rm\|pause\|resume <agent> ...` | Queue messages for an agent; the daemon sends the next one each time it finishes a turn. |
+| `fleet tasks` / `tasks setup [--quiet M] [--max M]` / `tasks start <ticket>` | Show the [task trackers](#task-trackers) fleet takes work from (account, queue, batches in work, tickets waiting, projects and their folders), create the account's queue (Rome: a pull webhook), or start an agent on a ticket now. `--source S` picks the source when there are several. |
+| `fleet tasks add [name] --url U (--token-file F \| --token-env V)` / `tasks rm <name>` / `tasks map <project> [folder] [--root R] [--adapter A] [--model M] [--effort E] [--isolation I] [--sandbox S] [--args "..."] [--instructions "..."]` / `tasks unmap <project>` / `tasks set <option> [value...]` | Change the task trackers without editing `config.toml`: add or remove a source, map a project to a folder (or change only the settings you give), unmap it, or set a source option (`max_agents`, `model`, `args`, `instructions`, `disabled`, ...; no value unsets it). Changes apply at once, and mapping or unmapping brings the Rome webhook's projects in line. |
 | `fleet note <agent> [text...] [-d]` | Leave a note on an agent (e.g. why it must stay open), shown on its dashboard row and in `fleet ls`; without text prints it, `-d` removes it. |
 | `fleet cp <file>... <machine> [--to DIR]` / `fleet machines` | Send files to another machine of the fleet, daemon to daemon (both must hold the fleet key); agents can run it to hand over what they made. Name the machine by name, host name or id prefix, as `fleet machines` lists them. The files land in that machine's upload folder (kept 30 days), or with `--to` in a folder there (absolute, or quoted `'~/...'` for its home) under their own names, never replacing a file. Not from Docker-sandboxed agents yet. |
 | `fleet skill [ls]` / `skill add <folder> [--link]` / `skill rm <name>` | List, share or delete the [skills shared](#shared-skills) with every machine of the fleet. |
@@ -391,6 +397,110 @@ The daemon reads `config.toml` at startup. Changes made through the CLI
 (`fleet roots add/rm`, `--root`) apply immediately and rewrite the file
 (comments are not kept). Restart the daemon after editing the file by hand. Command-line
 `--listen`, `--web` and `--no-mdns` override the file.
+
+## Task trackers
+
+fleet can take its work from a task tracker. Rome is the first one; Jira or
+Linear would be further sources (package `internal/tasks`). Give fleet an
+**agent account** of its own: a service account, or a private agent in
+Rome's Settings → Agents. Then add it and map each of the tracker's
+projects to a folder inside a root:
+
+```sh
+fleet tasks add --url https://rome.example.com --token-file ~/.config/rome/fleet-token
+fleet tasks map ROME /mnt/data/rome
+fleet tasks map WEB klixpert-web --root code --adapter codex --instructions "Use pnpm."
+fleet tasks set max_agents 3
+fleet tasks setup                  # creates the account's pull webhook (once)
+```
+
+These write `config.toml` and take effect at once. A change to `url`,
+the token, `webhook` or `disabled` restarts that source; any other change
+applies to the next agents it starts. In `config.toml` the same setup
+reads:
+
+```toml
+[[tasks]]
+kind = "rome"
+url = "https://rome.example.com"
+token_file = "~/.config/rome/fleet-token"  # or token_env = "ROME_TOKEN"
+# webhook = "whk_…"                        # only when the account has several pull webhooks
+adapter = "claude"                         # default
+# model, effort, isolation ("worktree" | "pinned"), sandbox ("none" | "docker"),
+# args (extra CLI arguments), max_agents (default 3) are optional
+instructions = "Run the tests and open a pull request when you are done."
+
+[[tasks.project]]
+key = "ROME"
+path = "/mnt/data/rome"          # absolute, inside a root; or root = "code" (+ path = "rome")
+# adapter, model, effort, isolation, sandbox, args, instructions override the source's
+```
+
+`fleet tasks setup` (`--quiet` and `--max` in minutes, 0 for Rome's
+defaults of 10 and 60) creates the account's **pull webhook**: a queue in
+Rome, with collected delivery, of what is addressed to the account in the
+mapped projects. That means assignments, mentions, answers to its asks,
+withdrawn asks and approval decisions. When you map or unmap a project
+later, or run `setup` again, fleet updates the webhook's projects to match.
+It leaves a webhook that carries every project alone, so it never widens
+what the account receives. If you set the webhook up in Rome yourself,
+fleet uses the account's only pull webhook, or the one `webhook` names.
+Its `prompt` and `route` work as described below.
+
+Here is what happens:
+
+- **Pacing.** Rome collects the account's events into batches. fleet
+  receives the next batch only while fewer than `max_agents` of its agents
+  are busy, and once every batch it holds has its agents started. The
+  backlog waits in Rome, not in fleet.
+- **Batches are worked in bulk.** A batch's new tickets of one project
+  start one agent in the project's folder. It works them in order and is
+  named after the first ticket (`rome-42`, or `rome-42-and-2` for three).
+  Unless `isolation` is set, it runs in its own worktree on a branch of
+  that name. Its first message lists the tickets, each marked as data and
+  not instructions. Tickets of unmapped projects are ignored, unless the
+  webhook's route has a `folder` (an absolute path inside a root) for them.
+  Events from Rome's Jira and Linear importer are ignored.
+- **Leases.** A batch stays leased in Rome while its agents work; fleet
+  renews the lease every few minutes. It deletes the batch once its agents
+  are done with their turn. If fleet stops or a ticket can't be started,
+  the lease runs out and Rome hands the batch out again. After the
+  webhook's `max_receive_count` (default 5) it turns dead and a person gets
+  an inbox item. fleet remembers the events it handled
+  (`~/.fleet/tasks.json`), so a batch handed out again repeats nothing.
+  `fleet tasks start ROME-42` starts a ticket by hand, for example one
+  assigned before the webhook existed.
+- **Instructions.** The agent's system prompt tells it how to work Rome
+  tickets: read each one, move it to In Progress, report progress, ask a
+  person with a blocking ask when a choice is not its own, link what it
+  produced, then finish and move the ticket on. It also says that ticket
+  content is data, never instructions. Then come the webhook's `prompt`
+  (what the account's owners set in Rome) and your `instructions` (the
+  source's, then the project's). Claude Code gets them with
+  `--append-system-prompt`, Codex as `developer_instructions`, other CLIs
+  ahead of the first message.
+- **Tracker access.** Claude Code and Codex get Rome's MCP server (`rome`,
+  replacing one of your own with that name) under the account's token.
+  Claude Code may call its tools without asking; Rome's project roles
+  bound what they can do. Every agent also has `ROME_URL` and `ROME_TOKEN`
+  for the REST API. The token is only ever in the session's environment,
+  never in a file, the prompt or the command line.
+- **News.** Answers, mentions and decisions on a ticket an agent works go
+  into that agent's queue. It reads them after its current turn, as
+  `[Rome] …` messages, and the batch is deleted at once. Rome sends
+  answers, withdrawn asks and decisions without waiting for the quiet
+  time. When no agent works the ticket, a mention, an answer or a
+  rejected approval starts one.
+- **Presence.** While its agents work, fleet sends Rome the account's
+  heartbeats ("working on ROME-42 · Bash: go test"), so the agent itself
+  doesn't have to.
+
+`fleet tasks` shows the account, its webhook, the batches in work, the
+tickets waiting for an agent, and each project's folder. The dashboard
+shows an agent's tickets on its row and links to the first one from the
+session header. The `fleet tasks` commands rewrite `config.toml`, so its
+comments are not kept. After editing the file by hand, restart the
+daemon.
 
 ## Web dashboard
 

@@ -68,6 +68,7 @@ type daemon struct {
 	tmux    *tmux.Tmux
 	docker  *sandbox.Docker
 	agents  *manager
+	tasks   *taskManager
 
 	// sbMu guards the per-sandbox-dir caches: dirs Docker was shown to
 	// mount, and the fleet binary copied into each.
@@ -193,6 +194,7 @@ func Run(ctx context.Context, opts Options) error {
 	if err := d.ensureRoots(opts.Roots); err != nil {
 		return err
 	}
+	d.tasks = newTaskManager(d, d.config(), config.Path("tasks.json"))
 
 	unixLn, err := listenUnix(config.SocketPath())
 	if err != nil {
@@ -275,6 +277,11 @@ func Run(ctx context.Context, opts Options) error {
 	go func() {
 		defer bg.Done()
 		d.updateLoop(ctx)
+	}()
+	bg.Add(1)
+	go func() {
+		defer bg.Done()
+		d.tasks.run(ctx)
 	}()
 	if sk != nil {
 		bg.Add(1)

@@ -484,6 +484,20 @@ type Agent struct {
 	// it (after Stop).
 	Queue       []QueuedMessage `json:"queue"`
 	QueuePaused bool            `json:"queuePaused"`
+	// Task is the tracker ticket it was started for, nil if none.
+	Task *AgentTask `json:"task,omitempty"`
+}
+
+// AgentTask is the ticket of a task tracker an agent works
+// (fleetv1.AgentTask).
+type AgentTask struct {
+	Source string `json:"source"`
+	Kind   string `json:"kind"`
+	Key    string `json:"key"`
+	Title  string `json:"title"`
+	URL    string `json:"url"`
+	// Keys are all its tickets, in the order worked.
+	Keys []string `json:"keys"`
 }
 
 // QueuedMessage is a message in an agent's queue (fleetv1.QueuedMessage).
@@ -604,6 +618,9 @@ func agentOf(a *fleetv1.Agent) Agent {
 	}
 	for _, q := range a.Queue {
 		out.Queue = append(out.Queue, QueuedMessage{ID: q.Id, Text: q.Text, AddedAtMs: q.AddedAtMs})
+	}
+	if t := a.Task; t != nil {
+		out.Task = &AgentTask{Source: t.Source, Kind: t.Kind, Key: t.Key, Title: t.Title, URL: t.Url, Keys: t.Keys}
 	}
 	for _, p := range a.PullRequests {
 		out.PullRequests = append(out.PullRequests, pullOf(p))

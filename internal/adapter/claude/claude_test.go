@@ -591,3 +591,42 @@ func TestWorkGone(t *testing.T) {
 		}
 	}
 }
+
+func TestLaunchInstructionsAndMCP(t *testing.T) {
+	bin := fakeClaude(t)
+	state := t.TempDir()
+	spec, err := New(bin, nil).Launch(context.Background(), adapter.LaunchRequest{
+		AgentID: "a1", Cwd: "/work", Prompt: "work ROME-7", FleetBinary: "/usr/bin/fleet", StateDir: state,
+		Instructions: "Work the ticket.\nAsk when unsure.",
+		MCPServers:   []adapter.MCPServer{{Name: "rome", URL: "https://rome.example.com/mcp", TokenEnv: "ROME_TOKEN", Trusted: true}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(state, MCPConfigFile)
+	want := []string{bin, "--session-id", spec.SessionID, "--settings", filepath.Join(state, SettingsFile),
+		"--mcp-config", file, "--allowedTools", "mcp__rome", "--append-system-prompt", "Work the ticket.\nAsk when unsure.", "--", "work ROME-7"}
+	if !slices.Equal(spec.Argv, want) {
+		t.Errorf("Argv =\n %q\nwant\n %q", spec.Argv, want)
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		MCPServers map[string]struct {
+			Type, URL string
+			Headers   map[string]string
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	s := doc.MCPServers["rome"]
+	if s.Type != "http" || s.URL != "https://rome.example.com/mcp" || s.Headers["Authorization"] != "Bearer ${ROME_TOKEN}" {
+		t.Errorf("mcp config = %s", b)
+	}
+	if fi, err := os.Stat(file); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, %v; want 0600", fi.Mode(), err)
+	}
+}

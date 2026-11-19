@@ -222,3 +222,31 @@ func (c *Client) Update(ctx context.Context, req *fleetv1.UpdateRequest) (*fleet
 	}
 	return r.GetStatus(), nil
 }
+
+// ListTaskSources returns the task trackers the daemon takes work from.
+func (c *Client) ListTaskSources(ctx context.Context) ([]*fleetv1.TaskSource, error) {
+	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_ListTaskSources{ListTaskSources: &fleetv1.ListTaskSourcesRequest{}}},
+		(*fleetv1.ServerMessage).GetListTaskSources)
+	return r.GetSources(), err
+}
+
+// StartTask starts an agent on ticket key of task source source ("" when
+// there is one), or returns the live agent working it.
+func (c *Client) StartTask(ctx context.Context, source, key string) (*fleetv1.Agent, error) {
+	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_StartTask{StartTask: &fleetv1.StartTaskRequest{Source: source, Key: key}}},
+		(*fleetv1.ServerMessage).GetStartTask)
+	return r.GetAgent(), err
+}
+
+// SetupTaskSource creates the queue of task source source ("" when there
+// is one) unless it has one, and returns it.
+func (c *Client) SetupTaskSource(ctx context.Context, in *fleetv1.SetupTaskSourceRequest) (*fleetv1.SetupTaskSourceResponse, error) {
+	return unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_SetupTaskSource{SetupTaskSource: in}},
+		(*fleetv1.ServerMessage).GetSetupTaskSource)
+}
+
+// EditTasks changes the daemon's task sources ([[tasks]]) and returns them.
+func (c *Client) EditTasks(ctx context.Context, in *fleetv1.EditTasksRequest) (*fleetv1.EditTasksResponse, error) {
+	return unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_EditTasks{EditTasks: in}},
+		(*fleetv1.ServerMessage).GetEditTasks)
+}

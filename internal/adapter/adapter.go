@@ -345,6 +345,11 @@ type Capabilities struct {
 	Resume        bool
 	// InitialImages: LaunchRequest.Images are attached to the prompt.
 	InitialImages bool
+	// Instructions: LaunchRequest.Instructions go into the agent's system
+	// prompt. Without it the daemon puts them before the prompt.
+	Instructions bool
+	// MCPServers: the agent gets LaunchRequest.MCPServers.
+	MCPServers bool
 }
 
 // Proto converts to the wire type.
@@ -379,6 +384,15 @@ type LaunchRequest struct {
 	// Images are paths of image files to attach to Prompt, for adapters
 	// with InitialImages.
 	Images []string
+	// Instructions are added to the agent's system prompt, for adapters
+	// with Capabilities.Instructions: what fleet tells the agent about the
+	// work it was started for (a ticket of a task tracker, see package
+	// tasks), kept apart from the prompt.
+	Instructions string
+	// MCPServers are MCP servers the agent gets for this session only, for
+	// adapters with Capabilities.MCPServers. A server of the same name in
+	// the user's own CLI config is replaced.
+	MCPServers []MCPServer
 	// Model and Effort are the model and reasoning effort to run at, for
 	// Modelers: IDs from Models (Model may also be any name the CLI takes).
 	// "" leaves it to the CLI's own default.
@@ -405,6 +419,18 @@ type LaunchRequest struct {
 	// directory (HOME inside a sandbox). Per-user config the adapter writes,
 	// such as folder trust, goes there instead of the daemon user's home.
 	Home string
+}
+
+// MCPServer is a streamable HTTP MCP server.
+type MCPServer struct {
+	Name, URL string
+	// TokenEnv names the environment variable holding the bearer token
+	// sent to the server (the daemon sets it in the session); "" sends
+	// none. The token itself never goes into a file or the command line.
+	TokenEnv string
+	// Trusted: the agent may call the server's tools without asking for
+	// permission each time (what they may do is up to the server).
+	Trusted bool
 }
 
 // LaunchSpec is the command the daemon runs in tmux.

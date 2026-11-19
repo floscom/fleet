@@ -177,6 +177,8 @@ type env struct {
 	// version and binary are Options.Version and FleetBinary for the next
 	// start: "test" and /bin/true when empty.
 	version, binary string
+	// adapters are added to the registry from the next start on.
+	adapters []adapter.Adapter
 }
 
 func newEnv(t *testing.T) *env {
@@ -241,8 +243,9 @@ func (e *env) start() {
 	ctx, cancel := context.WithCancel(context.Background())
 	e.cancel, e.done = cancel, make(chan error, 1)
 	version, binary := cmp.Or(e.version, "test"), cmp.Or(e.binary, "/bin/true")
+	ads := append([]adapter.Adapter{testAdapter{}, unavailableAdapter{}, modelAdapter{}, limitAdapter{}, pullAdapter{}}, e.adapters...)
 	opts := Options{
-		Adapters:    adapter.NewRegistry(testAdapter{}, unavailableAdapter{}, modelAdapter{}, limitAdapter{}, pullAdapter{}),
+		Adapters:    adapter.NewRegistry(ads...),
 		Version:     version,
 		FleetBinary: binary,
 		Listen:      e.listen,

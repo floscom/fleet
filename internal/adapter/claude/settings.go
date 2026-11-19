@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"fleet/internal/adapter"
 	"fleet/internal/adapter/hookcmd"
 )
 
@@ -72,7 +73,32 @@ func BuildSettings(fleetBinary, agentID string) Settings {
 
 // writeSettings writes BuildSettings to path atomically (mode 0600).
 func writeSettings(path, fleetBinary, agentID string) error {
-	data, err := json.MarshalIndent(BuildSettings(fleetBinary, agentID), "", "  ")
+	return writeJSON(path, BuildSettings(fleetBinary, agentID))
+}
+
+// BuildMCPConfig returns the --mcp-config document for servers. A token is
+// referenced as ${ENV}, which Claude Code expands from its environment, so
+// it is never written down.
+func BuildMCPConfig(servers []adapter.MCPServer) map[string]any {
+	ms := map[string]any{}
+	for _, s := range servers {
+		srv := map[string]any{"type": "http", "url": s.URL}
+		if s.TokenEnv != "" {
+			srv["headers"] = map[string]string{"Authorization": "Bearer ${" + s.TokenEnv + "}"}
+		}
+		ms[s.Name] = srv
+	}
+	return map[string]any{"mcpServers": ms}
+}
+
+// writeMCPConfig writes BuildMCPConfig to path atomically (mode 0600).
+func writeMCPConfig(path string, servers []adapter.MCPServer) error {
+	return writeJSON(path, BuildMCPConfig(servers))
+}
+
+// writeJSON writes v as indented JSON to path atomically (mode 0600).
+func writeJSON(path string, v any) error {
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
