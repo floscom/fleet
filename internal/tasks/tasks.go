@@ -57,10 +57,13 @@ type Event struct {
 type Issue struct {
 	Key, Title, URL, Project string
 	Type, Status, Priority   string
-	Reporter                 string
-	Labels                   []string
-	Parent                   string
-	Description              string
+	// Done: its status counts as done (Rome: the done category, Cancelled
+	// included).
+	Done        bool
+	Reporter    string
+	Labels      []string
+	Parent      string
+	Description string
 }
 
 // Message is a batch of events handed out by a Source's queue.

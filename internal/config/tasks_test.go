@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func writeConfig(t *testing.T, body string) {
@@ -46,8 +47,13 @@ instructions = "Use pnpm."
 		t.Fatal(err)
 	}
 	src := c.Tasks[0]
-	if src.SourceName() != "rome" || src.MaxAgentsOrDefault() != DefaultTaskMaxAgents {
+	if src.SourceName() != "rome" || src.MaxAgentsOrDefault() != DefaultTaskMaxAgents || src.CloseAfterOrDefault() != DefaultTaskCloseAfter {
 		t.Errorf("source = %+v", src)
+	}
+	for v, want := range map[string]time.Duration{"": time.Hour, "30m": 30 * time.Minute, " 1h30m ": 90 * time.Minute, "off": 0, "0": 0} {
+		if got := (TaskSource{CloseAfter: v}).CloseAfterOrDefault(); got != want {
+			t.Errorf("close_after %q = %v, want %v", v, got, want)
+		}
 	}
 	if s, err := src.Secret(); err != nil || s != "rome_sat_x" {
 		t.Errorf("Secret() = %q, %v", s, err)
@@ -107,6 +113,14 @@ path = "/b"`, "listed twice"},
 kind = "rome"
 url = "https://a"
 isolation = "clone"`, "isolation must be"},
+		{`[[tasks]]
+kind = "rome"
+url = "https://a"
+close_after = "never"`, "close_after is a duration"},
+		{`[[tasks]]
+kind = "rome"
+url = "https://a"
+close_after = "-1h"`, "close_after is a duration"},
 		{`[[tasks]]
 kind = "rome"
 url = "https://a"
@@ -171,6 +185,9 @@ func TestEditTasks(t *testing.T) {
 		check  func(TaskSource) bool
 	}{
 		{"max_agents", []string{"5"}, func(s TaskSource) bool { return s.MaxAgents == 5 }},
+		{"close_after", []string{"30m"}, func(s TaskSource) bool { return s.CloseAfterOrDefault() == 30*time.Minute }},
+		{"close_after", []string{"off"}, func(s TaskSource) bool { return s.CloseAfter == "off" && s.CloseAfterOrDefault() == 0 }},
+		{"close_after", nil, func(s TaskSource) bool { return s.CloseAfter == "" && s.CloseAfterOrDefault() == time.Hour }},
 		{"disabled", []string{"true"}, func(s TaskSource) bool { return s.Disabled }},
 		{"disabled", nil, func(s TaskSource) bool { return !s.Disabled }},
 		{"model", []string{"sonnet"}, func(s TaskSource) bool { return s.Model == "sonnet" }},
@@ -183,7 +200,7 @@ func TestEditTasks(t *testing.T) {
 			t.Errorf("set %s %v: %v, %+v", tt.key, tt.values, err, c.Tasks[0])
 		}
 	}
-	for _, bad := range [][]string{{"isolation", "clone"}, {"max_agents", "x"}, {"color", "red"}, {"url", "a", "b"}} {
+	for _, bad := range [][]string{{"isolation", "clone"}, {"max_agents", "x"}, {"close_after", "soon"}, {"color", "red"}, {"url", "a", "b"}} {
 		if err := c.SetTaskOption("", bad[0], bad[1:]); err == nil {
 			t.Errorf("set %v was accepted", bad)
 		}

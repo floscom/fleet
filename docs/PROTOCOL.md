@@ -990,7 +990,9 @@ effort the adapter does not offer);
   account's handle (`account`, empty until it answered), the queue it
   receives from (`webhook`: Rome's pull webhook), the last error (`error`,
   empty while receiving works), `last_poll_ms` (the last answer of the
-  queue), `max_agents`, how many of its agents are busy (`working`), the
+  queue), `max_agents`, `close_after_ms` (how long an agent whose tickets
+  are all done stays idle before the daemon archives it; 0 when such
+  agents stay open), how many of its agents are busy (`working`), the
   batches received whose work is not done (`in_flight`), the keys of the
   tickets waiting for an agent (`waiting`), and its projects (`key`, the
   resolved folder `path`, `adapter`, and `error` when its tickets cannot
@@ -1024,9 +1026,9 @@ effort the adapter does not offer);
   needs `path` (absolute) or `root` (with `path` inside it); the folder
   must be inside a root.
 - `set_option{source, key, values}`: `key` is one of url, token_file,
-  token_env, webhook, disabled, max_agents, adapter, model, effort,
-  isolation, sandbox, args, instructions; no value unsets it, only `args`
-  takes several.
+  token_env, webhook, disabled, max_agents, close_after (a duration such
+  as "1h", or "off"), adapter, model, effort, isolation, sandbox, args,
+  instructions; no value unsets it, only `args` takes several.
 - Mapping and unmapping a project, and setting `webhook`, bring the
   queue's projects in line with the mapped ones, unless it carries every
   project; `note` says what happened, or why it could not.

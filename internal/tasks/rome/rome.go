@@ -724,7 +724,8 @@ func (s *Source) Issue(ctx context.Context, key string) (tasks.Issue, error) {
 		Title    string `json:"title"`
 		Priority string `json:"priority"`
 		Status   struct {
-			Name string `json:"name"`
+			Name     string `json:"name"`
+			Category string `json:"category"`
 		} `json:"status"`
 		Project struct {
 			Key string `json:"key"`
@@ -739,7 +740,7 @@ func (s *Source) Issue(ctx context.Context, key string) (tasks.Issue, error) {
 	}
 	is := tasks.Issue{
 		Key: out.Key, Title: out.Title, URL: s.base + "/" + url.PathEscape(out.Key), Project: out.Project.Key,
-		Type: out.Type, Status: out.Status.Name, Priority: out.Priority,
+		Type: out.Type, Status: out.Status.Name, Done: out.Status.Category == "done", Priority: out.Priority,
 		Reporter: out.Reporter.who(), Labels: out.Labels, Description: out.Description,
 	}
 	if out.Parent != nil {

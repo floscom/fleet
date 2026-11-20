@@ -169,7 +169,7 @@ func (c *Config) UnmapTaskProject(source, key string) error {
 
 // TaskOptions are the settings SetTaskOption changes.
 var TaskOptions = []string{
-	"url", "token_file", "token_env", "webhook", "disabled", "max_agents",
+	"url", "token_file", "token_env", "webhook", "disabled", "max_agents", "close_after",
 	"adapter", "model", "effort", "isolation", "sandbox", "args", "instructions",
 }
 
@@ -197,7 +197,7 @@ func (c *Config) SetTaskOption(source, key string, values []string) error {
 			v = strings.TrimSpace(values[0])
 		}
 		str := map[string]*string{
-			"url": &s.URL, "webhook": &s.Webhook, "adapter": &s.Adapter, "model": &s.Model, "effort": &s.Effort,
+			"url": &s.URL, "webhook": &s.Webhook, "close_after": &s.CloseAfter, "adapter": &s.Adapter, "model": &s.Model, "effort": &s.Effort,
 			"isolation": &s.Isolation, "sandbox": &s.Sandbox, "instructions": &s.Instructions,
 		}
 		switch key {

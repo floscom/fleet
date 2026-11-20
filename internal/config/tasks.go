@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // TaskKinds are the task trackers fleet can take work from (package
@@ -16,6 +17,10 @@ var TaskKinds = []string{"rome"}
 // DefaultTaskMaxAgents is how many agents of one task source may work at
 // the same time when max_agents is not set.
 const DefaultTaskMaxAgents = 3
+
+// DefaultTaskCloseAfter is how long an agent whose tickets are all done
+// stays idle before fleet closes it, when close_after is not set.
+const DefaultTaskCloseAfter = time.Hour
 
 // TaskSource is a [[tasks]] entry: a task tracker (Rome; later Jira or
 // Linear) fleet takes work from, out of its account's queue (Rome: a pull
@@ -58,6 +63,11 @@ type TaskSource struct {
 	// next batch is received only while fewer work. Default
 	// DefaultTaskMaxAgents.
 	MaxAgents int `toml:"max_agents,omitempty"`
+	// CloseAfter is how long an agent whose tickets are all done (Done or
+	// Cancelled) may stay idle before fleet closes it, as the dashboard's
+	// Archive does: a duration ("1h", "30m"), or "off" to leave such agents
+	// open. Default DefaultTaskCloseAfter.
+	CloseAfter string `toml:"close_after,omitempty"`
 	// TaskAgent holds the defaults for every project of the source.
 	TaskAgent
 	Projects []TaskProject `toml:"project"`
@@ -117,6 +127,30 @@ func (t TaskSource) MaxAgentsOrDefault() int {
 		return DefaultTaskMaxAgents
 	}
 	return t.MaxAgents
+}
+
+// CloseAfterOrDefault returns CloseAfter as a duration:
+// DefaultTaskCloseAfter when it is unset, 0 for "off" (never close).
+func (t TaskSource) CloseAfterOrDefault() time.Duration {
+	d, err := parseCloseAfter(t.CloseAfter)
+	if err != nil {
+		return 0 // checkTasks refuses it; keeping agents open is the safe side
+	}
+	return d
+}
+
+func parseCloseAfter(v string) (time.Duration, error) {
+	switch v = strings.TrimSpace(v); v {
+	case "":
+		return DefaultTaskCloseAfter, nil
+	case "off":
+		return 0, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("close_after is a duration such as \"1h\" or \"30m\", or \"off\", not %q", v)
+	}
+	return d, nil
 }
 
 // Project returns the project with key (case-insensitive).
@@ -217,6 +251,9 @@ func (c *Config) checkTasks() error {
 		names[name] = true
 		if !strings.HasPrefix(t.URL, "https://") && !strings.HasPrefix(t.URL, "http://") {
 			return fmt.Errorf("%s (%s): url must start with https:// or http://, not %q", where, name, t.URL)
+		}
+		if _, err := parseCloseAfter(t.CloseAfter); err != nil {
+			return fmt.Errorf("%s (%s): %w", where, name, err)
 		}
 		if err := checkTaskAgent(t.TaskAgent); err != nil {
 			return fmt.Errorf("%s (%s): %w", where, name, err)

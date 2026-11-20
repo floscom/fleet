@@ -60,6 +60,9 @@ var (
 	// taskIdleDone: an agent never seen busy counts as done once it idled
 	// this long after its start.
 	taskIdleDone = 2 * time.Minute
+	// taskCloseCheck is how often the tickets of an agent idle for its
+	// source's close_after are looked up (closeDone).
+	taskCloseCheck = 5 * time.Minute
 	// taskRetry is the first wait after a failed receive; it doubles up
 	// to taskRetryMax. A refused token or a missing queue waits
 	// taskAuthRetry (`fleet tasks setup` ends that wait).
@@ -119,6 +122,9 @@ func (t *agentTask) works(source, key string) bool {
 // taskState is tasks.json.
 type taskState struct {
 	Sources map[string]*sourceState `json:"sources"`
+	// Idle is since when each live agent started for tickets has been
+	// idle (Unix ms), by agent ID (closeDone).
+	Idle map[string]int64 `json:"idle,omitempty"`
 }
 
 // sourceState is where a source stands.
@@ -208,13 +214,15 @@ type taskManager struct {
 	ctx     context.Context
 	sources []*taskSource
 	state   taskState
+	// checked is when closeDone last looked up an agent's tickets.
+	checked map[string]time.Time
 	// startMu serializes starting agents for tickets.
 	startMu sync.Mutex
 }
 
 // newTaskManager sets up the sources of cfg.
 func newTaskManager(d *daemon, cfg config.Config, path string) *taskManager {
-	t := &taskManager{d: d, path: path}
+	t := &taskManager{d: d, path: path, checked: map[string]time.Time{}}
 	t.load()
 	for _, c := range cfg.Tasks {
 		t.sources = append(t.sources, t.newSourceLocked(c))
@@ -321,7 +329,7 @@ func (t *taskManager) reconfigure(entries []config.TaskSource) {
 }
 
 func (t *taskManager) load() {
-	t.state = taskState{Sources: map[string]*sourceState{}}
+	t.state = taskState{Sources: map[string]*sourceState{}, Idle: map[string]int64{}}
 	b, err := os.ReadFile(t.path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return
@@ -335,6 +343,9 @@ func (t *taskManager) load() {
 	}
 	if t.state.Sources == nil {
 		t.state.Sources = map[string]*sourceState{}
+	}
+	if t.state.Idle == nil {
+		t.state.Idle = map[string]int64{}
 	}
 	for name, st := range t.state.Sources {
 		if st == nil {
@@ -387,6 +398,7 @@ func (t *taskManager) run(ctx context.Context) {
 			t.startPending(ctx)
 			t.finish(ctx)
 			t.heartbeats(ctx)
+			t.closeDone(ctx)
 		}
 	}
 	t.wg.Wait()
@@ -862,6 +874,83 @@ func (t *taskManager) finish(ctx context.Context) {
 	}
 }
 
+// closeDone closes the agents whose tickets are all done once they have
+// been idle for their source's close_after. It archives them as the
+// dashboard does: the session ends, its chat and its worktree stay. An
+// agent with a ticket that is not done, or that cannot be looked up, stays.
+func (t *taskManager) closeDone(ctx context.Context) {
+	now := time.Now()
+	live := t.d.agents.taskAgents()
+	type closer struct {
+		src   tasks.Source
+		after time.Duration // 0: never
+	}
+	t.mu.Lock()
+	srcs := map[string]closer{}
+	for _, ts := range t.sources {
+		if ts.src != nil {
+			srcs[ts.conf().SourceName()] = closer{ts.src, ts.conf().CloseAfterOrDefault()}
+		}
+	}
+	changed := false
+	var due []taskIdler
+	for _, a := range live {
+		since, ok := t.state.Idle[a.ID]
+		switch {
+		case !a.Idle:
+			if ok {
+				delete(t.state.Idle, a.ID)
+				changed = true
+			}
+			delete(t.checked, a.ID)
+		case !ok:
+			t.state.Idle[a.ID], changed = now.UnixMilli(), true
+		case srcs[a.Source].after > 0 && now.Sub(time.UnixMilli(since)) >= srcs[a.Source].after &&
+			now.Sub(t.checked[a.ID]) >= taskCloseCheck:
+			t.checked[a.ID] = now
+			due = append(due, a)
+		}
+	}
+	for id := range t.state.Idle {
+		if !slices.ContainsFunc(live, func(a taskIdler) bool { return a.ID == id }) {
+			delete(t.state.Idle, id)
+			delete(t.checked, id)
+			changed = true
+		}
+	}
+	if changed {
+		t.saveLocked()
+	}
+	t.mu.Unlock()
+	for _, a := range due {
+		c := srcs[a.Source]
+		if !t.ticketsDone(ctx, c.src, a) || !t.d.agents.taskAgentIdle(a.ID) {
+			continue
+		}
+		log := t.d.log.With("source", a.Source, "agent", a.ID, "tickets", strings.Join(a.Keys, " "))
+		if _, err := t.d.agents.kill(ctx, &fleetv1.KillAgentRequest{Agent: a.ID}); err != nil {
+			log.Warn("could not close a task agent whose tickets are done", "err", err)
+			continue
+		}
+		log.Info("closed a task agent: its tickets are done and it was idle", "close_after", c.after)
+	}
+}
+
+// ticketsDone reports whether every ticket of a is done.
+func (t *taskManager) ticketsDone(ctx context.Context, src tasks.Source, a taskIdler) bool {
+	for _, key := range a.Keys {
+		is, err := src.Issue(ctx, key)
+		if err != nil {
+			t.d.log.Debug("could not look up a ticket to close its agent", "source", a.Source, "issue", key, "err", err)
+			return false
+		}
+		if !is.Done {
+			return false
+		}
+	}
+	return true
+}
+
 // heartbeats tells each tracker what its account's agents do.
 func (t *taskManager) heartbeats(ctx context.Context) {
 	now := time.Now()
@@ -915,8 +1004,9 @@ func (t *taskManager) listSources() []*fleetv1.TaskSource {
 		p := &fleetv1.TaskSource{
 			Name: name, Kind: ts.conf().Kind, Url: ts.conf().URL, Disabled: ts.conf().Disabled,
 			Error: ts.err, MaxAgents: int32(ts.conf().MaxAgentsOrDefault()),
-			Working: int32(t.d.agents.taskWorking(name)),
-			Webhook: ts.queue,
+			CloseAfterMs: ts.conf().CloseAfterOrDefault().Milliseconds(),
+			Working:      int32(t.d.agents.taskWorking(name)),
+			Webhook:      ts.queue,
 		}
 		if p.Webhook == "" {
 			p.Webhook = ts.conf().Webhook
@@ -1126,6 +1216,41 @@ func (m *manager) taskWorking(source string) int {
 		}
 	}
 	return n
+}
+
+// taskIdler is a live agent started for tickets, as closeDone sees it.
+type taskIdler struct {
+	ID, Source string
+	Keys       []string
+	// Idle: done with its turn, with nothing queued for it.
+	Idle bool
+}
+
+// taskAgents lists the live agents started for tickets.
+func (m *manager) taskAgents() []taskIdler {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []taskIdler
+	for _, a := range m.agents {
+		if a.Task != nil && a.live() {
+			out = append(out, taskIdler{ID: a.ID, Source: a.Task.Source, Keys: slices.Clone(a.Task.keys()), Idle: taskIdle(a)})
+		}
+	}
+	return out
+}
+
+// taskAgentIdle reports whether agent id is live and idle (taskIdle).
+func (m *manager) taskAgentIdle(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	a, ok := m.agents[id]
+	return ok && taskIdle(a)
+}
+
+// taskIdle: a is done with its turn, with nothing queued for it (not even
+// held), and RunAgent or KillAgent is not at work on it.
+func taskIdle(a *agentRec) bool {
+	return a.live() && a.State == stateIdle && len(a.Queue) == 0 && !a.busy
 }
 
 // taskAgentDone reports whether agent id is busy, and whether it is done:

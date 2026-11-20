@@ -630,6 +630,9 @@ message TaskSource {
   string webhook = 12;
   // Messages received whose work is not done yet (each leased meanwhile).
   int32 in_flight = 13;
+  // How long an agent whose tickets are all done stays idle before it is
+  // closed (close_after), 0 when such agents stay open.
+  int64 close_after_ms = 14;
 }
 
 // Creates the source's queue (Rome: a pull webhook of the account with

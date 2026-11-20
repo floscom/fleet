@@ -26,13 +26,15 @@ and token, passes it the news on its tickets (answers to its questions,
 mentions, decisions) through its queue, and sends the tracker heartbeats
 while it works. The batch is acknowledged once its agents are done with
 their turn; until then it is leased, and handed out again if fleet goes
-away.
+away. Once all of an agent's tickets are done and it has been idle for
+close_after (default 1h, "off" never), fleet archives its session.
 
   [[tasks]]
   kind = "rome"
   url = "https://rome.example.com"
   token_file = "~/.config/rome/fleet-token"   # the agent account's token
   # webhook = "whk_…" when the account has several pull webhooks
+  # close_after = "1h"  # archive an agent once its tickets are done and it idled this long; "off"
   # adapter, model, effort, isolation, sandbox, args, max_agents, instructions
 
   [[tasks.project]]
@@ -85,6 +87,11 @@ once. After editing config.toml by hand, restart the daemon.`,
 						fmt.Fprintf(out, ", last answer %s ago", age(s.LastPollMs))
 					}
 					fmt.Fprintln(out)
+					if s.CloseAfterMs > 0 {
+						fmt.Fprintf(out, "  agents of done tickets close after %s idle\n", closeAfter(time.Duration(s.CloseAfterMs)*time.Millisecond))
+					} else {
+						fmt.Fprintln(out, "  agents of done tickets stay open (close_after off)")
+					}
 					if len(s.Projects) == 0 {
 						fmt.Fprintln(out, "  no projects mapped: add [[tasks.project]] entries")
 						continue
@@ -164,4 +171,17 @@ the mapped ones (unless it carries every project).`,
 	setup.Flags().Uint32Var(&maxWait, "max", 0, "minutes a batch waits at most (0: Rome's default)")
 	cmd.AddCommand(start, setup, newTasksAddCmd(), newTasksRmCmd(), newTasksMapCmd(), newTasksUnmapCmd(), newTasksSetCmd())
 	return cmd
+}
+
+// closeAfter renders a close_after duration as it is written: 1h, 1h30m,
+// 45m, 90s.
+func closeAfter(d time.Duration) string {
+	s := d.String()
+	if d >= time.Minute && d%time.Minute == 0 {
+		s = strings.TrimSuffix(s, "0s")
+		if d%time.Hour == 0 {
+			s = strings.TrimSuffix(s, "0m")
+		}
+	}
+	return s
 }

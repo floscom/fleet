@@ -189,7 +189,7 @@ address. Without it, commands talk to the local daemon.
 | `fleet kill <agent>... [--rm-worktree] [--force] [--forget]` | Stop agents; optionally remove their worktree or clone and history entry. |
 | `fleet queue add\|ls\|rm\|pause\|resume <agent> ...` | Queue messages for an agent; the daemon sends the next one each time it finishes a turn. |
 | `fleet tasks` / `tasks setup [--quiet M] [--max M]` / `tasks start <ticket>` | Show the [task trackers](#task-trackers) fleet takes work from (account, queue, batches in work, tickets waiting, projects and their folders), create the account's queue (Rome: a pull webhook), or start an agent on a ticket now. `--source S` picks the source when there are several. |
-| `fleet tasks add [name] --url U (--token-file F \| --token-env V)` / `tasks rm <name>` / `tasks map <project> [folder] [--root R] [--adapter A] [--model M] [--effort E] [--isolation I] [--sandbox S] [--args "..."] [--instructions "..."]` / `tasks unmap <project>` / `tasks set <option> [value...]` | Change the task trackers without editing `config.toml`: add or remove a source, map a project to a folder (or change only the settings you give), unmap it, or set a source option (`max_agents`, `model`, `args`, `instructions`, `disabled`, ...; no value unsets it). Changes apply at once, and mapping or unmapping brings the Rome webhook's projects in line. |
+| `fleet tasks add [name] --url U (--token-file F \| --token-env V)` / `tasks rm <name>` / `tasks map <project> [folder] [--root R] [--adapter A] [--model M] [--effort E] [--isolation I] [--sandbox S] [--args "..."] [--instructions "..."]` / `tasks unmap <project>` / `tasks set <option> [value...]` | Change the task trackers without editing `config.toml`: add or remove a source, map a project to a folder (or change only the settings you give), unmap it, or set a source option (`max_agents`, `close_after`, `model`, `args`, `instructions`, `disabled`, ...; no value unsets it). Changes apply at once, and mapping or unmapping brings the Rome webhook's projects in line. |
 | `fleet note <agent> [text...] [-d]` | Leave a note on an agent (e.g. why it must stay open), shown on its dashboard row and in `fleet ls`; without text prints it, `-d` removes it. |
 | `fleet cp <file>... <machine> [--to DIR]` / `fleet machines` | Send files to another machine of the fleet, daemon to daemon (both must hold the fleet key); agents can run it to hand over what they made. Name the machine by name, host name or id prefix, as `fleet machines` lists them. The files land in that machine's upload folder (kept 30 days), or with `--to` in a folder there (absolute, or quoted `'~/...'` for its home) under their own names, never replacing a file. Not from Docker-sandboxed agents yet. |
 | `fleet skill [ls]` / `skill add <folder> [--link]` / `skill rm <name>` | List, share or delete the [skills shared](#shared-skills) with every machine of the fleet. |
@@ -428,6 +428,7 @@ token_file = "~/.config/rome/fleet-token"  # or token_env = "ROME_TOKEN"
 adapter = "claude"                         # default
 # model, effort, isolation ("worktree" | "pinned"), sandbox ("none" | "docker"),
 # args (extra CLI arguments), max_agents (default 3) are optional
+# close_after = "1h"                       # default; "30m", or "off" to keep agents of done tickets open
 instructions = "Run the tests and open a pull request when you are done."
 
 [[tasks.project]]
@@ -491,6 +492,13 @@ Here is what happens:
   answers, withdrawn asks and decisions without waiting for the quiet
   time. When no agent works the ticket, a mention, an answer or a
   rejected approval starts one.
+- **Closing.** Once every ticket of an agent is in a done status (Rome's
+  done category, Cancelled included) and the agent has been idle for
+  `close_after` (default `1h`; `30m`, `2h`, ... or `off`), fleet archives
+  its session, as the dashboard's Archive does: the agent ends, its chat
+  and its worktree stay. An agent with a ticket that is not done stays
+  however long it idles, and so does one at work or with messages queued.
+  `fleet tasks set close_after 30m` applies at once.
 - **Presence.** While its agents work, fleet sends Rome the account's
   heartbeats ("working on ROME-42 · Bash: go test"), so the agent itself
   doesn't have to.

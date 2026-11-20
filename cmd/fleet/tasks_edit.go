@@ -196,11 +196,14 @@ func newTasksSetCmd() *cobra.Command {
 		Short: "Change a setting of a task tracker",
 		Long: `Change a [[tasks]] setting; without a value it is unset (back to its
 default). Options: ` + strings.Join(config.TaskOptions, ", ") + `.
-url, token_file, token_env, webhook and disabled restart the source; the
-others apply to the next agents it starts. args takes several values (put
+url, token_file, token_env, webhook and disabled restart the source;
+close_after (how long an agent whose tickets are all done may idle before
+it is archived: "1h", "30m", or "off") applies at once; the others apply
+to the next agents it starts. args takes several values (put
 -- before ones that start with -); the agent settings are the defaults of
 every project, which can override them (fleet tasks map).`,
 		Example: `  fleet tasks set max_agents 5
+  fleet tasks set close_after 30m
   fleet tasks set model sonnet
   fleet tasks set instructions "Open a pull request when you are done."
   fleet tasks set args -- --permission-mode acceptEdits
