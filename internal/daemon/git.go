@@ -278,10 +278,13 @@ func gitPull(ctx context.Context, st *fleetv1.GitStatus, mode fleetv1.PullMode, 
 	default:
 		return "", errf(codeInvalid, "unknown pull mode %d", mode)
 	}
+	stash := stashRef(ctx, st.Dir)
 	out, err := runGit(ctx, st.Dir, gitNetTimeout, args...)
-	if err == nil && strings.Contains(out, "autostash resulted in conflicts") {
+	if err == nil && stashRef(ctx, st.Dir) != stash {
 		// git pulled, then could not put the uncommitted changes back
-		// cleanly: it exits 0 with conflict markers in those files.
+		// cleanly: it exits 0, keeps them in a new stash entry and leaves
+		// conflict markers in those files. (Its message differs between
+		// git versions; the stash entry does not.)
 		return out, errf(codeInvalid, "pulled %s, but the uncommitted changes conflict with it: the conflicted files are marked, and the changes are also kept in `git stash`", strings.TrimPrefix(from, st.Remote+"/"))
 	}
 	if err == nil {
@@ -297,6 +300,15 @@ func gitPull(ctx context.Context, st *fleetv1.GitStatus, mode fleetv1.PullMode, 
 		return "", errf(codeInvalid, "%s and %s have diverged: pull with rebase or merge", st.Branch, from)
 	}
 	return "", err
+}
+
+// stashRef is the newest stash entry of the checkout dir, "" if none.
+func stashRef(ctx context.Context, dir string) string {
+	ref, err := runGit(ctx, dir, gitReadTimeout, "rev-parse", "-q", "--verify", "refs/stash")
+	if err != nil {
+		return ""
+	}
+	return ref
 }
 
 // gitPush pushes the branch to the same name on its remote, and makes
