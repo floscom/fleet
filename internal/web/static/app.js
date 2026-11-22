@@ -1661,10 +1661,14 @@
       const from = g.upstream || g.base;
       const behind = g.upstream ? g.behind : g.baseBehind;
       const up = gitUnpushed(g);
-      const force = !!(g.upstream && g.ahead && g.behind);
+      const diverged = !!(g.upstream && g.ahead && g.behind);
+      // The remote's default branch is never force pushed from here.
+      const onBase = !!(g.branch && ((g.defaultBranch && g.upstream === g.remote + '/' + g.branch) || g.base === g.remote + '/' + g.branch));
+      const force = diverged && !onBase;
       const armed = force && ui.armed && Date.now() - ui.armed < ARM_MS;
       const pushWhy = noRemote ? 'The repository has no remote' : !g.branch ? 'Check out a branch to push'
-        : g.upstream && !g.ahead ? `${g.upstream} has every commit` : '';
+        : g.upstream && !g.ahead ? `${g.upstream} has every commit`
+          : diverged && onBase ? `${g.upstream} has ${plural(g.behind, 'commit')} ${g.branch} lacks: pull them in first (the default branch is not force pushed from here)` : '';
       const mode = h('select', { class: 'select', 'aria-label': 'Pull mode', disabled: busy, onchange: (ev) => save(PULL_MODE, ev.target.value) },
         PULL_MODES.map(([v, text]) => h('option', { value: v, selected: v === pullMode() }, text)));
       const facts = [];

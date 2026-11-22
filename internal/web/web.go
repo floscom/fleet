@@ -534,6 +534,8 @@ type GitStatus struct {
 	FetchedAtMs int64  `json:"fetchedAtMs"`
 	CheckedAtMs int64  `json:"checkedAtMs"`
 	Detail      string `json:"detail"`
+	// DefaultBranch: the upstream is the remote's default branch.
+	DefaultBranch bool `json:"defaultBranch,omitempty"`
 }
 
 func gitOf(g *fleetv1.GitStatus) *GitStatus {
@@ -545,7 +547,7 @@ func gitOf(g *fleetv1.GitStatus) *GitStatus {
 		Upstream: g.Upstream, Ahead: g.Ahead, Behind: g.Behind,
 		Base: g.Base, BaseAhead: g.BaseAhead, BaseBehind: g.BaseBehind,
 		Changed: g.Changed, Conflicts: g.Conflicts, Operation: g.Operation, Remote: g.Remote,
-		FetchedAtMs: g.FetchedAtMs, CheckedAtMs: g.CheckedAtMs, Detail: g.Detail,
+		FetchedAtMs: g.FetchedAtMs, CheckedAtMs: g.CheckedAtMs, Detail: g.Detail, DefaultBranch: g.DefaultBranch,
 	}
 }
 

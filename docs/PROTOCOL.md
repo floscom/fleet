@@ -973,26 +973,34 @@ effort the adapter does not offer);
 - `Agent.git` is the git state of the agent's checkout (its worktree,
   clone or pinned directory): branch, HEAD, upstream with `ahead` /
   `behind`, the remote's default branch (`base`, e.g. `origin/main`) with
-  `base_ahead` / `base_behind`, uncommitted (`changed`) and conflicted
-  files, an operation in progress, and when it was last fetched. The
-  daemon reads it every 20 s while the agent runs (no network: the counts
-  are as of the last fetch) and on this request; each change comes as an
-  `agent_upserted` event. Unset outside a git repository.
+  `base_ahead` / `base_behind` (empty when it is the upstream: then
+  `default_branch` is set), uncommitted (`changed`) and conflicted
+  files, an operation in progress, and when it was last fetched (a
+  worktree's own fetches included). The daemon reads it every 20 s while
+  the agent runs (no network: the counts are as of the last fetch) and on
+  this request; each change comes as an `agent_upserted` event, which
+  leaves `updated_at_ms` alone (agents in the same folder see each other's
+  edits). Unset outside a git repository.
 - `action`: `STATUS` (or `UNSPECIFIED`) reads it; `FETCH` fetches the
   upstream's remote (else `origin`); `PULL` fetches, then brings the
   upstream into the branch, or `base` with `from_base` or when the branch
   has no upstream: `pull_mode` `FF_ONLY` (default), `REBASE` or `MERGE`,
   all with `--autostash`. A merge or rebase that conflicts is aborted, so
-  the checkout is as before. `PUSH` pushes the branch to the same name on
-  its remote and makes that its upstream; `force` uses
-  `--force-with-lease`. `status` is the checkout after the action,
-  `output` git's last lines.
+  the checkout is as before. When the pull went through but the
+  uncommitted changes conflict with it as they are put back, the request
+  fails: the files with conflict markers show in `conflicts`, and the
+  changes are also kept in `git stash`. `PUSH` pushes the branch to the
+  same name on its remote and makes that its upstream; `force` uses
+  `--force-with-lease`, and is refused for the remote's default branch.
+  `status` is the checkout after the action, `output` git's last lines.
 - Git runs on the daemon host as the daemon user, with their credentials,
   in its own session without a terminal: it never prompts, missing
   credentials fail. Actions on one checkout run one at a time.
-- Errors: `INVALID_ARGUMENT` (pull while the agent is `WORKING`, detached
-  HEAD, no remote, nothing to pull from, diverged for a fast-forward,
-  conflicts, a rejected push, or git's own message); `NOT_FOUND`;
+- Errors: `INVALID_ARGUMENT` (pull while the agent, or another agent in
+  the same checkout, is `WORKING`; detached HEAD, no remote, nothing to
+  pull from, diverged for a fast-forward, conflicts, uncommitted changes
+  that conflict with the pull, a rejected push, a force push to the
+  default branch, or git's own message); `NOT_FOUND`;
   `ADAPTER_UNAVAILABLE` (no `git` on the daemon host).
 
 **`SetNoteRequest{agent, note}` → `SetNoteResponse{agent}`**

@@ -137,7 +137,11 @@ func (m *manager) storeGit(id string, st *fleetv1.GitStatus, err error) *fleetv1
 	}
 	a.Git = st
 	if (old == nil) != (st == nil) || st != nil && !proto.Equal(gitWithoutCheck(old), gitWithoutCheck(st)) {
-		m.changedLocked(a)
+		// Like a title, a checkout's state leaves UpdatedAtMs alone: it
+		// changes when any agent in the folder edits a file, which is no
+		// news from this one (lists sort by it, and mark it unread).
+		m.saveLocked()
+		m.broadcastLocked(&fleetv1.Event{Kind: &fleetv1.Event_AgentUpserted{AgentUpserted: a.proto()}})
 	}
 	if st == nil {
 		return nil
@@ -182,6 +186,12 @@ func (m *manager) gitAction(ctx context.Context, req *fleetv1.GitRequest) (*flee
 		}
 		return nil, err
 	}
+	if action == fleetv1.GitAction_GIT_ACTION_PULL {
+		if other := m.workingIn(id, st.Dir); other != "" {
+			m.storeGit(id, st, nil)
+			return nil, errf(codeInvalid, "%s is working in the same checkout: pull once it is idle, as a pull changes its files", other)
+		}
+	}
 	var out string
 	switch action {
 	case fleetv1.GitAction_GIT_ACTION_UNSPECIFIED, fleetv1.GitAction_GIT_ACTION_STATUS:
@@ -211,6 +221,21 @@ func (m *manager) gitAction(ctx context.Context, req *fleetv1.GitRequest) (*flee
 	}
 	m.mu.Unlock()
 	return &fleetv1.GitResponse{Status: cur, Output: out}, nil
+}
+
+// workingIn is the name of a working agent other than id whose checkout
+// is in top (a work tree), "" if none is.
+func (m *manager) workingIn(id, top string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, a := range m.sortedLocked() {
+		if a.ID != id && a.State == stateWorking {
+			if dir := checkoutOf(a); dir != "" && within(top, dir) {
+				return a.Name
+			}
+		}
+	}
+	return ""
 }
 
 func gitFetch(ctx context.Context, st *fleetv1.GitStatus) (string, error) {
@@ -254,6 +279,11 @@ func gitPull(ctx context.Context, st *fleetv1.GitStatus, mode fleetv1.PullMode, 
 		return "", errf(codeInvalid, "unknown pull mode %d", mode)
 	}
 	out, err := runGit(ctx, st.Dir, gitNetTimeout, args...)
+	if err == nil && strings.Contains(out, "autostash resulted in conflicts") {
+		// git pulled, then could not put the uncommitted changes back
+		// cleanly: it exits 0 with conflict markers in those files.
+		return out, errf(codeInvalid, "pulled %s, but the uncommitted changes conflict with it: the conflicted files are marked, and the changes are also kept in `git stash`", strings.TrimPrefix(from, st.Remote+"/"))
+	}
 	if err == nil {
 		return out, nil
 	}
@@ -278,6 +308,11 @@ func gitPush(ctx context.Context, st *fleetv1.GitStatus, force bool) (string, er
 	if st.Remote == "" {
 		return "", errf(codeInvalid, "the repository has no remote")
 	}
+	// The default branch, tracked or not yet (base is its remote branch).
+	onBase := st.DefaultBranch && st.Upstream == st.Remote+"/"+st.Branch || st.Base == st.Remote+"/"+st.Branch
+	if force && onBase {
+		return "", errf(codeInvalid, "%s is the default branch of %s: it is not force pushed from here; pull first", st.Branch, st.Remote)
+	}
 	args := []string{"push"}
 	if st.Upstream != st.Remote+"/"+st.Branch {
 		args = append(args, "--set-upstream")
@@ -290,6 +325,9 @@ func gitPush(ctx context.Context, st *fleetv1.GitStatus, force bool) (string, er
 	if err != nil && strings.Contains(err.Error(), "[rejected]") {
 		if force {
 			return "", errf(codeInvalid, "%s/%s changed since the last fetch: fetch, then push again", st.Remote, st.Branch)
+		}
+		if onBase {
+			return "", errf(codeInvalid, "%s/%s has commits %s lacks: pull first", st.Remote, st.Branch, st.Branch)
 		}
 		return "", errf(codeInvalid, "%s/%s has commits %s lacks: pull first, or force push", st.Remote, st.Branch, st.Branch)
 	}
@@ -316,8 +354,12 @@ func readGit(ctx context.Context, dir string) (*fleetv1.GitStatus, error) {
 		return nil, errNotRepo // e.g. inside .git, or a bare repository
 	}
 	st := &fleetv1.GitStatus{Dir: p[0], Operation: gitOperation(p[1])}
-	if fi, err := os.Stat(filepath.Join(p[2], "FETCH_HEAD")); err == nil {
-		st.FetchedAtMs = fi.ModTime().UnixMilli()
+	// A worktree's fetch writes FETCH_HEAD into its own git dir; the
+	// shared one has those of the main checkout.
+	for _, dir := range []string{p[1], p[2]} {
+		if fi, err := os.Stat(filepath.Join(dir, "FETCH_HEAD")); err == nil && fi.ModTime().UnixMilli() > st.FetchedAtMs {
+			st.FetchedAtMs = fi.ModTime().UnixMilli()
+		}
 	}
 
 	status, err := runGit(ctx, st.Dir, gitReadTimeout, "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=normal")
@@ -355,8 +397,8 @@ func readGit(ctx context.Context, dir string) (*fleetv1.GitStatus, error) {
 	}
 	if st.Remote != "" {
 		st.Base = gitBase(ctx, st.Dir, st.Remote)
-		if st.Base == st.Upstream {
-			st.Base = ""
+		if st.Base != "" && st.Base == st.Upstream {
+			st.Base, st.DefaultBranch = "", true
 		}
 	}
 	if st.Base != "" {

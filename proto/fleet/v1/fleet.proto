@@ -869,6 +869,9 @@ message GitStatus {
   // Why it could not be read, e.g. the checkout was removed; the other
   // fields are then as last read.
   string detail = 18;
+  // The upstream is the remote's default branch (base is then empty): the
+  // daemon never force pushes it.
+  bool default_branch = 19;
 }
 
 // PullRequest is a GitHub pull request an agent created. The daemon finds

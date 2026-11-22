@@ -187,3 +187,99 @@ func TestParseGitStatus(t *testing.T) {
 		t.Fatalf("detached: %v", &st)
 	}
 }
+
+// TestGitSafety covers what a pull or push must not do on a checkout
+// pinned to the default branch, and the status of worktrees.
+func TestGitSafety(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("no git")
+	}
+	dir := t.TempDir()
+	t.Setenv("FLEET_HOME", dir)
+	cfg := filepath.Join(dir, "gitconfig")
+	os.WriteFile(cfg, []byte("[user]\n\tname = Test\n\temail = test@example.com\n[init]\n\tdefaultBranch = main\n"), 0o644)
+	t.Setenv("GIT_CONFIG_GLOBAL", cfg)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	origin := filepath.Join(dir, "origin.git")
+	gitT(t, dir, "init", "-q", "--bare", origin)
+	seed := filepath.Join(dir, "seed")
+	gitT(t, dir, "clone", "-q", origin, seed)
+	commitT(t, seed, "a.txt", "one\n")
+	gitT(t, seed, "push", "-q", "origin", "main")
+	work := filepath.Join(dir, "work")
+	gitT(t, dir, "clone", "-q", origin, work)
+	os.Mkdir(filepath.Join(work, "sub"), 0o755)
+
+	d := &daemon{log: slog.New(slog.NewTextHandler(io.Discard, nil)), opts: Options{Adapters: adapter.NewRegistry(testAdapter{})}}
+	m := &manager{d: d, path: filepath.Join(dir, "agents.json"), agents: map[string]*agentRec{}, subs: map[*subscriber]struct{}{}}
+	d.agents = m
+	// Two agents pinned to the same checkout, one in a subfolder.
+	m.agents["a1"] = &agentRec{ID: "a1", Name: "one", Adapter: "test", State: stateIdle, Cwd: work, UpdatedAtMs: 1}
+	m.agents["a2"] = &agentRec{ID: "a2", Name: "two", Adapter: "test", State: stateIdle, Cwd: filepath.Join(work, "sub"), UpdatedAtMs: 1}
+
+	ctx := context.Background()
+	run := func(agent string, req *fleetv1.GitRequest) (*fleetv1.GitStatus, error) {
+		req.Agent = agent
+		r, err := m.gitAction(ctx, req)
+		return r.GetStatus(), err
+	}
+	fetch := &fleetv1.GitRequest{Action: fleetv1.GitAction_GIT_ACTION_FETCH}
+	pull := &fleetv1.GitRequest{Action: fleetv1.GitAction_GIT_ACTION_PULL}
+
+	// Reading the checkout is no news from the agent: it stays read.
+	if st, err := run("a1", &fleetv1.GitRequest{}); err != nil || st.Branch != "main" || st.Base != "" || !st.DefaultBranch {
+		t.Fatalf("status: %v, %v", st, err)
+	}
+	if m.agents["a1"].UpdatedAtMs != 1 {
+		t.Fatalf("a status read moved UpdatedAtMs to %d", m.agents["a1"].UpdatedAtMs)
+	}
+
+	// Not while the other agent in the checkout works.
+	m.agents["a2"].State = stateWorking
+	if _, err := run("a1", pull); err == nil || !strings.Contains(err.Error(), "two is working in the same checkout") {
+		t.Fatalf("pull beside a working agent: %v", err)
+	}
+	m.agents["a2"].State = stateIdle
+
+	// Uncommitted changes that conflict with the pull are no success.
+	commitT(t, seed, "a.txt", "theirs\n")
+	gitT(t, seed, "push", "-q", "origin", "main")
+	os.WriteFile(filepath.Join(work, "a.txt"), []byte("mine\n"), 0o644)
+	if _, err := run("a1", pull); err == nil || !strings.Contains(err.Error(), "uncommitted changes conflict") {
+		t.Fatalf("conflicting autostash: %v", err)
+	}
+	if st := m.agents["a1"].Git; st.GetConflicts() != 1 || gitT(t, work, "stash", "list") == "" {
+		t.Fatalf("after the conflicting autostash: %v; stash %q", st, gitT(t, work, "stash", "list"))
+	}
+	gitT(t, work, "checkout", "-q", "--theirs", "a.txt")
+	gitT(t, work, "reset", "-q")
+	gitT(t, work, "checkout", "-q", "--", "a.txt")
+	gitT(t, work, "stash", "drop", "-q")
+
+	// main diverged from origin/main: it is never force pushed.
+	commitT(t, work, "b.txt", "local\n")
+	commitT(t, seed, "c.txt", "remote\n")
+	gitT(t, seed, "push", "-q", "origin", "main")
+	if st, err := run("a1", fetch); err != nil || st.Ahead != 1 || st.Behind != 1 {
+		t.Fatalf("diverged: %v, %v", st, err)
+	}
+	if _, err := run("a1", &fleetv1.GitRequest{Action: fleetv1.GitAction_GIT_ACTION_PUSH, Force: true}); err == nil || !strings.Contains(err.Error(), "default branch") {
+		t.Fatalf("force push to main: %v", err)
+	}
+	if _, err := run("a1", &fleetv1.GitRequest{Action: fleetv1.GitAction_GIT_ACTION_PUSH}); err == nil || !strings.Contains(err.Error(), "pull first") || strings.Contains(err.Error(), "force") {
+		t.Fatalf("push to a diverged main: %v", err)
+	}
+	if got, want := gitT(t, origin, "rev-parse", "main"), gitT(t, seed, "rev-parse", "HEAD"); got != want {
+		t.Fatal("origin/main was overwritten")
+	}
+
+	// A worktree's fetch shows as its own.
+	wt := filepath.Join(dir, "wt")
+	gitT(t, work, "worktree", "add", "-q", "-b", "fleet/wt", wt)
+	m.agents["a3"] = &agentRec{ID: "a3", Name: "three", Adapter: "test", State: stateIdle, Cwd: wt}
+	os.Remove(filepath.Join(work, ".git", "FETCH_HEAD"))
+	if st, err := run("a3", fetch); err != nil || st.FetchedAtMs == 0 {
+		t.Fatalf("worktree fetch: %v, %v", st, err)
+	}
+}
