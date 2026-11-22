@@ -1044,7 +1044,10 @@ effort the adapter does not offer);
   batches received whose work is not done (`in_flight`), the keys of the
   tickets waiting for an agent (`waiting`), and its projects (`key`, the
   resolved folder `path`, `adapter`, and `error` when its tickets cannot
-  start).
+  start). After the projects of config.toml come the ones set up on the
+  tracker (Rome's agent setup: people filled in their folder there) and not
+  mapped in config.toml, with `tracker` set: their folder, or in `error`
+  what is missing.
 
 **`SetupTaskSourceRequest{source, quiet_minutes, max_minutes}` → `SetupTaskSourceResponse{webhook, created}`**
 
@@ -1093,9 +1096,11 @@ effort the adapter does not offer);
   ticket, `keys` of all of them in the order worked) is set on agents the
   daemon started for tickets, by this request or from a batch of the
   queue.
+- A project mapped in config.toml starts in its folder; one set up on the
+  tracker in the folder people filled in there.
 - Errors: `NOT_FOUND` (no such source, none set up); `INVALID_ARGUMENT`
-  (no key, its project is mapped to no folder, several sources and none
-  named); `UNAVAILABLE` (the source is disabled, has no token, or the
+  (no key, its project is mapped to no folder and not set up on the
+  tracker, several sources and none named); `UNAVAILABLE` (the source is disabled, has no token, or the
   tracker refuses it); the errors of `RunAgentRequest`.
 
 `Agent.title` is what the conversation is about, for clients to list

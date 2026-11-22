@@ -63,6 +63,11 @@ var (
 	// taskCloseCheck is how often the tickets of an agent idle for its
 	// source's close_after are looked up (closeDone).
 	taskCloseCheck = 5 * time.Minute
+	// taskSetupSync is how often a source's setup on the tracker is read
+	// (syncSetups) when no event says it changed; taskSetupRetry how long
+	// fleet waits when the tracker has none.
+	taskSetupSync  = 2 * time.Minute
+	taskSetupRetry = time.Hour
 	// taskRetry is the first wait after a failed receive; it doubles up
 	// to taskRetryMax. A refused token or a missing queue waits
 	// taskAuthRetry (`fleet tasks setup` ends that wait).
@@ -146,6 +151,10 @@ type leasedMsg struct {
 	Prompt       string            `json:"prompt,omitempty"`
 	Route        map[string]string `json:"route,omitempty"`
 	Groups       []*ticketGroup    `json:"groups"`
+	// Local: fleet made it (the tickets of a project that was just set
+	// up, catchUp) rather than received it: there is no lease to renew and
+	// nothing to acknowledge.
+	Local bool `json:"local,omitempty"`
 }
 
 // ticketGroup are the tickets of a message one agent works.
@@ -197,6 +206,20 @@ type taskSource struct {
 	lastPoll time.Time
 	beat     tasks.Presence
 	beatAt   time.Time
+	// The setup on the tracker (tasks.Setuper, syncSetups): declared once
+	// fleet declared its settings since the source started; setupAt when
+	// the setup was last read, setupDue to read it at once, setupOff until
+	// when the tracker has none, setupErr its last error. setupDirs are the
+	// folders, by project key, of the projects set up on the tracker
+	// (rather than in config.toml) that fleet can work; setupViews how
+	// listSources shows those projects, also the ones it cannot work.
+	declared   bool
+	setupAt    time.Time
+	setupDue   bool
+	setupOff   time.Time
+	setupErr   string
+	setupDirs  map[string]string
+	setupViews []*fleetv1.TaskProject
 }
 
 // conf returns its [[tasks]] entry as it is now.
@@ -295,6 +318,8 @@ func (t *taskManager) reconfigure(entries []config.TaskSource) {
 		i := slices.IndexFunc(old, func(ts *taskSource) bool { return ts.conf().SourceName() == c.SourceName() })
 		if i >= 0 && config.SameConnection(old[i].conf(), c) {
 			old[i].cfg.Store(&c)
+			// A project mapped or unmapped changes what fleet reports.
+			old[i].setupDue = true
 			next = append(next, old[i])
 			continue
 		}
@@ -399,6 +424,7 @@ func (t *taskManager) run(ctx context.Context) {
 			t.finish(ctx)
 			t.heartbeats(ctx)
 			t.closeDone(ctx)
+			t.syncSetups(ctx)
 		}
 	}
 	t.wg.Wait()
@@ -503,6 +529,7 @@ func (t *taskManager) sleep(ctx context.Context, ts *taskSource, d time.Duration
 func (t *taskManager) take(ctx context.Context, ts *taskSource, m tasks.Message) {
 	name := ts.conf().SourceName()
 	log := t.d.log.With("source", name, "message", m.ID)
+	cfg := t.d.config()
 	t.mu.Lock()
 	st := t.state.Sources[name]
 	if i := slices.IndexFunc(st.InFlight, func(l *leasedMsg) bool { return l.ID == m.ID }); i >= 0 {
@@ -517,15 +544,27 @@ func (t *taskManager) take(ctx context.Context, ts *taskSource, m tasks.Message)
 	now := time.Now()
 	l := &leasedMsg{
 		ID: m.ID, Handle: m.Handle, LeaseMs: now.Add(taskLease).UnixMilli(), ReceivedMs: now.UnixMilli(),
-		ReceiveCount: m.ReceiveCount, Prompt: m.Prompt, Route: m.Route,
+		ReceiveCount: m.ReceiveCount, Prompt: m.Prompt, Route: m.Route, Local: m.Handle == "",
 	}
-	folder := strings.TrimSpace(m.Route["folder"])
+	route := strings.TrimSpace(m.Route["folder"])
 	for _, ev := range m.Events {
 		if seenLocked(st, ev.ID) {
 			continue
 		}
+		if ev.Kind == tasks.SetupChanged {
+			log.Info("the task source's setup changed; reading it again", "project", ev.Project)
+			ts.setupDue = true
+			markSeenLocked(st, ev.ID)
+			continue
+		}
 		elog := log.With("issue", ev.Issue)
 		_, mapped := ts.conf().Project(ev.Project)
+		folder := route
+		if !mapped {
+			if dir := setupDirLocked(&cfg, ts, m, ev.Project); dir != "" {
+				folder = dir
+			}
+		}
 		if !mapped && folder == "" {
 			elog.Info("task in a project mapped to no folder; ignored", "project", ev.Project)
 			markSeenLocked(st, ev.ID)
@@ -558,6 +597,9 @@ func (t *taskManager) take(ctx context.Context, ts *taskSource, m tasks.Message)
 	if len(l.Groups) == 0 {
 		t.saveLocked()
 		t.mu.Unlock()
+		if l.Local {
+			return
+		}
 		if err := ts.src.Ack(ctx, m.Handle); err != nil && !errors.Is(err, tasks.ErrGone) {
 			log.Warn("acknowledging a task message failed", "err", err)
 		}
@@ -639,10 +681,14 @@ func (t *taskManager) startPending(ctx context.Context) {
 			t.mu.Lock()
 			g.Tries++
 			log := t.d.log.With("source", name, "message", l.ID, "tickets", strings.Join(g.keys(), " "), "tries", g.Tries)
-			if g.Tries >= maxStartTries {
+			switch {
+			case g.Tries >= maxStartTries && l.Local:
+				g.Failed = true
+				log.Warn("could not start an agent for the tickets taken up after their project was set up; start them with fleet tasks start", "err", err)
+			case g.Tries >= maxStartTries:
 				g.Failed = true
 				log.Warn("could not start an agent for tasks; leaving the message for the tracker to hand out again", "err", err)
-			} else {
+			default:
 				log.Warn("could not start an agent for tasks; will try again", "err", err)
 			}
 			t.saveLocked()
@@ -776,7 +822,7 @@ func (t *taskManager) renew(ctx context.Context) {
 		t.mu.Lock()
 		var due []*leasedMsg
 		for _, l := range t.state.Sources[name].InFlight {
-			if time.Until(time.UnixMilli(l.LeaseMs)) < taskRenew {
+			if !l.Local && time.Until(time.UnixMilli(l.LeaseMs)) < taskRenew {
 				due = append(due, l)
 			}
 		}
@@ -848,7 +894,9 @@ func (t *taskManager) finish(ctx context.Context) {
 			}
 		}
 		for _, l := range drops {
-			t.d.log.Warn("left a task message to the tracker: an agent could not start", "source", name, "message", l.ID)
+			if !l.Local {
+				t.d.log.Warn("left a task message to the tracker: an agent could not start", "source", name, "message", l.ID)
+			}
 			t.dropLocked(name, l)
 			changed = true
 		}
@@ -858,9 +906,12 @@ func (t *taskManager) finish(ctx context.Context) {
 		t.mu.Unlock()
 		for _, l := range acks {
 			t.mu.Lock()
-			handle := l.Handle
+			handle, local := l.Handle, l.Local
 			t.mu.Unlock()
-			err := ts.src.Ack(ctx, handle)
+			var err error
+			if !local {
+				err = ts.src.Ack(ctx, handle)
+			}
 			t.mu.Lock()
 			if err == nil || errors.Is(err, tasks.ErrGone) {
 				t.dropLocked(name, l)
@@ -1040,6 +1091,11 @@ func (t *taskManager) listSources() []*fleetv1.TaskSource {
 			}
 			p.Projects = append(p.Projects, tp)
 		}
+		for _, v := range ts.setupViews {
+			if _, mapped := ts.conf().Project(v.GetKey()); !mapped {
+				p.Projects = append(p.Projects, &fleetv1.TaskProject{Key: v.Key, Path: v.Path, Adapter: v.Adapter, Error: v.Error, Tracker: true})
+			}
+		}
 		out = append(out, p)
 	}
 	return out
@@ -1085,8 +1141,14 @@ func (t *taskManager) startTask(ctx context.Context, source, key string) (*fleet
 	}
 	name := ts.conf().SourceName()
 	proj := projectOfKey(key)
+	folder := ""
 	if _, ok := ts.conf().Project(proj); !ok {
-		return nil, errf(codeInvalid, "project %s is mapped to no folder: add a [[tasks.project]] with key = %q", proj, proj)
+		t.mu.Lock()
+		folder = ts.setupDirs[proj]
+		t.mu.Unlock()
+		if folder == "" {
+			return nil, errf(codeInvalid, "project %s is mapped to no folder: map it with `fleet tasks map %s <folder>`, or fill in its Folder for fleet in %s", proj, proj, ts.conf().Kind)
+		}
 	}
 	t.startMu.Lock()
 	defer t.startMu.Unlock()
@@ -1094,7 +1156,7 @@ func (t *taskManager) startTask(ctx context.Context, source, key string) (*fleet
 		return t.d.agents.agentProto(id)
 	}
 	ev := tasks.Event{Kind: tasks.Assigned, Project: proj, Issue: key, Text: "You were put on this ticket from fleet.", At: time.Now()}
-	a, err := t.startTickets(ctx, ts, []tasks.Event{ev}, "", "")
+	a, err := t.startTickets(ctx, ts, []tasks.Event{ev}, folder, "")
 	if errors.Is(err, tasks.ErrAuth) {
 		return nil, errf(codeUnavailable, "%v", err)
 	}
@@ -1113,7 +1175,7 @@ func (t *taskManager) setupQueue(ctx context.Context, source string, quiet, maxW
 	if !ok {
 		return "", false, "", errf(codeInvalid, "%s cannot create its queue: set it up in the tracker", ts.conf().Kind)
 	}
-	id, created, err := qc.CreateQueue(ctx, tasks.QueueOptions{Projects: mappedKeys(ts.conf()), Quiet: quiet, Max: maxWait})
+	id, created, err := qc.CreateQueue(ctx, tasks.QueueOptions{Projects: t.queueKeys(ts), Quiet: quiet, Max: maxWait})
 	if err != nil {
 		if errors.Is(err, tasks.ErrAuth) || errors.Is(err, tasks.ErrNoQueue) {
 			return "", false, "", errf(codeUnavailable, "%v", err)
@@ -1146,8 +1208,8 @@ func mappedKeys(c config.TaskSource) []string {
 	return keys
 }
 
-// syncQueue brings the projects of ts's queue in line with the mapped ones
-// and says what happened, "" when nothing did.
+// syncQueue brings the projects of ts's queue in line with the ones fleet
+// works (queueKeys) and says what happened, "" when nothing did.
 func (t *taskManager) syncQueue(ctx context.Context, ts *taskSource) string {
 	qs, ok := ts.src.(tasks.QueueSyncer)
 	if !ok || ts.src == nil {
@@ -1155,7 +1217,7 @@ func (t *taskManager) syncQueue(ctx context.Context, ts *taskSource) string {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	keys := mappedKeys(ts.conf())
+	keys := t.queueKeys(ts)
 	changed, err := qs.SyncQueue(ctx, keys)
 	switch {
 	case errors.Is(err, tasks.ErrNoQueue):

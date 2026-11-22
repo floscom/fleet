@@ -43,7 +43,13 @@ close_after (default 1h, "off" never), fleet archives its session.
   # adapter, model, effort, isolation, sandbox, instructions
 
 Change it with fleet tasks add, rm, map, unmap and set: changes apply at
-once. After editing config.toml by hand, restart the daemon.`,
+once. After editing config.toml by hand, restart the daemon.
+
+A tracker with agent setup (Rome) also asks its people for the folder of
+each project the account is a member of: a project set up there is worked
+in that folder (inside a root) unless config.toml maps it, and fleet tells
+the tracker per project whether it can work it. Tickets assigned while a
+project was not set up start once it is.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return withClient(cmd, func(ctx context.Context, c *client.Client) error {
@@ -99,8 +105,14 @@ once. After editing config.toml by hand, restart the daemon.`,
 					t := newTable(out, "  PROJECT", "ADAPTER", "FOLDER")
 					for _, p := range s.Projects {
 						dir := p.Path
-						if p.Error != "" {
+						if dir == "" {
+							dir = "-"
+						}
+						switch {
+						case p.Error != "":
 							dir += " (" + p.Error + ")"
+						case p.Tracker:
+							dir += " (set up in " + s.Kind + ")"
 						}
 						t.row("  "+p.Key, p.Adapter, dir)
 					}

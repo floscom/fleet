@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -54,6 +55,14 @@ type fakeTracker struct {
 	badIssue string // GET of this issue fails
 	// done are the tickets in a done status.
 	done map[string]bool
+	// The agent setup: declared the settings fleet declared, setup the
+	// projects' setups by key ({values, state, report}), reports what
+	// fleet reported, by key, unstarted the tickets of a project assigned
+	// to ada in todo. Without setup, /me/setup is not found.
+	declared  []any
+	setup     map[string]map[string]any
+	reports   map[string][]map[string]any
+	unstarted map[string][]string
 	// projectIDs are whk_1's project_ids; patches its PATCHes.
 	projectIDs []any
 	patches    []map[string]any
@@ -81,12 +90,38 @@ func (f *fakeTracker) assigned(key string) map[string]any {
 
 // send queues a message with events and returns its id.
 func (f *fakeTracker) send(events ...map[string]any) string {
+	return f.sendSetup(nil, events...)
+}
+
+// sendSetup queues a message whose batch carries setup.
+func (f *fakeTracker) sendSetup(setup map[string]any, events ...map[string]any) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.n++
 	id := fmt.Sprintf("msg_%d", f.n)
-	f.ready = append(f.ready, map[string]any{"id": id, "events": events})
+	m := map[string]any{"id": id, "events": events}
+	if setup != nil {
+		m["setup"] = setup
+	}
+	f.ready = append(f.ready, m)
 	return id
+}
+
+// setupChanged is agent.setup_changed of project key's values.
+func (f *fakeTracker) setupChanged(key string) map[string]any {
+	f.n++
+	return map[string]any{
+		"id": fmt.Sprintf("evt_%d", f.n), "seq": f.n, "type": "agent.setup_changed", "occurred_at": "2026-11-20T09:00:00.000Z", "channel": "ui",
+		"actor":   map[string]any{"id": "usr_flo", "handle": "flo"},
+		"project": map[string]any{"key": key}, "entity": map[string]any{"type": "principal", "id": "usr_ada"},
+		"data": map[string]any{"agent": map[string]any{"id": "usr_ada"}, "project": map[string]any{"key": key}},
+	}
+}
+
+// fill sets project key's values as a person would: its state is
+// unchecked until fleet reports again.
+func (f *fakeTracker) fill(key string, values map[string]any) {
+	f.get(func() { f.setup[key]["values"], f.setup[key]["state"] = values, "unchecked" })
 }
 
 func (f *fakeTracker) get(fn func()) {
@@ -149,12 +184,15 @@ func (f *fakeTracker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.n++
 			h := fmt.Sprintf("%s.h%d", m["id"], f.n)
 			f.inFlight[h] = m
+			body := map[string]any{
+				"webhook": map[string]any{"id": "whk_1", "route": map[string]any{}, "prompt": "Ship small pull requests."},
+				"trigger": "quiet", "events": m["events"],
+			}
+			if st, ok := m["setup"]; ok {
+				body["setup"] = st
+			}
 			out = append(out, map[string]any{
-				"message_id": m["id"], "receipt_handle": h,
-				"body": map[string]any{
-					"webhook": map[string]any{"id": "whk_1", "route": map[string]any{}, "prompt": "Ship small pull requests."},
-					"trigger": "quiet", "events": m["events"],
-				},
+				"message_id": m["id"], "receipt_handle": h, "body": body,
 				"attributes": map[string]any{"receive_count": 1},
 			})
 		}
@@ -174,6 +212,33 @@ func (f *fakeTracker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			delete(f.inFlight, h)
 		}
 		answer(h, ok)
+	case p == "/api/v1/me/setup" && f.setup != nil && r.Method == http.MethodPut:
+		var b map[string]any
+		json.NewDecoder(r.Body).Decode(&b)
+		f.declared, _ = b["fields"].([]any)
+		w.Write([]byte(`{}`))
+	case p == "/api/v1/me/setup" && f.setup != nil:
+		var ps []any
+		for _, k := range slices.Sorted(maps.Keys(f.setup)) {
+			ps = append(ps, f.setup[k])
+		}
+		json.NewEncoder(w).Encode(map[string]any{"agent": map[string]any{"id": "usr_ada"}, "fields": f.declared, "projects": ps})
+	case strings.HasPrefix(p, "/api/v1/me/setup/projects/") && f.setup != nil:
+		key := strings.TrimSuffix(strings.TrimPrefix(p, "/api/v1/me/setup/projects/"), "/report")
+		var b map[string]any
+		json.NewDecoder(r.Body).Decode(&b)
+		f.reports[key] = append(f.reports[key], b)
+		f.setup[key]["state"], f.setup[key]["report"] = b["state"], b
+		w.Write([]byte(`{}`))
+	case p == "/api/v1/issues":
+		q := r.URL.Query()
+		items := []any{}
+		if q.Get("assignee") == "me" && q.Get("category") == "todo" {
+			for _, k := range f.unstarted[q.Get("project")] {
+				items = append(items, map[string]any{"key": k})
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"items": items, "next_cursor": nil})
 	case p == "/api/v1/me/heartbeat":
 		f.beats = append(f.beats, body)
 		w.Write([]byte(`{}`))
@@ -718,4 +783,157 @@ path = %q
 	}
 	setCloseAfter("400ms")
 	waitFor(t, "d archived", func() bool { return !live(d.GetId()) })
+}
+
+// TestTasksSetup: fleet asks the tracker for each project's folder, works a
+// project set up there in it (unless config.toml maps the project),
+// reports per project whether it can work it, and takes up the tickets
+// assigned before a project could be worked.
+func TestTasksSetup(t *testing.T) {
+	old := []time.Duration{taskTick, taskPollMin, taskWait, taskSetupSync}
+	// Only a change makes fleet read the setup again after the first time.
+	taskTick, taskPollMin, taskWait, taskSetupSync = 50*time.Millisecond, 50*time.Millisecond, 0, time.Hour
+	t.Cleanup(func() { taskTick, taskPollMin, taskWait, taskSetupSync = old[0], old[1], old[2], old[3] })
+
+	e := newEnv(t)
+	e.stop()
+	e.adapters = []adapter.Adapter{taskAdapter{}}
+	proj, web, later := e.mkdir("rome"), e.mkdir("web"), e.mkdir("later")
+	f := &fakeTracker{inFlight: map[string]map[string]any{}, reports: map[string][]map[string]any{}, setup: map[string]map[string]any{
+		"ROME":  {"project": map[string]any{"key": "ROME"}, "values": map[string]any{}, "state": "unchecked"},
+		"WEB":   {"project": map[string]any{"key": "WEB"}, "values": map[string]any{"folder": web}, "state": "unchecked"},
+		"BAD":   {"project": map[string]any{"key": "BAD"}, "values": map[string]any{"folder": "/nowhere"}, "state": "unchecked"},
+		"LATER": {"project": map[string]any{"key": "LATER"}, "values": map[string]any{}, "state": "unchecked"},
+	}, unstarted: map[string][]string{"WEB": {"WEB-1", "WEB-2"}, "LATER": {"LATER-1"}}}
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("rome_sat_test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := os.OpenFile(filepath.Join(e.home, "config.toml"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(cfg, `
+[[tasks]]
+kind = "rome"
+url = %q
+token_file = %q
+adapter = "tasktest"
+max_agents = 10
+
+[[tasks.project]]
+key = "ROME"
+path = %q
+`, srv.URL, tokenFile, proj)
+	cfg.Close()
+	e.start()
+	c := e.dialUnix()
+
+	taskAgent := func(key string) *fleetv1.Agent {
+		for _, a := range c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_ListAgents{ListAgents: &fleetv1.ListAgentsRequest{}}}).GetListAgents().GetAgents() {
+			if slices.Contains(a.GetTask().GetKeys(), key) {
+				return a
+			}
+		}
+		return nil
+	}
+	report := func(key string) (state, msg string, n int) {
+		f.get(func() {
+			if rs := f.reports[key]; len(rs) > 0 {
+				state, _ = rs[len(rs)-1]["state"].(string)
+				msg, _ = rs[len(rs)-1]["message"].(string)
+				n = len(rs)
+			}
+		})
+		return
+	}
+	reported := func(key, state, want string) {
+		t.Helper()
+		waitFor(t, key+" reported "+state, func() bool { s, _, _ := report(key); return s == state })
+		if _, msg, _ := report(key); !strings.Contains(msg, want) {
+			t.Errorf("%s report = %q, want it to mention %q", key, msg, want)
+		}
+	}
+
+	// It asks for the folder of each project and reports each one.
+	reported("ROME", "ready", proj)
+	reported("WEB", "ready", web)
+	reported("BAD", "blocked", "/nowhere")
+	reported("LATER", "blocked", "Fill in Folder")
+	f.get(func() {
+		if len(f.declared) != 1 || f.declared[0].(map[string]any)["key"] != "folder" || f.declared[0].(map[string]any)["per"] != "project" {
+			t.Errorf("declared = %v", f.declared)
+		}
+	})
+
+	// WEB could be worked at once: the tickets assigned to the account in
+	// it get one agent in its folder.
+	var a *fleetv1.Agent
+	waitFor(t, "an agent for WEB-1 and WEB-2", func() bool { a = taskAgent("WEB-1"); return a != nil })
+	if a.GetCwd() != web || !slices.Equal(a.GetTask().GetKeys(), []string{"WEB-1", "WEB-2"}) {
+		t.Errorf("agent = %v, want WEB-1 and WEB-2 in %s", a, web)
+	}
+
+	src := c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_ListTaskSources{ListTaskSources: &fleetv1.ListTaskSourcesRequest{}}}).GetListTaskSources().GetSources()[0]
+	got := map[string]*fleetv1.TaskProject{}
+	for _, p := range src.GetProjects() {
+		got[p.GetKey()] = p
+	}
+	if p := got["ROME"]; p.GetTracker() || p.GetPath() != proj {
+		t.Errorf("ROME = %v, want the config.toml mapping", p)
+	}
+	if p := got["WEB"]; !p.GetTracker() || p.GetPath() != web || p.GetError() != "" {
+		t.Errorf("WEB = %v, want it set up in Rome", p)
+	}
+	if p := got["LATER"]; !p.GetTracker() || p.GetError() == "" {
+		t.Errorf("LATER = %v, want it not set up", p)
+	}
+
+	// A ticket of WEB goes to its folder; the folder a batch carries wins
+	// over the one fleet read (it is newer).
+	f.send(f.assigned("WEB-3"))
+	f.sendSetup(map[string]any{"values": map[string]any{}, "missing": []any{}, "projects": []any{
+		map[string]any{"project": map[string]any{"key": "BAD"}, "values": map[string]any{"folder": later}, "missing": []any{}, "state": "unchecked"},
+	}}, f.assigned("BAD-1"))
+	var b, d *fleetv1.Agent
+	waitFor(t, "agents for WEB-3 and BAD-1", func() bool { b, d = taskAgent("WEB-3"), taskAgent("BAD-1"); return b != nil && d != nil })
+	if b.GetCwd() != web || d.GetCwd() != later {
+		t.Errorf("WEB-3 in %s, BAD-1 in %s; want %s and %s", b.GetCwd(), d.GetCwd(), web, later)
+	}
+
+	// People fill in LATER's folder: the event makes fleet read the setup
+	// at once, report LATER ready and start the ticket assigned before.
+	f.fill("LATER", map[string]any{"folder": later})
+	f.send(f.setupChanged("LATER"))
+	reported("LATER", "ready", later)
+	var l *fleetv1.Agent
+	waitFor(t, "an agent for LATER-1", func() bool { l = taskAgent("LATER-1"); return l != nil })
+	if l.GetCwd() != later {
+		t.Errorf("LATER-1 in %s, want %s", l.GetCwd(), later)
+	}
+	// Nothing else changed: no other project was reported again.
+	for _, k := range []string{"ROME", "WEB"} {
+		if _, _, n := report(k); n != 1 {
+			t.Errorf("%s reported %d times, want once", k, n)
+		}
+	}
+
+	// A ticket of a project set up there starts by hand too; one of a
+	// project set up nowhere does not.
+	start := func(key string) *fleetv1.Agent {
+		return c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_StartTask{StartTask: &fleetv1.StartTaskRequest{Key: key}}}).GetStartTask().GetAgent()
+	}
+	if a := start("WEB-9"); a.GetCwd() != web {
+		t.Errorf("StartTask(WEB-9) in %s, want %s", a.GetCwd(), web)
+	}
+	c.fails(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_StartTask{StartTask: &fleetv1.StartTaskRequest{Key: "NONE-1"}}}, codeInvalid)
+
+	// Mapping a project in config.toml wins over its folder in Rome: fleet
+	// reports it again.
+	c.ok(&fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_EditTasks{EditTasks: &fleetv1.EditTasksRequest{
+		Op: &fleetv1.EditTasksRequest_MapProject{MapProject: &fleetv1.TaskProjectEdit{Key: "BAD", Path: &later}},
+	}}})
+	reported("BAD", "ready", "config.toml")
 }

@@ -783,8 +783,8 @@ message TaskProjectRef {
 }
 
 // Sets an option of a source: url, token_file, token_env, webhook,
-// disabled, max_agents, adapter, model, effort, isolation, sandbox, args
-// or instructions. No value unsets it; args takes several.
+// disabled, max_agents, close_after, adapter, model, effort, isolation,
+// sandbox, args or instructions. No value unsets it; args takes several.
 message TaskOption {
   string source = 1;
   string key = 2;
@@ -808,6 +808,9 @@ message TaskProject {
   // Why its tickets cannot start (the folder is outside every root, the
   // adapter is unknown), empty if they can.
   string error = 4;
+  // Set up on the tracker (Rome's agent setup: people filled in its
+  // folder there), not mapped in config.toml.
+  bool tracker = 5;
 }
 
 // Starts an agent on a ticket now, as if it had just been assigned, or

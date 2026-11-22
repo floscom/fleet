@@ -33,6 +33,10 @@ const (
 	// News on a ticket: Text goes to the agent working it. With Start, a
 	// new agent starts on the ticket when none works it.
 	News
+	// SetupChanged: people changed what the account was given to work
+	// Project (or every project, when Project is ""): read the setup again
+	// (Setuper). It names no ticket.
+	SetupChanged
 )
 
 // Event is something a Source reports.
@@ -79,6 +83,10 @@ type Message struct {
 	Prompt string
 	// Route are the tracker's routing fields (Rome: route.folder, ...).
 	Route map[string]string
+	// Setup are the setup values of the projects of its events, by project
+	// key in upper case, as the tracker rendered them when it sent the
+	// message (Setuper); nil if it sent none.
+	Setup map[string]map[string]string
 	// ReceiveCount counts the receives of the message, this one included.
 	ReceiveCount int
 }
@@ -177,6 +185,63 @@ type QueueSyncer interface {
 	// queue when projects is empty. It reports whether it changed it.
 	SyncQueue(ctx context.Context, projects []string) (bool, error)
 }
+
+// ErrUnsupported is returned by a Setuper whose tracker has no setup (an
+// older Rome).
+var ErrUnsupported = errors.New("the tracker does not support this")
+
+// Setuper is a Source whose people tell fleet, on the tracker, what it
+// needs to work a project (Rome's agent setup): fleet declares the
+// settings, people fill them in for each project the account is a member
+// of, and fleet reports per project whether it can work there.
+type Setuper interface {
+	// DeclareSetup replaces the settings the account asks for; the same
+	// list again changes nothing.
+	DeclareSetup(ctx context.Context, fields []SetupField) error
+	// ProjectSetups returns the setup of every project the account is a
+	// member of.
+	ProjectSetups(ctx context.Context) ([]ProjectSetup, error)
+	// ReportSetup tells the tracker what fleet made of project's setup.
+	ReportSetup(ctx context.Context, project string, r SetupReport) error
+	// Unstarted lists the keys of the tickets assigned to the account in
+	// project that nobody started yet (Rome: status category todo).
+	Unstarted(ctx context.Context, project string) ([]string, error)
+}
+
+// SetupField is a setting of each project the account asks people for.
+type SetupField struct {
+	Key, Label, Help string
+	// Required: a project without it cannot be worked.
+	Required bool
+}
+
+// ProjectSetup is the setup of a project the account is a member of.
+type ProjectSetup struct {
+	// Project is its key, in upper case.
+	Project string
+	Values  map[string]string
+	// State is the tracker's: SetupReady, SetupBlocked or SetupError when
+	// the latest report is newer than the last change, else "unchecked" (or
+	// "needs_setup" while a required value is missing).
+	State string
+	// Report is the latest report, also when it is older; zero if none.
+	Report SetupReport
+}
+
+// SetupReport is what fleet tells the tracker about a project's setup.
+type SetupReport struct {
+	// State is SetupReady, SetupBlocked or SetupError.
+	State string
+	// Message says what fleet found; required unless State is SetupReady.
+	Message string
+}
+
+// Setup report states.
+const (
+	SetupReady   = "ready"   // fleet can work the project
+	SetupBlocked = "blocked" // a person must act; Message says what
+	SetupError   = "error"   // something broke on fleet's side
+)
 
 // ErrNoQueue is returned by Queue when the account has no queue to receive
 // from.

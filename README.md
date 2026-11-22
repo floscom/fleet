@@ -445,12 +445,31 @@ path = "/mnt/data/rome"          # absolute, inside a root; or root = "code" (+ 
 defaults of 10 and 60) creates the account's **pull webhook**: a queue in
 Rome, with collected delivery, of what is addressed to the account in the
 mapped projects. That means assignments, mentions, answers to its asks,
-withdrawn asks and approval decisions. When you map or unmap a project
+withdrawn asks, approval decisions and changes to its setup. When you map or unmap a project
 later, or run `setup` again, fleet updates the webhook's projects to match.
 It leaves a webhook that carries every project alone, so it never widens
 what the account receives. If you set the webhook up in Rome yourself,
 fleet uses the account's only pull webhook, or the one `webhook` names.
-Its `prompt` and `route` work as described below.
+Its `prompt` and `route` work as described below. Add `agent.setup_changed`
+to its events so fleet hears about setup changes at once.
+
+**Setting projects up in Rome.** You can leave mapping to Rome's people
+instead of `fleet tasks map`. fleet declares the setting **Folder** through
+Rome's agent setup, and Rome then asks for a folder in each project the
+account is a member of. People fill it in under Project settings → Members,
+or on the agent's page. fleet works a project set up there in that folder,
+which must be absolute and inside one of your roots, unless `config.toml`
+maps the project: that mapping always wins. For each project fleet tells Rome
+whether it can work it: *ready* ("fleet on zerox works it in /srv/web"), or
+*blocked* with the reason ("Fill in Folder: …", "cannot use the folder
+/srv/x: …"), which gives the project's admins an inbox item. fleet reads the
+setup at start, every 2 minutes, at once on `agent.setup_changed` and when
+you map or unmap a project. When a project becomes ready, the tickets
+assigned to the account there that nobody started (status category To Do)
+get an agent, as if they had just been assigned. `fleet tasks` lists the
+projects set up in Rome, with their folder or what is missing. Keep in mind
+that whoever may edit a project's members in Rome chooses where on this
+machine its agents run, within your roots.
 
 Here is what happens:
 
@@ -464,7 +483,8 @@ Here is what happens:
   Unless `isolation` is set, it runs in its own worktree on a branch of
   that name. Its first message lists the tickets, each marked as data and
   not instructions. Tickets of unmapped projects are ignored, unless the
-  webhook's route has a `folder` (an absolute path inside a root) for them.
+  project is set up in Rome (see above) or the webhook's route has a
+  `folder` (an absolute path inside a root) for them.
   Events from Rome's Jira and Linear importer are ignored.
 - **Leases.** A batch stays leased in Rome while its agents work; fleet
   renews the lease every few minutes. It deletes the batch once its agents
