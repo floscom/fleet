@@ -729,6 +729,46 @@ No errors.
 - Errors: `INVALID_ARGUMENT` (relative path, not a directory);
   `NOT_FOUND` (path does not exist).
 
+**`ListReposRequest{query}` → `ListReposResponse{repos, login, work_dir}`**
+
+- GitHub repositories to start a project from, as the daemon host's
+  GitHub CLI (`gh`) sees them, signed in as the daemon's user. `query`
+  `""`: the repositories the account owns, collaborates on or sees through
+  its organizations, most recently pushed first, at most 100. Otherwise a
+  GitHub repository search (GitHub's search syntax), at most 30.
+- Each `Repo` has `full_name` (`owner/name`), `description`, `private`,
+  `fork`, `archived`, `pushed_at_ms`, `url` (its GitHub page), `can_push`
+  (the account may push to it: a client may offer trust for it by
+  default) and `local_path`: a folder on the host that already is a clone
+  of it (a root, or `<work_dir>/<name>`; compared by the `origin` remote),
+  `""` if none.
+- `login` is the GitHub account; `work_dir` is where `CloneRepoRequest`
+  clones by default.
+- Errors: `ADAPTER_UNAVAILABLE` (`gh` not installed, or not signed in on
+  the host); `INVALID_ARGUMENT` (query over 256 bytes, or what `gh`
+  reported).
+
+**`CloneRepoRequest{repo, path, trust, adapters}` → `CloneRepoResponse{root, existed}`**
+
+- Clones `repo` (`owner/name`, or a github.com link to it or a page in it,
+  https or ssh) with `gh repo clone`: `gh`'s credentials and git protocol;
+  a fork gets its parent as the remote `upstream`. Git never prompts.
+- `path` is absolute or `~/...`; `""` is `<work_dir>/<name>`, or, when
+  the repository is already cloned there or as a root (any letter case),
+  that folder. Folders leading to it are made. The clone goes into a
+  hidden folder beside `path` and is moved into place once complete, so a
+  failed or cut-off clone leaves nothing. It carries on (up to 10 minutes)
+  when the client disconnects.
+- The clone is added as a root with `trust` and `adapters` (as in
+  `AddRootRequest`), broadcast as `Event.roots_changed`. When `path`
+  already is a clone of the repository, nothing is cloned and `existed` is
+  set; it becomes a root unless it is one (then `root` is that root, as
+  it is).
+- Errors: `INVALID_ARGUMENT` (not a GitHub repository, relative path,
+  what `gh` reported); `ALREADY_EXISTS` (another folder, or a file, at
+  `path`); `NOT_FOUND` (unknown adapter); `ADAPTER_UNAVAILABLE` (`gh` not
+  installed or not signed in).
+
 **`BrowseRequest{root, path, include_hidden}` → `BrowseResponse{root, path, entries}`**
 
 - Lists the sub-directories of `root`/`path`. `path` is relative; `""` or
@@ -1122,7 +1162,7 @@ Client                                  Daemon
 - `agent_removed`: the agent id; it was forgotten, trimmed from history, or
   its start failed.
 - `roots_changed`: the full new root list and the work folder after
-  `AddRoot` / `RemoveRoot` / `SetWorkDir`.
+  `AddRoot` / `RemoveRoot` / `SetWorkDir` / `CloneRepo`.
   Roots are **not** part of the snapshot: call `ListRootsRequest` once
   after subscribing.
 - The snapshot includes finished agents (the same set as

@@ -113,6 +113,18 @@ func (c *conn) dispatch(id uint64, m *fleetv1.ClientMessage) error {
 			return err
 		}
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_SetWorkDir{SetWorkDir: &fleetv1.SetWorkDirResponse{WorkDir: w}}})
+	case *fleetv1.ClientMessage_ListRepos:
+		r, err := d.listRepos(c.ctx, msg.ListRepos)
+		if err != nil {
+			return err
+		}
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_ListRepos{ListRepos: r}})
+	case *fleetv1.ClientMessage_CloneRepo:
+		r, err := d.cloneRepo(c.ctx, msg.CloneRepo)
+		if err != nil {
+			return err
+		}
+		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_CloneRepo{CloneRepo: r}})
 	case *fleetv1.ClientMessage_ListTaskSources:
 		return c.reply(id, &fleetv1.ServerMessage{Msg: &fleetv1.ServerMessage_ListTaskSources{ListTaskSources: &fleetv1.ListTaskSourcesResponse{Sources: d.tasks.listSources()}}})
 	case *fleetv1.ClientMessage_StartTask:

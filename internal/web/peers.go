@@ -225,12 +225,12 @@ func forwardable(method, rest string) bool {
 	switch method {
 	case http.MethodGet:
 		switch rest {
-		case "session", "fs", "adapters", "usage", "host", "update", "roots", "agents", "workflows":
+		case "session", "fs", "adapters", "usage", "host", "update", "roots", "repos", "agents", "workflows":
 			return true
 		}
 		return agentRoute(rest, "chat", "screen", "workflows", "image", "media", "files", "file", "dir") || workflowChatRoute(rest, "chat", "image")
 	case http.MethodPost:
-		return rest == "fs" || rest == "roots" || rest == "agents" || rest == "uploads" || rest == "update" || agentRoute(rest, "input", "interrupt", "answer", "model", "note", "queue", "stop", "merge", "git", "send", "resume")
+		return rest == "fs" || rest == "roots" || rest == "repos/clone" || rest == "agents" || rest == "uploads" || rest == "update" || agentRoute(rest, "input", "interrupt", "answer", "model", "note", "queue", "stop", "merge", "git", "send", "resume")
 	case http.MethodPut, http.MethodDelete:
 		if method == http.MethodPut && rest == "workdir" {
 			return true
@@ -282,6 +282,12 @@ func forwardTimeout(method, rest string) time.Duration {
 	}
 	if method == http.MethodPost && rest == "update" {
 		return updateTimeout
+	}
+	if method == http.MethodGet && rest == "repos" {
+		return reposTimeout
+	}
+	if method == http.MethodPost && rest == "repos/clone" {
+		return cloneTimeout
 	}
 	if method == http.MethodPost && agentRoute(rest, "git") {
 		return gitTimeout
@@ -419,12 +425,15 @@ func (s *Server) forwardBody(ctx context.Context, p Peer, key, method, uri strin
 		mac := peerMACSum(key, p.ID, nonce, method, req.URL.RequestURI(), body.sum)
 		req.Header.Set("Authorization", peerScheme+nonce+"."+hex.EncodeToString(mac))
 		client := s.peerHTTP
+		if _, ok := ctx.Deadline(); ok || body.stream {
+			// Bound by ctx alone: a git push, a clone or a big file may
+			// take longer than peerHTTP's backstop.
+			client = &http.Client{Transport: s.peerHTTP.Transport, CheckRedirect: s.peerHTTP.CheckRedirect}
+		}
 		switch {
 		case body.stream:
 			req.Header.Set(bodyHashHeader, hex.EncodeToString(body.sum))
 			req.Header.Set("Content-Type", "application/octet-stream")
-			// Bound by ctx alone: big files take long.
-			client = &http.Client{Transport: s.peerHTTP.Transport, CheckRedirect: s.peerHTTP.CheckRedirect}
 		case body.size > 0:
 			req.Header.Set("Content-Type", "application/json")
 		}

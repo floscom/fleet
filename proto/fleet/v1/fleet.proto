@@ -56,6 +56,10 @@ message ClientMessage {
     UpdateRequest update = 27;
     SetWorkDirRequest set_work_dir = 28;
 
+    // GitHub repositories to start a project from
+    ListReposRequest list_repos = 80;
+    CloneRepoRequest clone_repo = 81;
+
     // Task trackers ([[tasks]] in config.toml)
     ListTaskSourcesRequest list_task_sources = 70;
     StartTaskRequest start_task = 71;
@@ -113,6 +117,9 @@ message ServerMessage {
     GetHostStatsResponse get_host_stats = 26;
     UpdateResponse update = 27;
     SetWorkDirResponse set_work_dir = 28;
+
+    ListReposResponse list_repos = 80;
+    CloneRepoResponse clone_repo = 81;
 
     ListTaskSourcesResponse list_task_sources = 70;
     StartTaskResponse start_task = 71;
@@ -472,6 +479,71 @@ message DirEntry {
   bool is_git_repo = 2;
   // Number of live agents whose cwd is this directory or below.
   int32 agent_count = 3;
+}
+
+// ---------------------------------------------------------------------------
+// GitHub repositories
+// ---------------------------------------------------------------------------
+
+// Lists GitHub repositories to start a project from, as the daemon host's
+// GitHub CLI (gh) sees them, signed in as its user. Without a query: the
+// repositories the account owns, collaborates on or sees through its
+// organizations, most recently pushed first (up to 100). With one: a
+// GitHub repository search (up to 30). Fails ADAPTER_UNAVAILABLE when gh
+// is not installed or not signed in on the host.
+message ListReposRequest {
+  // GitHub search syntax, e.g. "fleet" or "user:octocat cli"; "" lists the
+  // account's own repositories.
+  string query = 1;
+}
+message ListReposResponse {
+  repeated Repo repos = 1;
+  // The GitHub account gh is signed in as.
+  string login = 2;
+  // The work folder: CloneRepoRequest clones into it by default.
+  string work_dir = 3;
+}
+
+message Repo {
+  // "owner/name": what CloneRepoRequest.repo takes.
+  string full_name = 1;
+  string description = 2;
+  bool private = 3;
+  bool fork = 4;
+  bool archived = 5;
+  // Last push, Unix ms; 0 if unknown.
+  int64 pushed_at_ms = 6;
+  // Its page on GitHub.
+  string url = 7;
+  // The signed-in account may push to it.
+  bool can_push = 8;
+  // A folder on the host that already is a clone of it (a root, or
+  // <work folder>/<name>): absolute, "" if none was found.
+  string local_path = 9;
+}
+
+// Clones a GitHub repository with the daemon host's GitHub CLI (gh repo
+// clone: its credentials, its git protocol; a fork gets its parent as the
+// remote "upstream") and adds the clone as a root, so agents can start in
+// it right away. When path already is a clone of the repository it is
+// used as it is (and made a root if it is none); any other folder there
+// fails ALREADY_EXISTS.
+message CloneRepoRequest {
+  // "owner/name", or its github.com URL (https or ssh).
+  string repo = 1;
+  // Absolute path on the daemon host, or "~/..."; "" is
+  // <work folder>/<name>. Folders leading to it are made.
+  string path = 2;
+  // As AddRootRequest.trust, for the new root.
+  bool trust = 3;
+  // As AddRootRequest.adapters, for the new root.
+  repeated string adapters = 4;
+}
+message CloneRepoResponse {
+  // The root of the clone: new, or the one it already was.
+  Root root = 1;
+  // The folder was already a clone of the repository: nothing was cloned.
+  bool existed = 2;
 }
 
 // ---------------------------------------------------------------------------

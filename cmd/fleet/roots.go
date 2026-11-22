@@ -101,8 +101,105 @@ MCP servers and settings, so only use it for code you trust.`,
 			})
 		},
 	}
-	cmd.AddCommand(add, rm)
+	var cloneAdapters []string
+	var cloneTrust bool
+	clone := &cobra.Command{
+		Use:   "clone <owner/repo> [path]",
+		Short: "Clone a GitHub repository into the work folder and add it as a root",
+		Long: `Clone a GitHub repository on the daemon's machine and add the clone as
+a root, ready to start agents in. The machine's GitHub CLI (gh) clones
+it, signed in as its user; a fork gets its parent as the remote
+"upstream". It goes into the work folder (fleet workdir) unless a path
+is given. A folder that already is a clone of the repository is used as
+it is.
+
+See fleet repos for the repositories gh sees. --trust works as for
+fleet roots add.`,
+		Example: "  fleet roots clone octocat/hello-world --trust\n  fleet roots clone https://github.com/octocat/hello-world ~/src/hello",
+		Args:    cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var p string
+			if len(args) > 1 {
+				// "~" is the daemon host's home: it expands it.
+				if p = args[1]; p != "~" && !strings.HasPrefix(p, "~/") {
+					var err error
+					if p, err = hostPath(p); err != nil {
+						return err
+					}
+				}
+			}
+			return withClient(cmd, func(ctx context.Context, c *client.Client) error {
+				fmt.Fprintf(cmd.ErrOrStderr(), "cloning %s…\n", args[0])
+				r, err := c.CloneRepo(ctx, &fleetv1.CloneRepoRequest{Repo: args[0], Path: p, Trust: cloneTrust, Adapters: cloneAdapters})
+				if err != nil {
+					return err
+				}
+				root := r.GetRoot()
+				what := "cloned into"
+				if r.GetExisted() {
+					what = "already cloned in"
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "%s %s; root %s (adapters: %s, trust: %s)\n", what, root.GetPath(), root.GetName(), adapterList(root.GetAdapters()), yesNo(root.GetTrust()))
+				return nil
+			})
+		},
+	}
+	clone.Flags().StringSliceVar(&cloneAdapters, "adapters", nil, "adapters allowed in the new root, e.g. claude,codex (default: all)")
+	clone.Flags().BoolVar(&cloneTrust, "trust", false, "pre-answer the agent CLIs' folder trust prompt for agents started here")
+
+	cmd.AddCommand(add, clone, rm)
 	return cmd
+}
+
+func newReposCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "repos [query]",
+		Short: "List GitHub repositories to start a project from",
+		Long: `List the GitHub repositories the daemon machine's GitHub CLI (gh) sees,
+signed in as its user: those it owns, collaborates on or sees through its
+organizations, most recently pushed first. With a query, search GitHub
+instead (GitHub search syntax).
+
+CLONED shows where a repository is already cloned on the machine. Clone
+one with fleet roots clone <owner/repo>.`,
+		Example: "  fleet repos\n  fleet repos \"cli user:octocat\"",
+		Args:    cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			q := ""
+			if len(args) > 0 {
+				q = args[0]
+			}
+			return withClient(cmd, func(ctx context.Context, c *client.Client) error {
+				r, err := c.ListRepos(ctx, q)
+				if err != nil {
+					return err
+				}
+				out := cmd.OutOrStdout()
+				if len(r.GetRepos()) == 0 {
+					fmt.Fprintln(out, "no repositories")
+					return nil
+				}
+				t := newTable(out, "REPOSITORY", "PUSHED", "", "CLONED")
+				for _, x := range r.GetRepos() {
+					var tags []string
+					for _, tag := range []struct {
+						on   bool
+						name string
+					}{{x.GetPrivate(), "private"}, {x.GetFork(), "fork"}, {x.GetArchived(), "archived"}} {
+						if tag.on {
+							tags = append(tags, tag.name)
+						}
+					}
+					t.row(x.GetFullName(), age(x.GetPushedAtMs()), strings.Join(tags, ","), orDash(x.GetLocalPath()))
+				}
+				t.flush()
+				if r.GetLogin() != "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "as %s on GitHub; clones go to %s\n", r.GetLogin(), r.GetWorkDir())
+				}
+				return nil
+			})
+		},
+	}
 }
 
 func newWorkDirCmd() *cobra.Command {

@@ -5799,6 +5799,9 @@
     gen: 0, // bumped for another machine: stale replies are dropped
     busy: false, // a start is in flight
     making: false, // a new folder is being made
+    repos: null, // the machine's GitHub repositories: {loading, list, login, error}
+    repoSearch: null, // a GitHub search: {q, loading, list, error}
+    cloning: false, // a repository is being cloned
     error: '',
     then: '', // what to show once started, if a shortcut says so
     iso: '', // checkout: '' auto, worktree, pinned (kept, see LAUNCH_OPTS)
@@ -5890,6 +5893,8 @@
     launch.home = '';
     launch.dirs = new Map();
     launch.look = '';
+    launch.repos = null;
+    launch.repoSearch = null;
     launch.error = '';
     renderLaunch();
     let err = '';
@@ -6191,7 +6196,7 @@
     if (!launch.adapters) return [note('Loading…')];
     const roots = launchRoots();
     const q = launch.q.trim().toLowerCase();
-    if (!roots.length && !q) return [note('No folders on this machine yet: make one below.')];
+    if (!roots.length && !q) return [note('No folders on this machine yet: make one, or clone one from GitHub, below.')];
     if (q) return searchRows(q);
     const l = launch.look;
     if (l) {
@@ -6245,16 +6250,111 @@
     if (listing) rows.push({ note: 'Still listing folders…' });
     else if (!hits.length) rows.push({ note: `No folder matches “${q}”: look inside one (›) to search its folders too` });
     const typed = launch.q.trim();
-    if (words.length === 1 && !hits.some((x) => x.score === 0)) rows.push({ make: /^[~/]/.test(typed) ? typed : joinPath(launchWork(), typed) });
+    // A GitHub link pasted in: clone it.
+    const repo = /github\.com/i.test(typed) && ghRepoName(typed);
+    if (repo) rows.unshift({ clone: repo });
+    else if (words.length === 1 && !hits.some((x) => x.score === 0)) rows.push({ make: /^[~/]/.test(typed) ? typed : joinPath(launchWork(), typed) });
     return rows;
+  }
+
+  // ghRepoName is "owner/name" of a GitHub repository typed as such or as
+  // a link to it (a page in it, an ssh address); '' for anything else.
+  function ghRepoName(s) {
+    s = s.trim();
+    const m = s.match(/^(?:(?:https?|ssh):\/\/(?:[^@/\s]+@)?)?github\.com\/([^/\s]+)\/([^/\s?#]+)/i)
+      || s.match(/^[\w.-]+@github\.com:([^/\s]+)\/([^/\s]+)$/i)
+      || s.match(/^([^/\s]+)\/([^/\s]+)$/);
+    if (!m) return '';
+    const owner = m[1];
+    const name = m[2].replace(/\.git$/i, '');
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(owner) || !/^[\w.-]+$/.test(name) || name === '.' || name === '..') return '';
+    return owner + '/' + name;
+  }
+
+  // repoRows is what the GitHub list shows for the search q, as plain
+  // data: the account's repositories that match, then a GitHub search.
+  function repoRows(q) {
+    const r = launch.repos;
+    if (!r || r.loading) return [{ note: 'Asking GitHub…' }];
+    if (r.error) return [{ note: r.error, err: true }];
+    const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+    const typed = ghRepoName(q);
+    const known = (name) => r.list.some((x) => x.fullName.toLowerCase() === name.toLowerCase());
+    const mine = words.length ? r.list.filter((x) => {
+      const text = (x.fullName + ' ' + (x.description || '')).toLowerCase();
+      return words.every((w) => text.includes(w));
+    }) : r.list;
+    const rows = [];
+    if (typed && !known(typed)) rows.push({ clone: typed });
+    if (mine.length) rows.push({ head: r.login ? `Repositories of ${r.login}` : 'Your repositories' });
+    rows.push(...mine.slice(0, LAUNCH_FOUND_MAX).map((x) => ({ repo: x })));
+    if (mine.length > LAUNCH_FOUND_MAX) rows.push({ note: `${mine.length - LAUNCH_FOUND_MAX} more: type more to narrow them down` });
+    if (!words.length) {
+      if (!r.list.length) rows.push({ note: 'No repositories yet: search GitHub above, or paste owner/name' });
+      return rows;
+    }
+    if (!mine.length && !typed) rows.push({ note: `None of your repositories match “${q.trim()}”` });
+    const sr = launch.repoSearch;
+    if (typed && /github\.com/i.test(q)) return rows; // a link: nothing to search for
+    if (!sr || sr.q !== q.trim()) rows.push({ search: q.trim() });
+    else if (sr.loading) rows.push({ note: 'Searching GitHub…' });
+    else if (sr.error) rows.push({ note: sr.error, err: true });
+    else {
+      const more = sr.list.filter((x) => !mine.some((y) => y.fullName === x.fullName));
+      rows.push({ head: 'On GitHub' }, ...more.map((x) => ({ repo: x })));
+      if (!more.length) rows.push({ note: sr.list.length ? 'Nothing else on GitHub' : 'GitHub found nothing' });
+    }
+    return rows;
+  }
+
+  // reposError says why the machine cannot list repositories.
+  const reposError = (e, host) => (e.status === 405 || (e.status === 404 && /^request failed/.test(e.message))
+    ? `${hostName(host)} runs an older fleet: update it to clone from GitHub here.` : e.message);
+
+  // loadRepos lists the chosen machine's GitHub repositories, once.
+  async function loadRepos(paint, again) {
+    if (launch.repos && !again && !launch.repos.error) return;
+    const host = launch.host;
+    const gen = launch.gen;
+    launch.repos = { loading: true, list: [], login: '', error: '' };
+    paint();
+    let r = { loading: false, list: [], login: '', error: '' };
+    try {
+      const res = await api('GET', launchAPI('repos'));
+      r = { loading: false, list: res.repos || [], login: res.login || '', error: '' };
+    } catch (e) {
+      r.error = reposError(e, host);
+    }
+    if (gen !== launch.gen) return;
+    launch.repos = r;
+    paint();
+  }
+
+  // searchRepos searches GitHub for q on the chosen machine.
+  async function searchRepos(q, paint) {
+    const host = launch.host;
+    const gen = launch.gen;
+    const sr = { q, loading: true, list: [], error: '' };
+    launch.repoSearch = sr;
+    paint();
+    try {
+      sr.list = (await api('GET', launchAPI('repos?' + new URLSearchParams({ q })))).repos || [];
+    } catch (e) {
+      sr.error = reposError(e, host);
+    }
+    sr.loading = false;
+    if (gen === launch.gen && launch.repoSearch === sr) paint();
   }
 
   // The folder picker: recent folders and roots, the search, or the folders
   // in one folder. A click on a row chooses it, › looks inside; New folder
   // makes one, as a root.
-  function folderPicker(anchor) {
+  function folderPicker(anchor, o = {}) {
     let making = null; // the new folder's path while its form shows
     let note = null; // {text, err} under the form
+    let gh = !!o.gh; // GitHub repositories show instead of folders
+    let ghQ = ''; // their search
+    let cloning = null; // {repo, path, trust} while its form shows
     openMenu(anchor, (el, close, menu) => {
       const input = h('input', { type: 'search', placeholder: keyboard() ? 'Search folders · ↓ to move · → to look inside' : 'Search folders', 'aria-label': 'Search folders', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false', value: launch.q });
       const crumbs = h('nav', { class: 'crumbs', 'aria-label': 'Folder you look into' });
@@ -6276,9 +6376,52 @@
         paint();
         if (keyboard()) input.focus();
       };
+      // toGitHub switches to the GitHub repositories (on) or back.
+      const toGitHub = (on, repo) => {
+        gh = on;
+        making = null;
+        cloning = null;
+        note = null;
+        ghQ = '';
+        input.value = on ? '' : launch.q;
+        input.placeholder = on ? 'Search repositories, or paste owner/name or a link' : keyboard() ? 'Search folders · ↓ to move · → to look inside' : 'Search folders';
+        input.setAttribute('aria-label', on ? 'Search GitHub repositories' : 'Search folders');
+        list.setAttribute('aria-label', on ? 'GitHub repositories' : 'Folders');
+        if (on) {
+          loadRepos(paint);
+          if (repo) openClone(repo);
+        }
+        paint();
+        if (keyboard() && !repo) input.focus();
+      };
+      // openClone shows the clone form for repo ({fullName, canPush}),
+      // or chooses the root of a clone the machine has.
+      const openClone = (repo) => {
+        making = null;
+        note = null;
+        const root = repo.localPath && launchRoots().find((r) => r.path === repo.localPath);
+        if (root) return choose(root.path);
+        cloning = {
+          repo: repo.fullName, trust: !!repo.canPush, existing: !!repo.localPath,
+          path: repo.localPath ? tilde(repo.localPath) : joinPath(launchWork(), repo.fullName.split('/')[1]),
+        };
+        paint();
+      };
+      const startClone = async (c) => {
+        note = { text: c.existing ? 'Adding it…' : `Cloning ${c.repo}… a big repository can take a minute.` };
+        cloning = c;
+        paint();
+        const root = await cloneRepo(c.repo, c.path, c.trust, (text) => {
+          note = { text, err: true };
+        });
+        if (root) choose(root.path);
+        else if (MENU === menu) paint();
+      };
       const paint = () => {
         const notJoined = launch.host && hostState(launch.host) === 'not_joined';
         const focusedKey = list.contains(document.activeElement) ? document.activeElement.dataset.key : '';
+        if (gh) return paintGitHub(notJoined, focusedKey);
+        foot.hidden = false;
         crumbs.hidden = !launch.look || !!launch.q.trim();
         if (!crumbs.hidden) {
           const chain = [];
@@ -6299,6 +6442,7 @@
               paint();
             } });
           }
+          if (row.clone) return cloneItem(row.clone, () => toGitHub(true, { fullName: row.clone }));
           const chosen = row.path === launch.path;
           const b = h('button', { type: 'button', class: 'mi', role: 'option', 'aria-selected': String(chosen), 'data-key': row.path, title: shortPath(row.path), onclick: () => choose(row.path) },
             icon('folder'), h('span', 'grow', h('span', null, row.name), h('span', 'path', row.where)), row.git ? h('span', 'tag', 'git') : null, chosen ? icon('check', 'check') : null);
@@ -6342,11 +6486,76 @@
             making = joinPath(launch.look ? tilde(launch.look) : launchWork(), '');
             note = null;
             paint();
-          } }));
+          } }), notJoined ? null : mi({ icon: 'download', label: 'Clone from GitHub', sub: 'one of your repositories, or any on GitHub', onSelect: () => toGitHub(true) }));
         }
       };
+      const cloneItem = (name, onSelect) => mi({ icon: 'download', cls: 'make', label: `Clone ${name}`, sub: `from GitHub into ${joinPath(launchWork(), name.split('/')[1])}`, onSelect });
+      // paintGitHub paints the GitHub repositories, and the clone form.
+      const paintGitHub = (notJoined, focusedKey) => {
+        crumbs.hidden = false;
+        const r = launch.repos;
+        fill(crumbs, h('button', { type: 'button', onclick: () => toGitHub(false) }, 'Folders'), ' / ',
+          h('span', { 'aria-current': 'location' }, r && r.login ? `GitHub · ${r.login}` : 'GitHub'));
+        const rows = notJoined ? [{ note: 'Not in this fleet yet' }] : repoRows(ghQ);
+        fill(list, rows.map((row) => {
+          if (row.head) return h('div', 'menu-l', row.head);
+          if (row.note) return h('p', 'menu-note' + (row.err ? ' err' : ''), row.note,
+            row.err && r && r.error ? [' ', h('button', { type: 'button', class: 'link-btn', onclick: () => loadRepos(paint, true) }, 'Try again')] : null);
+          if (row.search) return mi({ icon: 'search', label: `Search GitHub for “${row.search}”`, sub: 'public repositories, and the private ones you can see', onSelect: () => searchRepos(row.search, paint) });
+          if (row.clone) return cloneItem(row.clone, () => openClone({ fullName: row.clone }));
+          const x = row.repo;
+          const tags = [x.fork && 'fork', x.archived && 'archived', x.localPath && 'cloned'].filter(Boolean);
+          const chosen = cloning && cloning.repo === x.fullName;
+          return h('div', 'frow', h('button', {
+            type: 'button', class: 'mi repo', role: 'option', 'aria-selected': String(!!chosen), 'data-key': x.fullName,
+            title: x.localPath ? `${x.fullName}: cloned in ${shortPath(x.localPath)}` : x.fullName, onclick: () => openClone(x),
+          }, h('span', { class: 'repo-i', title: x.private ? 'Private' : 'Public' }, icon(x.private ? 'lock' : 'branch')),
+          h('span', 'grow', h('span', null, x.fullName), x.localPath ? h('span', 'path', shortPath(x.localPath)) : x.description ? h('span', 'path desc', x.description) : null),
+          tags.map((t) => h('span', 'tag' + (t === 'cloned' ? ' ok' : ''), t)),
+          x.pushedAtMs ? relTime(x.pushedAtMs, 'right') : null));
+        }));
+        if (focusedKey) [...list.querySelectorAll('[data-key]')].find((x) => x.dataset.key === focusedKey)?.focus();
+        if (!cloning) {
+          const ready = r && !r.loading && !r.error && !notJoined;
+          fill(foot, ready ? h('p', 'menu-note', `Pick one to clone it into ${launchWork()} on ${hostName(launch.host)} with its GitHub CLI.`) : null);
+          foot.hidden = !ready;
+          return;
+        }
+        foot.hidden = false;
+        const c = cloning;
+        const p = h('input', { class: 'input mono', value: c.path, 'aria-label': 'Clone into', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' });
+        const trust = h('input', { type: 'checkbox', checked: c.trust });
+        const go = () => {
+          const path = p.value.trim();
+          if (launch.cloning || !path || /^~?\/*$/.test(path)) return p.focus();
+          startClone({ repo: c.repo, path, trust: trust.checked });
+        };
+        p.addEventListener('input', () => { c.path = p.value; });
+        trust.addEventListener('change', () => { c.trust = trust.checked; });
+        p.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            go();
+          } else if (ev.key === 'Escape') {
+            ev.preventDefault();
+            ev.stopPropagation();
+            cloning = null;
+            note = null;
+            paint();
+          }
+        });
+        fill(foot, h('div', 'newfolder',
+          h('div', 'menu-l', c.existing ? `${c.repo} is cloned in` : `Clone ${c.repo} into`),
+          h('div', 'row2', p, h('button', { type: 'button', class: 'btn primary sm', disabled: launch.cloning, onclick: go }, launch.cloning ? 'Cloning…' : c.existing ? 'Add' : 'Clone'),
+            iconBtn('x', 'Cancel the clone', () => { cloning = null; note = null; paint(); }, { attrs: launch.cloning ? { disabled: '' } : {} })),
+          h('label', 'check-row', trust, h('span', null, h('strong', null, 'Trust it: '), 'agents skip the “Do you trust this folder?” prompt, and the repository’s own hooks and settings run. Ticked for repositories you can push to.')),
+          note ? h('p', 'menu-note' + (note.err ? ' err' : ''), note.text)
+            : h('p', 'menu-note', c.existing ? 'Added as a root and chosen to start in.' : `Cloned on ${hostName(launch.host)} with its GitHub CLI, added as a root, and chosen to start in.`)));
+        if (!launch.cloning) setTimeout(() => p.focus());
+      };
       input.addEventListener('input', () => {
-        launch.q = input.value;
+        if (gh) ghQ = input.value;
+        else launch.q = input.value;
         paint();
       });
       input.addEventListener('keydown', (ev) => {
@@ -6356,7 +6565,10 @@
           first.focus();
         } else if (ev.key === 'Enter') {
           ev.preventDefault(); // with a search, choose the first match
-          if (launch.q.trim() && first) first.click();
+          if ((gh ? ghQ : launch.q).trim() && first) first.click();
+        } else if (ev.key === 'Backspace' && !input.value && gh) {
+          ev.preventDefault();
+          toGitHub(false);
         } else if (ev.key === 'Backspace' && !input.value && launch.look) {
           ev.preventDefault();
           const up = parentOf(launch.look);
@@ -6365,7 +6577,7 @@
       });
       list.addEventListener('keydown', (ev) => {
         const b = ev.target.closest('[data-key]');
-        if (!b) return;
+        if (!b || gh) return;
         if (ev.key === 'ArrowRight') {
           const look = b.parentElement.querySelector('.look');
           if (look) {
@@ -6380,7 +6592,8 @@
       });
       el.append(h('div', 'folders', h('label', 'search', icon('search', 'i-sm'), input), crumbs, list, foot));
       menu.repaint = paint;
-      paint();
+      if (gh) toGitHub(true);
+      else paint();
       // The chosen folder in view.
       setTimeout(() => list.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: 'center' }));
     }, { label: 'Folder', role: 'dialog', wide: true, focus: touch() ? null : 'input' });
@@ -6404,7 +6617,14 @@
     }
     launch.making = false;
     if (gen !== launch.gen || !root) return null;
-    // Known before the roots are sent again.
+    rootMade(root, host);
+    toast(`Made ${shortPath(root.path)}${host ? ' on ' + hostName(host) : ''}, a new root`);
+    return root;
+  }
+
+  // rootMade lists a root just made on machine host (a new folder, a
+  // clone) before the roots are sent again.
+  function rootMade(root, host) {
     const roots = host ? launch.roots : S.roots;
     if (roots && !roots.some((r) => r.name === root.name)) {
       roots.push(root);
@@ -6416,7 +6636,29 @@
       listDir(parent);
     }
     listDir(root.path);
-    toast(`Made ${shortPath(root.path)}${host ? ' on ' + hostName(host) : ''}, a new root`);
+  }
+
+  // cloneRepo clones repo ("owner/name") into path on the chosen machine
+  // and makes it a root, or finds the clone there. It returns the root, or
+  // null after telling fail why.
+  async function cloneRepo(repo, path, trust, fail) {
+    const host = launch.host;
+    const gen = launch.gen;
+    launch.cloning = true;
+    let res = null;
+    try {
+      res = await api('POST', launchAPI('repos/clone'), { repo, path, trust, adapters: [] });
+    } catch (e) {
+      fail(reposError(e, host));
+    }
+    launch.cloning = false;
+    if (gen !== launch.gen || !res) return null;
+    const root = res.root;
+    rootMade(root, host);
+    for (const list of [launch.repos && launch.repos.list, launch.repoSearch && launch.repoSearch.list]) {
+      for (const x of list || []) if (x.fullName.toLowerCase() === repo.toLowerCase()) x.localPath = root.path;
+    }
+    toast(res.existed ? `${repo} is in ${shortPath(root.path)}${host ? ' on ' + hostName(host) : ''}` : `Cloned ${repo} into ${shortPath(root.path)}${host ? ' on ' + hostName(host) : ''}`);
     return root;
   }
 

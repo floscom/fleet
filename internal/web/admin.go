@@ -52,6 +52,11 @@ const (
 	hostTimeout = 5 * time.Second
 	// updateTimeout bounds looking for a fleet release and installing it.
 	updateTimeout = 100 * time.Second
+	// reposTimeout bounds listing or searching GitHub repositories (a few
+	// gh calls); cloneTimeout cloning one, which the daemon carries on
+	// with when the browser stops waiting.
+	reposTimeout = 40 * time.Second
+	cloneTimeout = 11 * time.Minute
 )
 
 // Error is a Source error shown to the user with an HTTP status.
@@ -263,6 +268,8 @@ func (s *Server) apiHandler() http.Handler {
 	admin.HandleFunc("PUT /api/roots/{name}", s.apiUpdateRoot)
 	admin.HandleFunc("DELETE /api/roots/{name}", s.apiRemoveRoot)
 	admin.HandleFunc("PUT /api/workdir", s.apiSetWorkDir)
+	admin.HandleFunc("GET /api/repos", s.apiRepos)
+	admin.HandleFunc("POST /api/repos/clone", s.apiCloneRepo)
 	admin.HandleFunc("POST /api/uploads", s.apiUpload)
 	admin.HandleFunc("GET /api/agents", s.apiAgents)
 	admin.HandleFunc("POST /api/agents", s.apiRunAgent)
@@ -411,6 +418,73 @@ func (s *Server) apiSetWorkDir(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"workDir": wd})
+}
+
+// Repo is a GitHub repository to start a project from (fleetv1.Repo).
+type Repo struct {
+	FullName    string `json:"fullName"`
+	Description string `json:"description,omitempty"`
+	Private     bool   `json:"private,omitempty"`
+	Fork        bool   `json:"fork,omitempty"`
+	Archived    bool   `json:"archived,omitempty"`
+	PushedAtMs  int64  `json:"pushedAtMs,omitempty"`
+	URL         string `json:"url,omitempty"`
+	CanPush     bool   `json:"canPush,omitempty"`
+	// LocalPath is a folder on the machine that already is a clone of it.
+	LocalPath string `json:"localPath,omitempty"`
+}
+
+// apiRepos answers {"repos", "login", "workDir"}: the GitHub repositories
+// of the account the machine's gh is signed in as, or with ?q= a search.
+func (s *Server) apiRepos(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), reposTimeout)
+	defer cancel()
+	res, err := s.opts.Source.ListRepos(ctx, r.URL.Query().Get("q"))
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	repos := make([]Repo, 0, len(res.GetRepos()))
+	for _, x := range res.GetRepos() {
+		repos = append(repos, Repo{
+			FullName: x.GetFullName(), Description: x.GetDescription(), Private: x.GetPrivate(), Fork: x.GetFork(),
+			Archived: x.GetArchived(), PushedAtMs: x.GetPushedAtMs(), URL: x.GetUrl(), CanPush: x.GetCanPush(), LocalPath: x.GetLocalPath(),
+		})
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Repos   []Repo `json:"repos"`
+		Login   string `json:"login"`
+		WorkDir string `json:"workDir"`
+	}{repos, res.GetLogin(), res.GetWorkDir()})
+}
+
+// apiCloneRepo clones {"repo", "path", "trust", "adapters"} and answers
+// {"root", "existed"} with the root it is in.
+func (s *Server) apiCloneRepo(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Repo     string   `json:"repo"`
+		Path     string   `json:"path"`
+		Trust    bool     `json:"trust"`
+		Adapters []string `json:"adapters"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), cloneTimeout)
+	defer cancel()
+	res, err := s.opts.Source.CloneRepo(ctx, &fleetv1.CloneRepoRequest{Repo: req.Repo, Path: req.Path, Trust: req.Trust, Adapters: req.Adapters})
+	if err != nil {
+		s.writeSourceError(w, err)
+		return
+	}
+	status := http.StatusCreated
+	if res.GetExisted() {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, struct {
+		Root    Root `json:"root"`
+		Existed bool `json:"existed"`
+	}{rootsOf([]*fleetv1.Root{res.GetRoot()})[0], res.GetExisted()})
 }
 
 func (s *Server) apiListDir(w http.ResponseWriter, r *http.Request) {

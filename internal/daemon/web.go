@@ -54,6 +54,16 @@ func (s *webSource) SetWorkDir(path string) (string, error) {
 	return w, webError(err)
 }
 
+func (s *webSource) ListRepos(ctx context.Context, query string) (*fleetv1.ListReposResponse, error) {
+	r, err := s.d.listRepos(ctx, &fleetv1.ListReposRequest{Query: query})
+	return r, webError(err)
+}
+
+func (s *webSource) CloneRepo(ctx context.Context, req *fleetv1.CloneRepoRequest) (*fleetv1.CloneRepoResponse, error) {
+	r, err := s.d.cloneRepo(ctx, req)
+	return r, webError(err)
+}
+
 func (s *webSource) AddRoot(req *fleetv1.AddRootRequest) (*fleetv1.Root, error) {
 	r, err := s.d.addRoot(req)
 	return r, webError(err)

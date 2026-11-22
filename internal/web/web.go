@@ -91,6 +91,13 @@ type Source interface {
 	// SetWorkDir sets the work folder ("" for the home directory) and
 	// returns it. Errors meant for the user are *Error.
 	SetWorkDir(path string) (string, error)
+	// ListRepos lists GitHub repositories to start a project from: the
+	// account's own when query is "", else a search
+	// (fleetv1.ListReposRequest). Errors meant for the user are *Error.
+	ListRepos(ctx context.Context, query string) (*fleetv1.ListReposResponse, error)
+	// CloneRepo clones a GitHub repository and adds it as a root
+	// (fleetv1.CloneRepoRequest). Errors meant for the user are *Error.
+	CloneRepo(ctx context.Context, req *fleetv1.CloneRepoRequest) (*fleetv1.CloneRepoResponse, error)
 	// AddRoot adds a root. Errors meant for the user are *Error.
 	AddRoot(req *fleetv1.AddRootRequest) (*fleetv1.Root, error)
 	// UpdateRoot replaces a root by name. Errors meant for the user are *Error.

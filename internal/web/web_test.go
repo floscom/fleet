@@ -63,6 +63,12 @@ type fakeSource struct {
 	answers []ask.Answer
 	// gits are the git requests received (see git_test.go).
 	gits []*fleetv1.GitRequest
+	// repos is what ListRepos answers, reposErr its error; repoQueries
+	// and clones are the requests received (see repos_test.go).
+	repos       *fleetv1.ListReposResponse
+	reposErr    error
+	repoQueries []string
+	clones      []*fleetv1.CloneRepoRequest
 }
 
 type fakeInput struct {
@@ -132,6 +138,33 @@ func (s *fakeSource) WorkDir() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.workDir
+}
+
+func (s *fakeSource) ListRepos(_ context.Context, query string) (*fleetv1.ListReposResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.repoQueries = append(s.repoQueries, query)
+	if s.reposErr != nil {
+		return nil, s.reposErr
+	}
+	if s.repos == nil {
+		return &fleetv1.ListReposResponse{}, nil
+	}
+	return s.repos, nil
+}
+
+func (s *fakeSource) CloneRepo(_ context.Context, req *fleetv1.CloneRepoRequest) (*fleetv1.CloneRepoResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clones = append(s.clones, req)
+	if s.reposErr != nil {
+		return nil, s.reposErr
+	}
+	path := req.Path
+	if path == "" {
+		path = "/home/flo/" + req.Repo[strings.LastIndex(req.Repo, "/")+1:]
+	}
+	return &fleetv1.CloneRepoResponse{Root: &fleetv1.Root{Name: path[strings.LastIndex(path, "/")+1:], Path: path, Trust: req.Trust}}, nil
 }
 
 func (s *fakeSource) SetWorkDir(path string) (string, error) {

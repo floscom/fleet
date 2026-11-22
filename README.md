@@ -32,8 +32,10 @@ machines on the same LAN start, watch, stop and type into them.
   any repo.
 - **Docker sandboxing** — run agents in a container that only sees their
   own checkout, with your CLI logins shared in if you choose.
-- **GitHub integration** — list and merge the pull requests agents open,
-  from the CLI or the dashboard.
+- **GitHub integration** — start a project straight from one of your
+  GitHub repositories (cloned with the machine's `gh` into its work
+  folder), and list and merge the pull requests agents open, from the CLI
+  or the dashboard.
 - **Push notifications** — know when an agent needs input, finishes, or
   fails.
 - **Usage-limit auto-resume** — Claude Code and Codex sessions that hit a
@@ -179,6 +181,8 @@ address. Without it, commands talk to the local daemon.
 | `fleet update [--check] [--auto on\|off]` | Install the newest release now (the daemon restarts on it once no agent works), only check for one, or turn automatic updates on or off. With `-H`, a paired server's daemon; without a running daemon, this binary. |
 | `fleet roots` / `roots add <path> [--name N] [--adapters a,b] [--trust]` / `roots rm <name>` | Manage the folders agents may run in. `--trust`: see [Folder trust](#folder-trust). |
 | `fleet workdir [path]` / `workdir --home` | Show or set the machine's work folder, where the projects live: the dashboard's folder pickers open there and new folders go there. Without one it is the home folder. It is not a root. |
+| `fleet repos [query]` | The GitHub repositories the machine's `gh` sees (owned, collaborated on, through organizations), most recently pushed first, and where each is already cloned; with a query, a GitHub search. |
+| `fleet roots clone <owner/repo\|url> [path] [--trust] [--adapters a,b]` | Clone a GitHub repository with the machine's `gh` into its work folder (or `path`) and add it as a root, ready to start agents in. A folder that already is a clone of it is reused. |
 | `fleet browse [root[/path]] [-a]` | List folders inside a root, marking git repos and running agents. |
 | `fleet adapters` | Adapters, whether their CLI is installed, version and features, and the models and efforts `fleet run --model/--effort` take. |
 | `fleet run <adapter> [path] [flags] [-- agent args]` | Start an agent. `path` is `root:rel/path`, an absolute path, or (local only) a relative path; default `.`. Flags: `--name`, `--pinned`, `--worktree`, `--branch`, `--prompt`, `--model`, `--effort`, `--attach`, `--clone <repo>` (instead of a path), `--docker` / `--sandbox docker\|none`. |
@@ -618,8 +622,15 @@ folder/machine's **+**) opens the starter: machine (if more than one),
 folder, checkout mode, agent (Claude Code, Codex, Gemini CLI or shell) with its model
 and effort, then **Start**; *Options* folds sandbox, post-start action,
 name and branch. *New folder* in the folder picker creates and trusts a
-folder anywhere on the machine. Ctrl/⌘+Enter starts; Ctrl/⌘+Shift+Enter
-starts and opens the terminal too.
+folder anywhere on the machine. *Clone from GitHub* lists the
+repositories the machine's GitHub CLI (`gh`) is signed in to see, newest
+push first, with the ones already cloned marked; type to filter them,
+search all of GitHub, or paste `owner/name` or a link. Picking one clones
+it into the machine's work folder, adds it as a root (trusted when you can
+push to it, unless unticked) and chooses it; one already cloned is chosen
+as it is. `gh` must be installed and signed in (`gh auth login`) on that
+machine. Ctrl/⌘+Enter starts; Ctrl/⌘+Shift+Enter starts and opens the
+terminal too.
 
 Once a session is open:
 

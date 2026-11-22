@@ -177,3 +177,22 @@ test('a folder starts in the most specific root around it, however it was found'
   assert.equal(sent.root, 'two');
   assert.equal(sent.path, 'sub');
 });
+
+test('a GitHub repository is read from its name or a link to it', () => {
+  const src = app.slice(app.indexOf('  function ghRepoName('), app.indexOf('  // repoRows is'));
+  const ctx = vm.createContext({});
+  vm.runInContext(src + '\nthis.ghRepoName = ghRepoName;', ctx);
+  const cases = {
+    'octo/app': 'octo/app',
+    ' octo/app.git ': 'octo/app',
+    'https://github.com/octo/app': 'octo/app',
+    'https://github.com/Octo/my.app/tree/main/src': 'Octo/my.app',
+    'github.com/octo/app/pull/7': 'octo/app',
+    'git@github.com:octo/app.git': 'octo/app',
+    'ssh://git@github.com/octo/app.git': 'octo/app',
+    'https://github.com/octo/app?tab=readme': 'octo/app',
+    '': '', app: '', 'octo/app/x': '', '-o/app': '', 'octo/..': '',
+    'https://gitlab.com/octo/app': '', 'https://github.com/octo': '', '~/src/app': '',
+  };
+  for (const [input, want] of Object.entries(cases)) assert.equal(ctx.ghRepoName(input), want, input);
+});

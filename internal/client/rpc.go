@@ -59,6 +59,20 @@ func (c *Client) SetWorkDir(ctx context.Context, path string) (string, error) {
 	return r.GetWorkDir(), err
 }
 
+// ListRepos lists GitHub repositories the daemon host's gh sees: the
+// account's own for an empty query, else a search (fleetv1.ListReposRequest).
+func (c *Client) ListRepos(ctx context.Context, query string) (*fleetv1.ListReposResponse, error) {
+	return unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_ListRepos{ListRepos: &fleetv1.ListReposRequest{Query: query}}},
+		(*fleetv1.ServerMessage).GetListRepos)
+}
+
+// CloneRepo clones a GitHub repository on the daemon host and adds it as a
+// root (fleetv1.CloneRepoRequest).
+func (c *Client) CloneRepo(ctx context.Context, in *fleetv1.CloneRepoRequest) (*fleetv1.CloneRepoResponse, error) {
+	return unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_CloneRepo{CloneRepo: in}},
+		(*fleetv1.ServerMessage).GetCloneRepo)
+}
+
 // AddRoot adds a root. The path must be absolute on the daemon host.
 func (c *Client) AddRoot(ctx context.Context, in *fleetv1.AddRootRequest) (*fleetv1.Root, error) {
 	r, err := unary(ctx, c, &fleetv1.ClientMessage{Msg: &fleetv1.ClientMessage_AddRoot{AddRoot: in}},
