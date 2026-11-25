@@ -60,22 +60,38 @@ func TestAgentRuns(t *testing.T) {
 		t.Fatalf("after a2 was stopped: %+v", r)
 	}
 
+	// Later, alone: a foreground agent that handed its report back, the
+	// way 2.1.331 ends one (no end_turn after the handback).
+	handback := `[{"type":"tool_use","id":"toolu_h","name":"SubagentHandback","input":{"message":"Report: all three pages read."}}]`
+	s.write(filepath.Join(dir, "agent-a4.meta.json"), `{"agentType":"web-fetch","description":"Fetch the imprint","toolUseId":"toolu_4","requestShape":"foreground","finished":true}`)
+	s.append(filepath.Join(dir, "agent-a4.jsonl"), subLine("10:30", "user", `{"role":"user","content":"Fetch"}`),
+		subAssistant("10:31", `"tool_use"`, handback),
+		subLine("10:31", "user", `{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_h","content":"delivered"}]}`))
+	runs = c.Workflows(s.transcript)
+	if len(runs) != 2 {
+		t.Fatalf("runs with the handback: %+v", runs)
+	}
+	if h := runs[1]; h.ID != "agents-a4" || h.Status != workflow.Completed || h.EndedMs == 0 ||
+		h.Agents[0].Status != workflow.Done || h.Agents[0].Tool != "" || h.Agents[0].Activity != "Report: all three pages read." {
+		t.Fatalf("handback run: %+v", h)
+	}
+
 	// Later, alone: a teammate (no call id), idle after its turn.
 	s.write(filepath.Join(dir, "agent-aqa-1.meta.json"), `{"agentType":"qa","name":"qa","description":"QA pass","taskKind":"in_process_teammate"}`)
 	s.append(filepath.Join(dir, "agent-aqa-1.jsonl"), subLine("11:00", "user", `{"role":"user","content":"Check"}`),
 		subAssistant("11:02", "null", `[{"type":"thinking","thinking":""}]`),
 		subAssistant("11:02", `"end_turn"`, done))
 	runs = c.Workflows(s.transcript)
-	if len(runs) != 2 {
+	if len(runs) != 3 {
 		t.Fatalf("runs with the teammate: %+v", runs)
 	}
-	if q := runs[1]; q.ID != "agents-aqa-1" || q.Name != "QA pass" || q.Status != workflow.Completed || q.EndedMs == 0 || q.Agents[0].Call != "" {
+	if q := runs[2]; q.ID != "agents-aqa-1" || q.Name != "QA pass" || q.Status != workflow.Completed || q.EndedMs == 0 || q.Agents[0].Call != "" {
 		t.Fatalf("teammate run: %+v", q)
 	}
 	// A teammate sent a message works again: its run with it.
 	s.append(filepath.Join(dir, "agent-aqa-1.jsonl"), subLine("11:30", "user", `{"role":"user","content":"Again"}`),
 		subAssistant("11:31", `"tool_use"`, bash))
-	if q := c.Workflows(s.transcript)[1]; q.Status != workflow.Running || q.Agents[0].Status != workflow.Running {
+	if q := c.Workflows(s.transcript)[2]; q.Status != workflow.Running || q.Agents[0].Status != workflow.Running {
 		t.Fatalf("woken teammate: %+v", q)
 	}
 }

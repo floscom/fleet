@@ -13,7 +13,8 @@ package claude
 //	    ("taskKind":"in_process_teammate") has no toolUseId
 //
 // Nothing records that one finished: it did once its latest message ended
-// the turn. A teammate then idles until it is sent a message, and starts
+// the turn, or called SubagentHandback (2.1.331 ends a subagent there,
+// with no end_turn after; its meta.json then has "finished":true). A teammate then idles until it is sent a message, and starts
 // over. A background agent's task (its id the agent's) notifies the session
 // each time it stops, also when it failed or was stopped.
 //

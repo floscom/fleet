@@ -652,7 +652,8 @@ type agentScan struct {
 	toolUses        int
 	tool, activity  string
 	lastCall        string // id of the latest tool call counted
-	// ended: its latest message ended its turn.
+	// ended: its latest message ended its turn, or handed its report
+	// back (SubagentHandback).
 	ended bool
 }
 
@@ -719,9 +720,17 @@ func (s *agentScan) add(line []byte) {
 			}
 			s.lastCall = b.ID
 			s.toolUses++
-			if b.Name == "StructuredOutput" {
+			switch b.Name {
+			case "StructuredOutput":
 				// How an agent asked for a schema returns: its result.
 				s.tool, s.activity = "", structuredSummary(b.Input)
+				continue
+			case "SubagentHandback":
+				// How a subagent hands its report to its caller: Claude
+				// Code 2.1.331 writes nothing after it (no end_turn),
+				// 2.1.3xx before wrote an end_turn too.
+				s.tool, s.activity = "", structuredSummary(b.Input)
+				s.ended = true
 				continue
 			}
 			s.tool, s.activity = b.Name, toolUse(b.ID, b.Name, b.Input).Text
